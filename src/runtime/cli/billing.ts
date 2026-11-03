@@ -1,5 +1,6 @@
 import {
 	DEFAULT_CHECKOUT_CREDIT_UNITS,
+	DEFAULT_LIGHTNING_DEPOSIT_CREDIT_UNITS,
 	DEFAULT_LOW_CREDIT_THRESHOLD,
 	RuntimeBillingRemediation,
 	buildRuntimeBillingRemediationForLowCredit,
@@ -177,7 +178,11 @@ export const billingFromCli = async (argv: string[]): Promise<string> => {
 	}
 
 	if (subcommand === "deposit" || subcommand === "invoice-create") {
-		const amountSats = parsePositiveIntegerFlag(flags, ["amount-sats", "amountSats", "credits"], DEFAULT_CHECKOUT_CREDIT_UNITS);
+		const amountSats = parsePositiveIntegerFlag(
+			flags,
+			["amount-sats", "amountSats", "credits"],
+			DEFAULT_LIGHTNING_DEPOSIT_CREDIT_UNITS,
+		);
 		const invoice = await daemon.createBillingDepositInvoice(
 			{
 				amount_sats: amountSats,

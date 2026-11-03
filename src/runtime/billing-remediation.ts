@@ -1,6 +1,7 @@
 import { HostedOnlyBotsRequestError } from "./hosted-client";
 
-export const DEFAULT_CHECKOUT_CREDIT_UNITS = 1000;
+export const DEFAULT_CHECKOUT_CREDIT_UNITS = 5000;
+export const DEFAULT_LIGHTNING_DEPOSIT_CREDIT_UNITS = 1000;
 export const DEFAULT_LOW_CREDIT_THRESHOLD = 100;
 
 type ErrorLike = {
