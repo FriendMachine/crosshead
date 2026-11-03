@@ -152,4 +152,34 @@ describe("hosted client security boundaries", () => {
     expect(await client.prepareContextPack({})).toEqual({ packId: "pack", contextText: "", fragments: [] });
     await expect(client.listWarmMemory()).rejects.toThrow("size limit");
   });
+
+  it("accepts a newly created organization membership returned with HTTP 201", async () => {
+    const signer = identity();
+    let receivedBody: Record<string, unknown> = {};
+    const base = await listen(async (request, response) => {
+      expect(request.method).toBe("POST");
+      expect(request.url).toBe("/v1/organizations/join");
+      expect(request.headers.authorization).toBe("Bearer session-test");
+      receivedBody = await readJson(request);
+      return json(response, 201, {
+		membership: {
+		  id: "membership-test",
+		  organization_id: "organization-test",
+		  role: "observer",
+		  status: "active",
+		},
+      });
+    });
+    const client = new HostedOnlyBotsClient({
+      apiBase: base,
+      npub: signer.npub,
+      nsec: signer.nsec,
+      session: { sessionToken: "session-test", expiresAt: new Date(Date.now() + 60_000).toISOString(), scopes: [] },
+    });
+
+    await expect(client.joinOrganization({ code: "obj_test", agent_id: "agent-test" })).resolves.toMatchObject({
+      membership: { id: "membership-test", status: "active" },
+    });
+    expect(receivedBody).toEqual({ code: "obj_test", agent_id: "agent-test" });
+  });
 });
