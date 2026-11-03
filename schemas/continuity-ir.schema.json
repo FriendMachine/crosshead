@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/continuity-ir.schema.json",
+  "title": "OnlyBots Continuity IR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "irVersion",
+    "identity",
+    "task",
+    "reasoningState",
+    "operationalContext",
+    "memoryReferences",
+    "policy",
+    "delegation",
+    "engineAttachment",
+    "economics",
+    "provenance"
+  ],
+  "properties": {
+    "irVersion": {
+      "type": "string",
+      "const": "continuity_ir_v1"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId", "npub", "lineageRoot"],
+      "properties": {
+        "agentId": { "type": ["string", "null"] },
+        "npub": { "type": ["string", "null"] },
+        "lineageRoot": { "type": ["string", "null"] }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objective", "status", "openLoops", "priority"],
+      "properties": {
+        "objective": { "type": "string", "minLength": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "blocked", "completed"]
+        },
+        "openLoops": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "priority": { "type": ["number", "null"] }
+      }
+    },
+    "reasoningState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currentTheory",
+        "openQuestions",
+        "rejectedPaths",
+        "unresolvedRisks",
+        "portabilityNotes",
+        "nextAction"
+      ],
+      "properties": {
+        "currentTheory": { "type": ["string", "null"] },
+        "openQuestions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "rejectedPaths": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "unresolvedRisks": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "portabilityNotes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "nextAction": { "type": ["string", "null"] }
+      }
+    },
+    "operationalContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspaceId",
+        "workspaceLabel",
+        "sessionId",
+        "turnId",
+        "currentPrompt",
+        "recentMessages",
+        "toolResults",
+        "activeFiles"
+      ],
+      "properties": {
+        "workspaceId": { "type": "string", "minLength": 1 },
+        "workspaceLabel": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "turnId": { "type": ["string", "null"] },
+        "currentPrompt": { "type": ["string", "null"] },
+        "recentMessages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "content"],
+            "properties": {
+              "role": {
+                "type": "string",
+                "enum": ["user", "assistant", "system", "tool"]
+              },
+              "content": { "type": "string" },
+              "timestamp": { "type": "string" },
+              "toolName": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "toolResults": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["toolName", "summary", "status"],
+            "properties": {
+              "toolName": { "type": "string" },
+              "summary": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["ok", "error", "unknown"]
+              }
+            }
+          }
+        },
+        "activeFiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "kind"],
+            "properties": {
+              "path": { "type": "string" },
+              "kind": {
+                "type": "string",
+                "enum": ["repo-relative", "external-reference"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "memoryReferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hotMemory",
+        "warmIds",
+        "coldChunkIds",
+        "projectModelIds",
+        "userModelIds",
+        "selfModelIds"
+      ],
+      "properties": {
+        "hotMemory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "summary"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["embedded", "reference", "omitted"]
+            },
+            "summary": { "type": ["string", "null"] }
+          }
+        },
+        "warmIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "coldChunkIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "projectModelIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "userModelIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "selfModelIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policyRef", "continuityPolicy", "enforcementHints", "memoryScope"],
+      "properties": {
+        "policyRef": { "type": ["string", "null"] },
+        "continuityPolicy": { "type": ["string", "null"] },
+        "enforcementHints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["surface", "level"],
+            "properties": {
+              "surface": { "type": "string" },
+              "level": {
+                "type": "string",
+                "enum": ["runtime_enforced", "best_effort", "advisory"]
+              },
+              "notes": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "memoryScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowedWorkspaces", "allowedTrustZones"],
+          "properties": {
+            "allowedWorkspaces": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "allowedTrustZones": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "delegation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["whyTransfer", "requestedCapabilities", "recommendedTarget"],
+      "properties": {
+        "whyTransfer": { "type": ["string", "null"] },
+        "requestedCapabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "recommendedTarget": {
+          "type": ["string", "null"],
+          "enum": ["codex", "claude-code", null]
+        }
+      }
+    },
+    "engineAttachment": {
+      "allOf": [
+        {
+          "$ref": "https://onlybots.ai/schemas/engine-attachment.schema.json#/$defs/engineAttachment"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "runtimeHost": {
+              "type": "string",
+              "enum": ["codex", "claude-code"]
+            }
+          }
+        }
+      ]
+    },
+    "economics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["budgetRemainingSats", "costSoFarSats", "budgetHints"],
+      "properties": {
+        "budgetRemainingSats": { "type": ["number", "null"] },
+        "costSoFarSats": { "type": ["number", "null"] },
+        "budgetHints": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRuntime", "createdAt", "captureKind", "workspaceRootRedacted"],
+      "properties": {
+        "sourceRuntime": {
+          "type": "string",
+          "enum": ["codex", "claude-code"]
+        },
+        "createdAt": { "type": "string" },
+        "captureKind": {
+          "type": "string",
+          "enum": ["session", "turn"]
+        },
+        "workspaceRootRedacted": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,366 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/typed-inbox-event.schema.json",
+  "title": "OnlyBots Typed Inbox Event",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/assignmentEvent" },
+    { "$ref": "#/$defs/claimEvent" },
+    { "$ref": "#/$defs/ackEvent" },
+    { "$ref": "#/$defs/rejectEvent" },
+    { "$ref": "#/$defs/completionEvent" },
+    { "$ref": "#/$defs/failureEvent" },
+    { "$ref": "#/$defs/handoffCreatedEvent" },
+    { "$ref": "#/$defs/handoffCompletedEvent" },
+    { "$ref": "#/$defs/operatorGovernanceEvent" }
+  ],
+  "$defs": {
+    "npub": {
+      "type": "string",
+      "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+    },
+    "nullableString": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["npub", "agentId", "runtimeHost", "role"],
+      "properties": {
+        "npub": { "$ref": "#/$defs/npub" },
+        "agentId": { "$ref": "#/$defs/nullableString" },
+        "runtimeHost": { "$ref": "#/$defs/nullableString" },
+        "role": {
+          "enum": ["originator", "owner", "assignee", "reviewer", "operator", "observer", null]
+        }
+      }
+    },
+    "eventBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "eventId",
+        "eventType",
+        "contextId",
+        "summary",
+        "priority",
+        "createdAt",
+        "actor",
+        "taskRef",
+        "artifactRefs",
+        "handoffRefs",
+        "outcomeRefs"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "typed_inbox_event_v1" },
+        "eventId": {
+          "type": "string",
+          "pattern": "^inbox_evt_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "eventType": {
+          "enum": [
+            "assignment",
+            "claim",
+            "ack",
+            "reject",
+            "completion",
+            "failure",
+            "handoff_created",
+            "handoff_completed",
+            "operator_governance"
+          ]
+        },
+        "contextId": {
+          "type": "string",
+          "pattern": "^ctx_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "enum": ["low", "medium", "high", "urgent"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "actor": {
+          "$ref": "#/$defs/actor"
+        },
+        "taskRef": { "$ref": "#/$defs/nullableString" },
+        "artifactRefs": { "$ref": "#/$defs/stringArray" },
+        "handoffRefs": { "$ref": "#/$defs/stringArray" },
+        "outcomeRefs": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "assignmentEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "assignment" },
+            "assignment": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["assigneeNpub", "dueAt", "claimExpiresAt"],
+              "properties": {
+                "assigneeNpub": { "$ref": "#/$defs/npub" },
+                "dueAt": {
+                  "type": ["string", "null"],
+                  "format": "date-time"
+                },
+                "claimExpiresAt": {
+                  "type": ["string", "null"],
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "required": ["assignment"]
+        }
+      ]
+    },
+    "claimEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "claim" },
+            "claim": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["claimedByNpub", "state", "note"],
+              "properties": {
+                "claimedByNpub": { "$ref": "#/$defs/npub" },
+                "state": { "enum": ["accepted", "tentative"] },
+                "note": { "$ref": "#/$defs/nullableString" }
+              }
+            }
+          },
+          "required": ["claim"]
+        }
+      ]
+    },
+    "ackEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "ack" },
+            "ack": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["acknowledgedEventId", "note"],
+              "properties": {
+                "acknowledgedEventId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "note": { "$ref": "#/$defs/nullableString" }
+              }
+            }
+          },
+          "required": ["ack"]
+        }
+      ]
+    },
+    "rejectEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "reject" },
+            "reject": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rejectedEventId", "reason"],
+              "properties": {
+                "rejectedEventId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "required": ["reject"]
+        }
+      ]
+    },
+    "completionEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "completion" },
+            "completion": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["resultSummary", "deliveredArtifactRefs"],
+              "properties": {
+                "resultSummary": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "deliveredArtifactRefs": { "$ref": "#/$defs/stringArray" }
+              }
+            }
+          },
+          "required": ["completion"]
+        }
+      ]
+    },
+    "failureEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "failure" },
+            "failure": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["failureCode", "retryable", "reason"],
+              "properties": {
+                "failureCode": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": { "type": "boolean" },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "required": ["failure"]
+        }
+      ]
+    },
+    "handoffCreatedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "handoff_created" },
+            "handoffCreated": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["handoffId", "targetRuntimeHost"],
+              "properties": {
+                "handoffId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "targetRuntimeHost": { "$ref": "#/$defs/nullableString" }
+              }
+            }
+          },
+          "required": ["handoffCreated"]
+        }
+      ]
+    },
+    "handoffCompletedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "handoff_completed" },
+            "handoffCompleted": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["handoffId", "completionState", "outcomeRef"],
+              "properties": {
+                "handoffId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "completionState": {
+                  "enum": ["accepted", "completed", "corrected"]
+                },
+                "outcomeRef": { "$ref": "#/$defs/nullableString" }
+              }
+            }
+          },
+          "required": ["handoffCompleted"]
+        }
+      ]
+    },
+    "operatorGovernanceEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "operator_governance" },
+            "operatorGovernance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action", "note", "affectedParticipantNpub"],
+              "properties": {
+                "action": {
+                  "enum": [
+                    "pause_context",
+                    "budget_ceiling_change",
+                    "tool_restriction",
+                    "memory_scope_change",
+                    "participant_removal"
+                  ]
+                },
+                "note": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "affectedParticipantNpub": {
+                  "anyOf": [
+                    { "$ref": "#/$defs/npub" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          },
+          "required": ["operatorGovernance"]
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "typed_inbox_event_v1",
+      "eventId": "inbox_evt_assignment_01",
+      "eventType": "assignment",
+      "contextId": "ctx_auth_refactor",
+      "summary": "Take ownership of the auth refactor task and report back with a typed outcome.",
+      "priority": "high",
+      "createdAt": "2026-04-19T00:02:00Z",
+      "actor": {
+        "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "agentId": "agent_default",
+        "runtimeHost": "codex",
+        "role": "originator"
+      },
+      "taskRef": "task-master:95",
+      "artifactRefs": ["artifact:spec-draft-1"],
+      "handoffRefs": ["handoff_123"],
+      "outcomeRefs": [],
+      "assignment": {
+        "assigneeNpub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "dueAt": "2026-04-19T01:00:00Z",
+        "claimExpiresAt": "2026-04-19T00:20:00Z"
+      }
+    }
+  ]
+}

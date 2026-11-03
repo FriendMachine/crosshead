@@ -1,0 +1,627 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/agent-passport.schema.json",
+  "title": "OnlyBots Agent Passport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "passportVersion",
+    "passportId",
+    "agentRef",
+    "identity",
+    "persona",
+    "operatorPreferences",
+    "continuityPolicyRef",
+    "memoryScope",
+    "capabilities",
+    "handoffPreferences",
+    "enginePortability",
+    "trustZones",
+    "enforcement",
+    "provenance",
+    "signature",
+    "notes"
+  ],
+  "properties": {
+    "passportVersion": {
+      "const": "agent_passport_v1"
+    },
+    "passportId": {
+      "type": "string",
+      "pattern": "^passport_[a-z0-9][a-z0-9_-]{2,127}$"
+    },
+    "agentRef": {
+      "$ref": "#/$defs/persistentAgentReference"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["displayName"],
+      "properties": {
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "style"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "style": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "operatorPreferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collaborationStyle", "reviewExpectations", "preferredResponseLength"],
+      "properties": {
+        "collaborationStyle": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reviewExpectations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "preferredResponseLength": {
+          "enum": ["brief", "balanced", "detailed"]
+        }
+      }
+    },
+    "continuityPolicyRef": {
+      "type": ["string", "null"]
+    },
+    "memoryScope": {
+      "$ref": "#/$defs/passportMemoryScope"
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared", "strengths", "limitations"],
+      "properties": {
+        "declared": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "strengths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "handoffPreferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preferredTargets", "requiresCapabilities", "escalationHints"],
+      "properties": {
+        "preferredTargets": {
+          "type": "array",
+          "items": {
+            "enum": ["codex", "claude-code", "pi"]
+          }
+        },
+        "requiresCapabilities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "escalationHints": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "enginePortability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityIsNotEngineBound", "currentEngineAttachmentRef", "portabilityNotes"],
+      "properties": {
+        "identityIsNotEngineBound": {
+          "const": true
+        },
+        "currentEngineAttachmentRef": {
+          "type": ["string", "null"]
+        },
+        "portabilityNotes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "trustZones": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/passportTrustZone"
+      }
+    },
+    "enforcement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceOfTruth", "compilationTargets", "runtimeAuthorityNotes"],
+      "properties": {
+        "sourceOfTruth": {
+          "const": "onlybots_runtime"
+        },
+        "compilationTargets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/passportCompilationTarget"
+          }
+        },
+        "runtimeAuthorityNotes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["createdAt", "updatedAt", "compilerVersion", "sourcePassportHash", "requiredCompiledFields"],
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "compilerVersion": {
+          "type": ["string", "null"]
+        },
+        "sourcePassportHash": {
+          "type": ["string", "null"]
+        },
+        "requiredCompiledFields": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "passport_version",
+              "generated_at",
+              "compiler_version",
+              "source_passport_hash",
+              "trust_zone_id",
+              "target_host"
+            ]
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "signedBy", "signedAt"],
+      "properties": {
+        "scheme": {
+          "const": "nostr_schnorr"
+        },
+        "signedBy": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        },
+        "signedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "persistentAgentReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId", "npub", "lineageRoot"],
+      "properties": {
+        "agentId": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "npub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        },
+        "lineageRoot": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        }
+      }
+    },
+    "passportMemoryScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowedWorkspaces", "allowedTrustZones", "portableMemoryTiers", "allowCrossWorkspaceContext"],
+      "properties": {
+        "allowedWorkspaces": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "allowedTrustZones": {
+          "type": "array",
+          "items": {
+            "enum": ["personal", "shared", "public", "client"]
+          }
+        },
+        "portableMemoryTiers": {
+          "type": "array",
+          "items": {
+            "enum": ["hot", "warm", "cold", "self_model", "project_model", "user_model"]
+          }
+        },
+        "allowCrossWorkspaceContext": {
+          "type": "boolean"
+        }
+      }
+    },
+    "passportTrustZone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trustZoneId",
+        "displayName",
+        "summary",
+        "workspacePolicy",
+        "memoryScope",
+        "auditExpectations",
+        "outputAdjustments"
+      ],
+      "properties": {
+        "trustZoneId": {
+          "enum": ["personal", "shared", "public", "client"]
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspacePolicy": {
+          "enum": ["operator_private", "team_shared", "public_visible", "client_restricted"]
+        },
+        "memoryScope": {
+          "$ref": "#/$defs/passportMemoryScope"
+        },
+        "auditExpectations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "outputAdjustments": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "passportCompiledArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "surface", "pathHint", "honesty", "sourceOfTruth", "notes"],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "pattern": "^artifact_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "surface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pathHint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "honesty": {
+          "enum": ["runtime_enforced", "best_effort", "advisory"]
+        },
+        "sourceOfTruth": {
+          "enum": ["onlybots_runtime", "managed_host_config", "prompt_file", "operator_process"]
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "passportTargetTrustZonePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trustZoneId", "compiledArtifacts", "notes"],
+      "properties": {
+        "trustZoneId": {
+          "enum": ["personal", "shared", "public", "client"]
+        },
+        "compiledArtifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/passportCompiledArtifact"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "passportCompilationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetHost", "defaultTrustZone", "trustZonePolicies", "hostLimitations"],
+      "properties": {
+        "targetHost": {
+          "enum": ["codex", "claude-code", "pi"]
+        },
+        "defaultTrustZone": {
+          "enum": ["personal", "shared", "public", "client"]
+        },
+        "trustZonePolicies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/passportTargetTrustZonePolicy"
+          }
+        },
+        "hostLimitations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "passportVersion": "agent_passport_v1",
+      "passportId": "passport_onlybots_default",
+      "agentRef": {
+        "agentId": "agent_onlybots_default",
+        "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+        "lineageRoot": "agent_onlybots_default"
+      },
+      "identity": {
+        "displayName": "OnlyBots Default Agent"
+      },
+      "persona": {
+        "summary": "Portable OnlyBots agent passport for runtime-managed continuity and honest host compilation.",
+        "style": ["concise", "evidence-first", "operator-readable"]
+      },
+      "operatorPreferences": {
+        "collaborationStyle": ["direct", "inspectable", "no hidden control claims"],
+        "reviewExpectations": ["surface degraded controls explicitly", "prefer managed boundaries over silent overwrite"],
+        "preferredResponseLength": "brief"
+      },
+      "continuityPolicyRef": "continuity_policy_v1:sha256:policy_default",
+      "memoryScope": {
+        "allowedWorkspaces": ["repo:onlybots-erd"],
+        "allowedTrustZones": ["personal", "client"],
+        "portableMemoryTiers": ["hot", "warm", "cold", "self_model", "project_model"],
+        "allowCrossWorkspaceContext": false
+      },
+      "capabilities": {
+        "declared": ["coding", "handoffs", "memory_sync", "runtime_supervision"],
+        "strengths": ["cross-runtime continuity", "operator-facing explainability", "signed handoff provenance"],
+        "limitations": ["host-owned tool approval", "host-owned self-modification", "prompt-only enforcement"]
+      },
+      "handoffPreferences": {
+        "preferredTargets": ["codex", "claude-code"],
+        "requiresCapabilities": ["repo_execution", "tool_use"],
+        "escalationHints": [
+          "Prefer Codex or Claude Code when the task needs repository execution.",
+          "Keep portability notes explicit when the next host cannot enforce the same control surface."
+        ]
+      },
+      "enginePortability": {
+        "identityIsNotEngineBound": true,
+        "currentEngineAttachmentRef": "engine_attach_codex_gpt5_primary",
+        "portabilityNotes": [
+          "The passport is attached to the persistent agent, not whichever model or host is active right now."
+        ]
+      },
+      "trustZones": [
+        {
+          "trustZoneId": "personal",
+          "displayName": "Personal",
+          "summary": "Operator-owned workstation or repo where the agent can retain the richest continuity context.",
+          "workspacePolicy": "operator_private",
+          "memoryScope": {
+            "allowedWorkspaces": ["repo:onlybots-erd"],
+            "allowedTrustZones": ["personal"],
+            "portableMemoryTiers": ["hot", "warm", "cold", "self_model", "project_model", "user_model"],
+            "allowCrossWorkspaceContext": false
+          },
+          "auditExpectations": ["Record provenance for compiled outputs and runtime-managed mutations."],
+          "outputAdjustments": ["Allow richer context references while keeping prompt files explicitly advisory."]
+        },
+        {
+          "trustZoneId": "client",
+          "displayName": "Client",
+          "summary": "Client-specific environment that requires narrow workspace scope, explicit review posture, and portable auditability.",
+          "workspacePolicy": "client_restricted",
+          "memoryScope": {
+            "allowedWorkspaces": ["repo:onlybots-erd"],
+            "allowedTrustZones": ["client"],
+            "portableMemoryTiers": ["hot", "warm", "cold", "self_model", "project_model", "user_model"],
+            "allowCrossWorkspaceContext": false
+          },
+          "auditExpectations": ["Keep trust-zone-specific outputs attributable and review-sensitive."],
+          "outputAdjustments": ["Bias toward explicit review expectations and tighter memory portability notes."]
+        }
+      ],
+      "enforcement": {
+        "sourceOfTruth": "onlybots_runtime",
+        "compilationTargets": [
+          {
+            "targetHost": "codex",
+            "defaultTrustZone": "personal",
+            "trustZonePolicies": [
+              {
+                "trustZoneId": "personal",
+                "compiledArtifacts": [
+                  {
+                    "artifactId": "artifact_codex_wrapper",
+                    "surface": "managed_wrapper",
+                    "pathHint": "~/.onlybots/bin/onlybots-codex",
+                    "honesty": "runtime_enforced",
+                    "sourceOfTruth": "onlybots_runtime",
+                    "notes": ["Runtime-managed lifecycle hooks and memory automation flow through the OnlyBots wrapper."]
+                  },
+                  {
+                    "artifactId": "artifact_codex_agents",
+                    "surface": "AGENTS.md",
+                    "pathHint": "$WORKSPACE/AGENTS.md",
+                    "honesty": "advisory",
+                    "sourceOfTruth": "prompt_file",
+                    "notes": ["Compiled prompt content can describe policy, but it cannot enforce host behavior on its own."]
+                  }
+                ],
+                "notes": ["Allow the richest runtime-managed context while keeping host-owned behavior explicitly labeled."]
+              },
+              {
+                "trustZoneId": "client",
+                "compiledArtifacts": [
+                  {
+                    "artifactId": "artifact_codex_wrapper",
+                    "surface": "managed_wrapper",
+                    "pathHint": "~/.onlybots/bin/onlybots-codex",
+                    "honesty": "runtime_enforced",
+                    "sourceOfTruth": "onlybots_runtime",
+                    "notes": ["Runtime-managed lifecycle hooks and memory automation flow through the OnlyBots wrapper."]
+                  },
+                  {
+                    "artifactId": "artifact_codex_agents",
+                    "surface": "AGENTS.md",
+                    "pathHint": "$WORKSPACE/AGENTS.md",
+                    "honesty": "advisory",
+                    "sourceOfTruth": "prompt_file",
+                    "notes": ["Compiled prompt content can describe policy, but it cannot enforce host behavior on its own."]
+                  }
+                ],
+                "notes": ["Bias toward conservative memory scope, explicit review posture, and client-visible audit trails."]
+              }
+            ],
+            "hostLimitations": [
+              "codex prompt files cannot enforce tool approval or self-modification on their own.",
+              "codex trust-zone behavior is only as strong as the runtime-managed attachment path behind it."
+            ]
+          },
+          {
+            "targetHost": "claude-code",
+            "defaultTrustZone": "personal",
+            "trustZonePolicies": [
+              {
+                "trustZoneId": "personal",
+                "compiledArtifacts": [
+                  {
+                    "artifactId": "artifact_claude_wrapper",
+                    "surface": "managed_wrapper",
+                    "pathHint": "~/.onlybots/bin/onlybots-claude-code",
+                    "honesty": "runtime_enforced",
+                    "sourceOfTruth": "onlybots_runtime",
+                    "notes": ["OnlyBots manages the runtime-attached lifecycle path when the wrapper is used."]
+                  },
+                  {
+                    "artifactId": "artifact_claude_settings",
+                    "surface": ".claude/settings.json",
+                    "pathHint": "$WORKSPACE/.claude/settings.json",
+                    "honesty": "best_effort",
+                    "sourceOfTruth": "managed_host_config",
+                    "notes": ["Managed host config helps wire OnlyBots in, but Claude Code still owns actual tool execution."]
+                  },
+                  {
+                    "artifactId": "artifact_claude_md",
+                    "surface": "CLAUDE.md",
+                    "pathHint": "$WORKSPACE/CLAUDE.md",
+                    "honesty": "advisory",
+                    "sourceOfTruth": "prompt_file",
+                    "notes": ["Prompt guidance remains descriptive unless paired with runtime-owned controls."]
+                  }
+                ],
+                "notes": ["Allow the richest runtime-managed context while keeping host-owned behavior explicitly labeled."]
+              },
+              {
+                "trustZoneId": "client",
+                "compiledArtifacts": [
+                  {
+                    "artifactId": "artifact_claude_wrapper",
+                    "surface": "managed_wrapper",
+                    "pathHint": "~/.onlybots/bin/onlybots-claude-code",
+                    "honesty": "runtime_enforced",
+                    "sourceOfTruth": "onlybots_runtime",
+                    "notes": ["OnlyBots manages the runtime-attached lifecycle path when the wrapper is used."]
+                  },
+                  {
+                    "artifactId": "artifact_claude_settings",
+                    "surface": ".claude/settings.json",
+                    "pathHint": "$WORKSPACE/.claude/settings.json",
+                    "honesty": "best_effort",
+                    "sourceOfTruth": "managed_host_config",
+                    "notes": ["Managed host config helps wire OnlyBots in, but Claude Code still owns actual tool execution."]
+                  },
+                  {
+                    "artifactId": "artifact_claude_md",
+                    "surface": "CLAUDE.md",
+                    "pathHint": "$WORKSPACE/CLAUDE.md",
+                    "honesty": "advisory",
+                    "sourceOfTruth": "prompt_file",
+                    "notes": ["Prompt guidance remains descriptive unless paired with runtime-owned controls."]
+                  }
+                ],
+                "notes": ["Bias toward conservative memory scope, explicit review posture, and client-visible audit trails."]
+              }
+            ],
+            "hostLimitations": [
+              "claude-code prompt files cannot enforce tool approval or self-modification on their own.",
+              "claude-code trust-zone behavior is only as strong as the runtime-managed attachment path behind it."
+            ]
+          }
+        ],
+        "runtimeAuthorityNotes": [
+          "Only the shared OnlyBots runtime can honestly claim runtime_enforced output labels.",
+          "Managed prompt files remain advisory unless a paired runtime control path exists."
+        ]
+      },
+      "provenance": {
+        "createdAt": "2026-04-15T00:00:00Z",
+        "updatedAt": "2026-04-15T00:00:00Z",
+        "compilerVersion": "0.3.0",
+        "sourcePassportHash": null,
+        "requiredCompiledFields": [
+          "passport_version",
+          "generated_at",
+          "compiler_version",
+          "source_passport_hash",
+          "trust_zone_id",
+          "target_host"
+        ]
+      },
+      "signature": {
+        "scheme": "nostr_schnorr",
+        "signedBy": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+        "signedAt": null
+      },
+      "notes": ["Passport schema v1 is host-neutral and intentionally honest about enforcement limits."]
+    }
+  ]
+}

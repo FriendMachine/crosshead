@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/trust-receipt.schema.json",
+  "title": "OnlyBots Trust Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "receiptId",
+    "receiptType",
+    "subject",
+    "counterparty",
+    "summary",
+    "observedAt",
+    "evidence",
+    "signedAt",
+    "signedByNpub",
+    "payloadHash",
+    "signature",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "trust_receipt_v1"
+    },
+    "receiptId": {
+      "type": "string",
+      "pattern": "^trust_receipt_[a-z0-9][a-z0-9_-]{2,127}$"
+    },
+    "receiptType": {
+      "enum": [
+        "task_completed",
+        "task_failed",
+        "handoff_accepted",
+        "handoff_rejected",
+        "correction_confirmed",
+        "deliverable_rejected",
+        "settlement_confirmed"
+      ]
+    },
+    "subject": {
+      "$ref": "#/$defs/trustSubjectRef"
+    },
+    "counterparty": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/trustSubjectRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evidence": {
+      "$ref": "#/$defs/trustReceiptEvidence"
+    },
+    "signedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "signedByNpub": {
+      "type": "string",
+      "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+    },
+    "payloadHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-fA-F]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{128}$"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "persistentOrganizationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organizationId", "npub"],
+      "properties": {
+        "organizationId": {
+          "type": "string",
+          "pattern": "^org_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "npub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        }
+      }
+    },
+    "trustSubjectRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "agentRef"],
+          "properties": {
+            "subjectType": {
+              "const": "agent"
+            },
+            "agentRef": {
+              "$ref": "https://onlybots.ai/schemas/persistent-agent-entity.schema.json#/$defs/persistentAgentReference"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "organizationRef"],
+          "properties": {
+            "subjectType": {
+              "const": "organization"
+            },
+            "organizationRef": {
+              "$ref": "#/$defs/persistentOrganizationReference"
+            }
+          }
+        }
+      ]
+    },
+    "trustReceiptEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcomeRef", "handoffRef", "collaborationContextRef", "settlementRef", "evidenceRefs"],
+      "properties": {
+        "outcomeRef": {
+          "type": ["string", "null"]
+        },
+        "handoffRef": {
+          "type": ["string", "null"]
+        },
+        "collaborationContextRef": {
+          "type": ["string", "null"]
+        },
+        "settlementRef": {
+          "type": ["string", "null"]
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "trust_receipt_v1",
+      "receiptId": "trust_receipt_onlybots_schema_delivery_1",
+      "receiptType": "task_completed",
+      "subject": {
+        "subjectType": "agent",
+        "agentRef": {
+          "agentId": "agent_onlybots_research_fork",
+          "npub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+          "lineageRoot": "agent_onlybots_default"
+        }
+      },
+      "counterparty": {
+        "subjectType": "agent",
+        "agentRef": {
+          "agentId": "agent_onlybots_default",
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+          "lineageRoot": "agent_onlybots_default"
+        }
+      },
+      "summary": "Research fork delivered the shared trust-schema draft and the parent agent accepted the outcome.",
+      "observedAt": "2026-04-22T10:15:00Z",
+      "evidence": {
+        "outcomeRef": "outcome_evt_onlybots_schema_delivery_1",
+        "handoffRef": "handoff_capsule_onlybots_schema_delivery_1",
+        "collaborationContextRef": "ctx_trust_schema_rollout",
+        "settlementRef": null,
+        "evidenceRefs": [
+          "outcome_evt_onlybots_schema_delivery_1",
+          "handoff_capsule_onlybots_schema_delivery_1",
+          "inbox_evt_onlybots_schema_accept_1"
+        ]
+      },
+      "signedAt": "2026-04-22T10:16:00Z",
+      "signedByNpub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+      "payloadHash": "sha256:8d13238075d38d47f85a3d0a435aee37ffef96f988edeb7748c2af0a87243d2d",
+      "signature": "3bc46f64df12d2d6b1446fe6c310a298fd7d7b9620a4d3c1e4f1ef0dbf1e7257c81e854ae1ea8bb495fcaeb54f2998b3c192c3c5db8e4714a0fe8f3b9e2a0b11",
+      "notes": [
+        "Trust receipts stay minimal: they cite authoritative outcome, handoff, and inbox evidence instead of duplicating those payloads."
+      ]
+    }
+  ]
+}

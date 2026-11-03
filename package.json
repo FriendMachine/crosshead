@@ -1,0 +1,41 @@
+{
+  "name": "@crosshead/runtime",
+  "version": "0.4.4",
+  "description": "Crosshead local runtime: persistent memory for Claude Code and Codex. CLI, daemon, host adapters and hooks.",
+  "license": "Apache-2.0",
+  "private": true,
+  "homepage": "https://crosshead.sh",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FriendMachine/crosshead.git"
+  },
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
+  },
+  "files": [
+    "dist",
+    "schemas",
+    "README.md",
+    "LICENSE",
+    "TRADEMARKS.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check:boundary": "node scripts/check-boundary.mjs",
+    "release:build": "npm run build && node scripts/build-release.mjs",
+    "release:verify": "node scripts/verify-release.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "nostr-tools": "^2.25.2",
+    "tar": "^7.5.22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "ajv": "^8.18.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}

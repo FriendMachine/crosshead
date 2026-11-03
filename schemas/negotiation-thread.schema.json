@@ -1,0 +1,497 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/negotiation-thread.schema.json",
+  "title": "OnlyBots Negotiation Thread",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "threadId",
+    "status",
+    "openedAt",
+    "closedAt",
+    "workSummary",
+    "collaborationContextRef",
+    "parties",
+    "currentTerms",
+    "events",
+    "trustReceiptRefs",
+    "outcomeRef",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "negotiation_thread_v1"
+    },
+    "threadId": {
+      "type": "string",
+      "pattern": "^negotiation_thread_[a-z0-9][a-z0-9_-]{2,127}$"
+    },
+    "status": {
+      "enum": [
+        "open",
+        "conditionally_accepted",
+        "accepted",
+        "rejected",
+        "settled",
+        "expired",
+        "cancelled"
+      ]
+    },
+    "openedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "closedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "workSummary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "collaborationContextRef": {
+      "type": ["string", "null"]
+    },
+    "parties": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "$ref": "#/$defs/negotiationParty"
+      }
+    },
+    "currentTerms": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/negotiationTerms"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/negotiationEvent"
+      }
+    },
+    "trustReceiptRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "outcomeRef": {
+      "type": ["string", "null"]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "persistentOrganizationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organizationId", "npub"],
+      "properties": {
+        "organizationId": {
+          "type": "string",
+          "pattern": "^org_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "npub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        }
+      }
+    },
+    "trustSubjectRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "agentRef"],
+          "properties": {
+            "subjectType": {
+              "const": "agent"
+            },
+            "agentRef": {
+              "$ref": "https://onlybots.ai/schemas/persistent-agent-entity.schema.json#/$defs/persistentAgentReference"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "organizationRef"],
+          "properties": {
+            "subjectType": {
+              "const": "organization"
+            },
+            "organizationRef": {
+              "$ref": "#/$defs/persistentOrganizationReference"
+            }
+          }
+        }
+      ]
+    },
+    "negotiationTerms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency",
+        "priceSats",
+        "turnaroundHours",
+        "requiredCapabilityClaimRefs",
+        "requiredAccessRefs",
+        "dependencyRefs",
+        "acceptanceCriteria",
+        "settlementRef",
+        "expiresAt"
+      ],
+      "properties": {
+        "currency": {
+          "const": "sats"
+        },
+        "priceSats": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "turnaroundHours": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "requiredCapabilityClaimRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "requiredAccessRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dependencyRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "settlementRef": {
+          "type": ["string", "null"]
+        },
+        "expiresAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "negotiationParty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["party", "role", "contactAgentRef", "notes"],
+      "properties": {
+        "party": {
+          "$ref": "#/$defs/trustSubjectRef"
+        },
+        "role": {
+          "enum": ["requester", "provider", "mediator", "guarantor"]
+        },
+        "contactAgentRef": {
+          "anyOf": [
+            {
+              "$ref": "https://onlybots.ai/schemas/persistent-agent-entity.schema.json#/$defs/persistentAgentReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "negotiationEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "eventType",
+        "createdAt",
+        "createdBy",
+        "summary",
+        "terms",
+        "conditionRefs",
+        "reason",
+        "settlementRef",
+        "notes"
+      ],
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "pattern": "^negotiation_evt_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "eventType": {
+          "enum": [
+            "offer",
+            "counteroffer",
+            "conditional_acceptance",
+            "rejection",
+            "settlement",
+            "note"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdBy": {
+          "$ref": "#/$defs/trustSubjectRef"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "terms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/negotiationTerms"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conditionRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reason": {
+          "type": ["string", "null"]
+        },
+        "settlementRef": {
+          "type": ["string", "null"]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "negotiation_thread_v1",
+      "threadId": "negotiation_thread_onlybots_schema_contract_1",
+      "status": "settled",
+      "openedAt": "2026-04-22T11:00:00Z",
+      "closedAt": "2026-04-22T11:45:00Z",
+      "workSummary": "Define trust receipts, capability claims, organization schemas, and negotiated-work contracts for OnlyBots.",
+      "collaborationContextRef": "ctx_trust_schema_rollout",
+      "parties": [
+        {
+          "party": {
+            "subjectType": "organization",
+            "organizationRef": {
+              "organizationId": "org_client_schema_ops",
+              "npub": "npub1ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+            }
+          },
+          "role": "requester",
+          "contactAgentRef": null,
+          "notes": [
+            "Client organization is the requesting durable identity rather than a temporary chat room."
+          ]
+        },
+        {
+          "party": {
+            "subjectType": "organization",
+            "organizationRef": {
+              "organizationId": "org_onlybots_schema_guild",
+              "npub": "npub1sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+            }
+          },
+          "role": "provider",
+          "contactAgentRef": {
+            "agentId": "agent_onlybots_default",
+            "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+            "lineageRoot": "agent_onlybots_default"
+          },
+          "notes": [
+            "Provider organization delegates execution to members under shared policy and budget boundaries."
+          ]
+        }
+      ],
+      "currentTerms": {
+        "currency": "sats",
+        "priceSats": 4200,
+        "turnaroundHours": 12,
+        "requiredCapabilityClaimRefs": ["capability_claim_onlybots_schema_design_1"],
+        "requiredAccessRefs": ["workspace:repo:onlybots-erd"],
+        "dependencyRefs": ["task-master:105"],
+        "acceptanceCriteria": [
+          "Checked-in schemas validate",
+          "Docs explain collaboration-versus-organization boundaries"
+        ],
+        "settlementRef": "settlement_ref_schema_contract_01",
+        "expiresAt": "2026-04-23T00:00:00Z"
+      },
+      "events": [
+        {
+          "eventId": "negotiation_evt_schema_offer_1",
+          "eventType": "offer",
+          "createdAt": "2026-04-22T11:00:00Z",
+          "createdBy": {
+            "subjectType": "organization",
+            "organizationRef": {
+              "organizationId": "org_client_schema_ops",
+              "npub": "npub1ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+            }
+          },
+          "summary": "Client requests a first-pass contract layer with receipt-backed trust explanations.",
+          "terms": {
+            "currency": "sats",
+            "priceSats": 3500,
+            "turnaroundHours": 24,
+            "requiredCapabilityClaimRefs": ["capability_claim_onlybots_schema_design_1"],
+            "requiredAccessRefs": ["workspace:repo:onlybots-erd"],
+            "dependencyRefs": ["task-master:105"],
+            "acceptanceCriteria": [
+              "Schemas checked in",
+              "Interfaces avoid duplicating continuity state"
+            ],
+            "settlementRef": null,
+            "expiresAt": "2026-04-22T18:00:00Z"
+          },
+          "conditionRefs": [],
+          "reason": null,
+          "settlementRef": null,
+          "notes": [
+            "Initial offer references capability claims instead of free-text reputation."
+          ]
+        },
+        {
+          "eventId": "negotiation_evt_schema_counter_1",
+          "eventType": "counteroffer",
+          "createdAt": "2026-04-22T11:10:00Z",
+          "createdBy": {
+            "subjectType": "organization",
+            "organizationRef": {
+              "organizationId": "org_onlybots_schema_guild",
+              "npub": "npub1sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+            }
+          },
+          "summary": "Provider counters with tighter turnaround and explicit architecture-review coverage.",
+          "terms": {
+            "currency": "sats",
+            "priceSats": 4200,
+            "turnaroundHours": 12,
+            "requiredCapabilityClaimRefs": ["capability_claim_onlybots_schema_design_1"],
+            "requiredAccessRefs": ["workspace:repo:onlybots-erd"],
+            "dependencyRefs": ["task-master:105"],
+            "acceptanceCriteria": [
+              "Checked-in schemas validate",
+              "Docs explain collaboration-versus-organization boundaries"
+            ],
+            "settlementRef": null,
+            "expiresAt": "2026-04-22T20:00:00Z"
+          },
+          "conditionRefs": ["review_required:operator"],
+          "reason": null,
+          "settlementRef": null,
+          "notes": [
+            "Counteroffer keeps terms inspectable instead of pushing them into ad hoc operator chat."
+          ]
+        },
+        {
+          "eventId": "negotiation_evt_schema_conditional_accept_1",
+          "eventType": "conditional_acceptance",
+          "createdAt": "2026-04-22T11:20:00Z",
+          "createdBy": {
+            "subjectType": "organization",
+            "organizationRef": {
+              "organizationId": "org_client_schema_ops",
+              "npub": "npub1ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+            }
+          },
+          "summary": "Client accepts if the final settlement links back to shared-budget approval.",
+          "terms": {
+            "currency": "sats",
+            "priceSats": 4200,
+            "turnaroundHours": 12,
+            "requiredCapabilityClaimRefs": ["capability_claim_onlybots_schema_design_1"],
+            "requiredAccessRefs": ["workspace:repo:onlybots-erd"],
+            "dependencyRefs": ["task-master:105"],
+            "acceptanceCriteria": [
+              "Checked-in schemas validate",
+              "Docs explain collaboration-versus-organization boundaries"
+            ],
+            "settlementRef": null,
+            "expiresAt": "2026-04-22T21:00:00Z"
+          },
+          "conditionRefs": ["budget_policy_schema_guild_shared"],
+          "reason": null,
+          "settlementRef": null,
+          "notes": [
+            "Conditional acceptance keeps budget and policy constraints explicit."
+          ]
+        },
+        {
+          "eventId": "negotiation_evt_schema_settlement_1",
+          "eventType": "settlement",
+          "createdAt": "2026-04-22T11:45:00Z",
+          "createdBy": {
+            "subjectType": "organization",
+            "organizationRef": {
+              "organizationId": "org_client_schema_ops",
+              "npub": "npub1ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+            }
+          },
+          "summary": "Settlement approved under the shared provider budget policy.",
+          "terms": null,
+          "conditionRefs": ["budget_policy_schema_guild_shared"],
+          "reason": null,
+          "settlementRef": "settlement_ref_schema_contract_01",
+          "notes": [
+            "Settlement refs are linked here and in the organization treasury rather than copied into trust receipts."
+          ]
+        }
+      ],
+      "trustReceiptRefs": ["trust_receipt_onlybots_schema_delivery_1"],
+      "outcomeRef": "outcome_evt_onlybots_schema_delivery_1",
+      "notes": [
+        "Negotiation threads reference collaboration contexts, capability claims, and settlement refs without embedding live runtime state.",
+        "The settled outcome later produces receipts and trust updates rather than the negotiation pretending to be the trust graph itself."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,548 @@
+import { nowIso, renderInjectedPrompt } from "./adapter-utils";
+import { workspaceHotScope } from "./workspace-hot-memory";
+import { readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
+import type { LocalRuntimeClient } from "./local-client";
+import {
+  buildRuntimeStartupFreshness,
+  renderRuntimeStartupContext,
+  type RuntimeStartupRuntime,
+} from "./startup-context";
+
+// Shared lifecycle core for the host runtime adapters. The claude-code and codex adapters
+// previously each carried byte-identical copies of these methods (differing only in the
+// runtime id, wrapper-version fallback, and prompt label), so fixes to context injection
+// could land in one runtime and silently miss the other.
+
+export type HostAdapterIdentity = {
+  /** Runtime id reported in lifecycle events, e.g. "claude-code" or "codex". */
+  runtimeId: RuntimeStartupRuntime;
+  /** hostVersion fallback when the hook does not report one, e.g. "codex-wrapper". */
+  wrapperVersionFallback: string;
+  /** Human-readable label used in the injected prompt, e.g. "Claude Code". */
+  requestLabel: string;
+};
+
+export type HostAdapterBaseConfig = {
+  profileName: string;
+  hostHome: string;
+  adapterVersion: string;
+};
+
+export type HostAdapterTranscriptEntry = {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  timestamp?: string;
+};
+
+export type HostAdapterSessionStartRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+};
+
+export type HostAdapterTurnPrepareRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  hookObservedAt?: string;
+  previousContextReadAt?: string | null;
+  sessionId: string;
+  turnId: string;
+  prompt: string;
+  transcript?: HostAdapterTranscriptEntry[];
+};
+
+export type HostAdapterTurnPrepareResult = {
+  packId: string | null;
+  contextText: string;
+  injectedPrompt: string;
+  warnings: string[];
+};
+
+export type HostAdapterTurnCompleteRequest = {
+  taskEvidence?: TaskEvidence;
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+  turnId: string;
+  packId?: string | null;
+  goal?: string;
+  summary: string;
+  transcript?: HostAdapterTranscriptEntry[];
+  newFact?: string | string[];
+  newCommitment?: string | string[];
+};
+
+export type HostAdapterTurnFailedRequest = {
+  taskEvidence?: TaskEvidence;
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+  turnId: string;
+  packId?: string | null;
+  goal?: string;
+  summary: string;
+  transcript?: HostAdapterTranscriptEntry[];
+};
+
+export type HostAdapterToolCompleteRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+  turnId?: string;
+  toolName: string;
+  summary: string;
+};
+
+export type HostAdapterTaskChangedRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+  taskTitle: string;
+  summary?: string;
+};
+
+export type HostAdapterSessionEndedRequest = {
+  taskEvidence?: TaskEvidence;
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+  turnId?: string | null;
+  packId?: string | null;
+  goal?: string;
+  summary: string;
+  taskSucceeded?: boolean | null;
+  transcript?: HostAdapterTranscriptEntry[];
+};
+
+export type HostAdapterCompactEventRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId: string;
+  turnId?: string | null;
+  trigger?: string | null;
+  summary: string;
+  payload?: Record<string, unknown>;
+};
+
+export type HostAdapterRememberRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostHome?: string;
+  hostVersion?: string;
+  sessionId?: string;
+  entryType?: "fact" | "commitment" | "correction" | "pattern";
+  content: string;
+  tags?: string[];
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const parseJsonRecord = (value: string): Record<string, unknown> | null => {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const parseHotMemoryEntryContent = (entry: Record<string, unknown>): Record<string, unknown> | null => {
+  if (isRecord(entry.content)) {
+    return entry.content;
+  }
+  return typeof entry.content === "string" ? parseJsonRecord(entry.content) : null;
+};
+
+const hasHotMemoryEntryContent = (entry: Record<string, unknown>): boolean => {
+  if (isRecord(entry.content)) {
+    return true;
+  }
+  return typeof entry.content === "string" && entry.content.trim().length > 0;
+};
+
+const getWorkspaceId = (value: Record<string, unknown> | null): string | null => {
+  const workspaceId = value?.workspaceId ?? value?.workspace_id;
+  return typeof workspaceId === "string" && workspaceId.trim().length > 0 ? workspaceId.trim() : null;
+};
+
+const emptyHotMemorySnapshot = (): Record<string, unknown> => ({ scope: "all", scopes: [] });
+
+export const filterHotMemorySnapshotForWorkspace = (
+  hotMemory: Record<string, unknown> | null,
+  workspaceId: string
+): Record<string, unknown> | null => {
+  if (!hotMemory) {
+    return null;
+  }
+  const scopedEntries = Array.isArray(hotMemory.scopes) ? hotMemory.scopes.filter(isRecord) : null;
+  if (!scopedEntries) {
+    if (!hasHotMemoryEntryContent(hotMemory)) {
+      return null;
+    }
+    const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(hotMemory));
+    return entryWorkspaceId && entryWorkspaceId !== workspaceId ? null : hotMemory;
+  }
+  const scopes = scopedEntries.filter((entry) => {
+    if (!hasHotMemoryEntryContent(entry)) {
+      return false;
+    }
+    const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(entry));
+    return !entryWorkspaceId || entryWorkspaceId === workspaceId;
+  });
+  if (scopes.length === 0) {
+    return null;
+  }
+  // The legacy runtime alias and its retained workspace partition describe one
+  // document. Inject the newest version once, under the readable runtime name.
+  const selected = new Map<string, Record<string, unknown>>();
+  const other: Record<string, unknown>[] = [];
+  for (const entry of scopes) {
+    const content = parseHotMemoryEntryContent(entry);
+    const runtime = typeof content?.runtime === "string" ? content.runtime : null;
+    if (!runtime || getWorkspaceId(content) !== workspaceId ||
+      ![runtime, workspaceHotScope(runtime, workspaceId)].includes(String(entry.scope))) {
+      other.push(entry);
+      continue;
+    }
+    const previous = selected.get(runtime);
+    const updated = Date.parse(String(content?.updatedAt)) || 0;
+    const previousUpdated = Date.parse(String(parseHotMemoryEntryContent(previous ?? {})?.updatedAt)) || 0;
+    if (!previous || updated >= previousUpdated) selected.set(runtime, { ...entry, scope: runtime });
+  }
+  return { ...hotMemory, scopes: [...other, ...selected.values()] };
+};
+
+export abstract class HostRuntimeAdapterBase {
+  protected abstract readonly identity: HostAdapterIdentity;
+  protected abstract readonly client: LocalRuntimeClient;
+  protected abstract readonly config: HostAdapterBaseConfig;
+
+  async captureTaskEvidence(file: string | null, sessionId: string, workspaceRoot: string, since?: string | null, goal?: string | null): Promise<TaskEvidence | undefined> {
+    // Exact workspace excerpts can contain credentials even after filtering.
+    // Capture is therefore explicit opt-in, never a side effect of assist/auto.
+    if (!taskEvidenceCaptureEnabled()) return undefined;
+    // Check the current profile at capture time, including a mode change during
+    // this turn. Never inspect tool output when automatic memory is disabled.
+    const status = await this.client.status(this.config.profileName).catch(() => null);
+    if (status?.profile?.memoryMode !== "auto" && status?.profile?.memoryMode !== "assist") return undefined;
+    return readTaskEvidence(file, sessionId, workspaceRoot, since, goal ?? "");
+  }
+
+  /** Adapter-specific workspace attachment (managed files and manifest differ per host). */
+  protected abstract attachWorkspace(input: {
+    profileName?: string;
+    workspaceRoot: string;
+    workspaceId: string;
+    hostHome?: string;
+    hostVersion?: string;
+  }): Promise<void>;
+
+  async sessionStarted(input: HostAdapterSessionStartRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.attachWorkspace({
+      profileName: input.profileName,
+      workspaceRoot: input.workspaceRoot,
+      workspaceId,
+      hostHome: input.hostHome,
+      hostVersion: input.hostVersion,
+    });
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      type: "session.started",
+      payload: {
+        hostHome: input.hostHome ?? this.config.hostHome,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  async prepareTurn(input: HostAdapterTurnPrepareRequest): Promise<HostAdapterTurnPrepareResult> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    const profileName = input.profileName ?? this.config.profileName;
+    const observedAt = input.hookObservedAt ?? nowIso();
+    const previousContextReadAt = input.previousContextReadAt ?? null;
+    await this.attachWorkspace({
+      profileName,
+      workspaceRoot: input.workspaceRoot,
+      workspaceId,
+      hostHome: input.hostHome,
+      hostVersion: input.hostVersion,
+    });
+    const rawPreTurnHotMemory = await this.client.readHotMemory(profileName, "all").catch(() => null);
+    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId);
+    const response = await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      type: "turn.started",
+      payload: {
+        goal: input.prompt,
+	recallPolicy: "bounded",
+        transcript: input.transcript ?? [],
+        allowedScope: {
+          includeHotMemory: true,
+	  includeWarmMemory: true,
+	  includeColdMemory: true,
+          includeLayeredContext: false,
+        },
+				includeResumeBrief: false,
+				budget: {
+					maxFragments: 3,
+					maxTokens: 1200,
+				},
+				hotMemorySnapshot: preTurnHotMemory ?? emptyHotMemorySnapshot(),
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+    const contextPack =
+      response.contextPack && typeof response.contextPack === "object" && !Array.isArray(response.contextPack)
+        ? response.contextPack
+        : null;
+    const packId = contextPack && typeof contextPack.packId === "string" ? contextPack.packId : null;
+    const freshness = buildRuntimeStartupFreshness({
+      runtime: this.identity.runtimeId,
+      observedAt,
+      previousContextReadAt,
+      hotMemory: preTurnHotMemory,
+    });
+    // A hook without a usable prompt still records its lifecycle event, but must
+    // not inject background state whose availability depends on debounce timing.
+    // The lifecycle response can contain hosted service data. Until those
+    // fields have end-to-end authenticity, none of them may become model
+    // instructions. The hot snapshot has already crossed the client's local
+    // signature-verification boundary and is the sole dynamic prompt source.
+    const contextText = input.prompt.trim() ? renderRuntimeStartupContext({
+      runtime: this.identity.runtimeId,
+      profileName,
+      mode: response.mode,
+      status: null,
+      manifest: null,
+      inbox: null,
+      dreamReview: null,
+      obligations: null,
+      actions: [],
+      warnings: [],
+      injectedContext: "",
+      freshness,
+      hotMemorySnapshot: preTurnHotMemory,
+      goal: input.prompt,
+    }) : "";
+    return {
+      packId,
+      contextText,
+      injectedPrompt: renderInjectedPrompt(input.prompt, contextText, this.identity.requestLabel),
+      warnings: response.warnings,
+    };
+  }
+
+  async completeTurn(input: HostAdapterTurnCompleteRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      type: "turn.completed",
+      payload: {
+        packId: input.packId ?? null,
+        goal: input.goal ?? null,
+        summary: input.summary,
+	taskEvidence: input.taskEvidence,
+        transcript: input.transcript ?? [],
+        newFact: input.newFact,
+        newCommitment: input.newCommitment,
+        taskSucceeded: true,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  async failTurn(input: HostAdapterTurnFailedRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      type: "turn.failed",
+      payload: {
+        packId: input.packId ?? null,
+        goal: input.goal ?? null,
+        summary: input.summary,
+	taskEvidence: input.taskEvidence,
+        transcript: input.transcript ?? [],
+        taskSucceeded: false,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  async toolCompleted(input: HostAdapterToolCompleteRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      type: "tool.completed",
+      payload: {
+        toolName: input.toolName,
+        summary: input.summary,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  async taskChanged(input: HostAdapterTaskChangedRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      type: "task.changed",
+      payload: {
+        taskTitle: input.taskTitle,
+        summary: input.summary ?? input.taskTitle,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  async sessionEnded(input: HostAdapterSessionEndedRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      type: "session.ended",
+      payload: {
+        packId: input.packId ?? null,
+        goal: input.goal ?? null,
+        summary: input.summary,
+	taskEvidence: input.taskEvidence,
+        transcript: input.transcript ?? [],
+        taskSucceeded: input.taskSucceeded ?? null,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  private async emitCompactEvent(
+    type: "compact.started" | "compact.completed",
+    input: HostAdapterCompactEventRequest
+  ): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    const profileName = input.profileName ?? this.config.profileName;
+    await this.attachWorkspace({
+      profileName,
+      workspaceRoot: input.workspaceRoot,
+      workspaceId,
+      hostHome: input.hostHome,
+      hostVersion: input.hostVersion,
+    });
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName,
+      workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      type,
+      payload: {
+        ...(input.payload ?? {}),
+        trigger: input.trigger ?? null,
+        summary: input.summary,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+
+  async compactStarted(input: HostAdapterCompactEventRequest): Promise<void> {
+    await this.emitCompactEvent("compact.started", input);
+  }
+
+  async compactCompleted(input: HostAdapterCompactEventRequest): Promise<void> {
+    await this.emitCompactEvent("compact.completed", input);
+  }
+
+  async remember(input: HostAdapterRememberRequest): Promise<void> {
+    const workspaceId = input.workspaceId ?? `repo:${input.workspaceRoot}`;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId,
+      sessionId: input.sessionId ?? null,
+      type: "operator.command",
+      payload: {
+        command: "remember",
+        entryType: input.entryType ?? "fact",
+        content: input.content,
+        tags: input.tags ?? [this.identity.runtimeId, "explicit"],
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+  }
+}

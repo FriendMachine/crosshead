@@ -1,0 +1,214 @@
+import { installCodexFromCli } from "../codex-adapter";
+import { installClaudeCodeFromCli } from "../claude-code-adapter";
+import { installPiFromCli } from "../pi-adapter";
+import { installOmpFromCli } from "../omp-adapter";
+import { parseArgs } from "../local-runtime";
+import { ensureRuntimeHomeLayout, loadProfile, loadRuntimeConfig } from "../runtime-persistence";
+import { billingFromCli } from "./billing";
+import { installCoreFromCli, keygenFromCli, startFromCli, statusFromCli } from "./core";
+
+export type QuickstartCliPaths = {
+	cliScriptPath: string;
+	daemonScriptPath: string;
+	codexBridgeScriptPath: string;
+	codexHookScriptPath: string;
+	claudeCodeBridgeScriptPath: string;
+	claudeCodeHookScriptPath: string;
+};
+
+type QuickstartAdapter = "codex" | "claude-code" | "pi" | "omp" | "none";
+
+type QuickstartStep = {
+	id: string;
+	ok: boolean;
+	detail: string;
+};
+
+const flagPair = (name: string, value: string | undefined): string[] => (value ? [name, value] : []);
+
+const boolFlagDisabled = (flags: Record<string, string | boolean>, name: string): boolean =>
+	flags[name] === true || flags[name] === "true";
+
+const selectedAdapter = (flags: Record<string, string | boolean>): QuickstartAdapter => {
+	const raw = typeof flags.adapter === "string" ? flags.adapter : typeof flags.host === "string" ? flags.host : "pi";
+	if (raw === "codex" || raw === "claude-code" || raw === "pi" || raw === "omp" || raw === "none") {
+		return raw;
+	}
+	throw new Error("--adapter must be one of: codex, claude-code, pi, omp, none");
+};
+
+const installAdapter = async (input: {
+	adapter: QuickstartAdapter;
+	args: string[];
+	paths: QuickstartCliPaths;
+}): Promise<string> => {
+	if (input.adapter === "none") {
+		return "Skipped adapter install";
+	}
+	if (input.adapter === "codex") {
+		return installCodexFromCli(input.args, input.paths.codexBridgeScriptPath, input.paths.codexHookScriptPath);
+	}
+	if (input.adapter === "claude-code") {
+		return installClaudeCodeFromCli(input.args, input.paths.claudeCodeBridgeScriptPath, input.paths.claudeCodeHookScriptPath);
+	}
+	if (input.adapter === "omp") {
+		return installOmpFromCli(input.args);
+	}
+	return installPiFromCli(input.args);
+};
+
+const formatQuickstart = (result: Record<string, unknown>): string => {
+	const steps = Array.isArray(result.steps) ? (result.steps as QuickstartStep[]) : [];
+	const lines = [
+		"Crosshead quickstart",
+		`home: ${result.home}`,
+		`profile: ${result.profile}`,
+		`adapter: ${result.adapter}`,
+		...steps.map((step) => `${step.ok ? "ok" : "warn"} ${step.id}: ${step.detail}`),
+		"first_value:",
+		`  ${result.firstValueCommand}`,
+		"billing:",
+		`  ${result.billingCommand}`,
+		"payment_boundary: agents may create/show checkout links or invoices, but a human submits payment.",
+	];
+	if (typeof result.checkoutUrl === "string" && result.checkoutUrl.length > 0) {
+		lines.push(`checkout_url: ${result.checkoutUrl}`);
+	}
+	return lines.join("\n");
+};
+
+export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPaths): Promise<string> => {
+	const { flags } = parseArgs(argv);
+	const home = typeof flags.home === "string" ? flags.home : undefined;
+	const profileName = typeof flags.profile === "string" ? flags.profile : "default";
+	const apiBase =
+		typeof flags["api-base"] === "string" ? flags["api-base"] : typeof flags.apiBase === "string" ? flags.apiBase : undefined;
+	const memoryMode = typeof flags["memory-mode"] === "string" ? flags["memory-mode"] : "assist";
+	const workspaceScope = typeof flags["workspace-scope"] === "string" ? flags["workspace-scope"] : "repo";
+	const adapter = selectedAdapter(flags);
+	const coreArgs = [...flagPair("--home", home), ...flagPair("--channel", typeof flags.channel === "string" ? flags.channel : undefined)];
+	const profileArgs = [
+		...flagPair("--home", home),
+		"--profile",
+		profileName,
+		...flagPair("--api-base", apiBase),
+		"--memory-mode",
+		memoryMode,
+		"--workspace-scope",
+		workspaceScope,
+	];
+	const adapterArgs = [
+		...flagPair("--home", home),
+		"--profile",
+		profileName,
+		...flagPair("--version", typeof flags.version === "string" ? flags.version : undefined),
+		...flagPair("--codex-home", typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
+		...flagPair("--codex-bin", typeof flags["codex-bin"] === "string" ? flags["codex-bin"] : undefined),
+		...flagPair("--claude-home", typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
+		...flagPair("--workspace-root", typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : undefined),
+		...flagPair("--claude-bin", typeof flags["claude-bin"] === "string" ? flags["claude-bin"] : undefined),
+		...flagPair("--omp-bin", typeof flags["omp-bin"] === "string" ? flags["omp-bin"] : undefined),
+		...(boolFlagDisabled(flags, "no-envrc") ? ["--no-envrc"] : []),
+	];
+	const steps: QuickstartStep[] = [];
+
+	const installOutput = await installCoreFromCli(coreArgs, paths.cliScriptPath, paths.daemonScriptPath);
+	const runtimePaths = ensureRuntimeHomeLayout(home);
+	steps.push({ id: "runtime_core", ok: true, detail: installOutput });
+
+	const config = loadRuntimeConfig(runtimePaths);
+	const existingProfile = loadProfile(runtimePaths, profileName);
+	if (!existingProfile) {
+		if (!apiBase) {
+			throw new Error("quickstart requires --api-base <url> when the selected profile does not exist");
+		}
+		const profileOutput = await keygenFromCli([...profileArgs, "--setup", "--json"]);
+		const parsed = JSON.parse(profileOutput) as { npub?: string; apiBase?: string };
+		steps.push({
+			id: "profile",
+			ok: true,
+			detail: `configured ${profileName} for ${parsed.apiBase ?? apiBase} with generated runtime identity ${parsed.npub ?? "unknown"}`,
+		});
+	} else {
+		steps.push({
+			id: "profile",
+			ok: true,
+			detail: `using existing ${profileName} for ${existingProfile.apiBase}`,
+		});
+	}
+
+	const adapterOutput = await installAdapter({ adapter, args: adapterArgs, paths });
+	steps.push({
+		id: "adapter",
+		ok: adapter !== "none",
+		detail: adapter === "omp" ? `${adapterOutput}; OMP uses the Pi embedded adapter path` : adapterOutput,
+	});
+
+	if (!boolFlagDisabled(flags, "no-start")) {
+		const startOutput = await startFromCli([...flagPair("--home", home), ...flagPair("--port", typeof flags.port === "string" ? flags.port : undefined)]);
+		steps.push({ id: "daemon", ok: true, detail: startOutput });
+	} else {
+		steps.push({ id: "daemon", ok: false, detail: "skipped by --no-start" });
+	}
+
+	let runtimeStatus: Record<string, unknown> | null = null;
+	try {
+		runtimeStatus = JSON.parse(await statusFromCli([...flagPair("--home", home), "--profile", profileName, "--json"])) as Record<string, unknown>;
+		const daemon = runtimeStatus.daemon && typeof runtimeStatus.daemon === "object" ? (runtimeStatus.daemon as Record<string, unknown>) : {};
+		steps.push({
+			id: "status",
+			ok: true,
+			detail: `daemon_running=${daemon.running === true} adapters=${Array.isArray(runtimeStatus.adapters) ? runtimeStatus.adapters.length : 0}`,
+		});
+	} catch (error) {
+		steps.push({ id: "status", ok: false, detail: error instanceof Error ? error.message : String(error) });
+	}
+
+	let billingStatus: Record<string, unknown> | null = null;
+	try {
+		billingStatus = JSON.parse(
+			await billingFromCli(["status", ...flagPair("--home", home), "--profile", profileName, "--json"])
+		) as Record<string, unknown>;
+		steps.push({
+			id: "billing",
+			ok: billingStatus.low_credit !== true,
+			detail:
+				billingStatus.low_credit === true
+					? "billing reachable but available credits are low; run crosshead billing checkout --credits 1000"
+					: "billing reachable",
+		});
+	} catch (error) {
+		steps.push({ id: "billing", ok: false, detail: error instanceof Error ? error.message : String(error) });
+	}
+
+	let checkout: Record<string, unknown> | null = null;
+	if (boolFlagDisabled(flags, "create-checkout")) {
+		const credits =
+			typeof flags.credits === "string" ? flags.credits : typeof flags["checkout-credits"] === "string" ? flags["checkout-credits"] : "1000";
+		checkout = JSON.parse(
+			await billingFromCli(["checkout", ...flagPair("--home", home), "--profile", profileName, "--credits", credits, "--json"])
+		) as Record<string, unknown>;
+		steps.push({
+			id: "checkout_link",
+			ok: typeof checkout.url === "string" && checkout.url.length > 0,
+			detail: "created hosted payment link; human payment submission still required",
+		});
+	}
+
+	const result = {
+		command: "quickstart",
+		home: runtimePaths.home,
+		coreVersion: config.coreVersion,
+		profile: profileName,
+		adapter,
+		steps,
+		status: runtimeStatus,
+		billing: billingStatus,
+		checkout,
+		checkoutUrl: typeof checkout?.url === "string" ? checkout.url : null,
+		firstValueCommand: `crosshead memory hot --home ${runtimePaths.home} --profile ${profileName}`,
+		billingCommand: `crosshead billing status --home ${runtimePaths.home} --profile ${profileName}`,
+		paymentBoundary: "Agents may create/show checkout links or invoices, but a human must submit payment.",
+	};
+	return flags.json ? JSON.stringify(result, null, 2) : formatQuickstart(result);
+};

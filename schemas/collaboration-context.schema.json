@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/collaboration-context.schema.json",
+  "title": "OnlyBots Collaboration Context Metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contextId",
+    "title",
+    "createdAt",
+    "createdBy",
+    "participants",
+    "policy",
+    "budget",
+    "taskOwnership",
+    "artifactRefs",
+    "handoffRefs",
+    "outcomeRefs",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "collaboration_context_v1" },
+    "contextId": {
+      "type": "string",
+      "pattern": "^ctx_[a-z0-9][a-z0-9_-]{2,127}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "createdBy": {
+      "$ref": "#/$defs/npub"
+    },
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/participant"
+      }
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "budget": {
+      "$ref": "#/$defs/budget"
+    },
+    "taskOwnership": {
+      "$ref": "#/$defs/taskOwnership"
+    },
+    "artifactRefs": {
+      "$ref": "#/$defs/stringArray"
+    },
+    "handoffRefs": {
+      "$ref": "#/$defs/stringArray"
+    },
+    "outcomeRefs": {
+      "$ref": "#/$defs/stringArray"
+    },
+    "notes": {
+      "$ref": "#/$defs/stringArray"
+    }
+  },
+  "$defs": {
+    "npub": {
+      "type": "string",
+      "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+    },
+    "nullableString": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["npub", "agentId", "runtimeHost", "role", "displayName"],
+      "properties": {
+        "npub": { "$ref": "#/$defs/npub" },
+        "agentId": { "$ref": "#/$defs/nullableString" },
+        "runtimeHost": { "$ref": "#/$defs/nullableString" },
+        "role": {
+          "enum": ["originator", "owner", "assignee", "reviewer", "operator", "observer"]
+        },
+        "displayName": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primaryTrustZone",
+        "additionalTrustZones",
+        "memoryScope",
+        "requireReviewFor",
+        "toolRestrictions",
+        "operatorMayPause"
+      ],
+      "properties": {
+        "primaryTrustZone": {
+          "enum": [
+            "public",
+            "network_trusted",
+            "workspace_private",
+            "agent_sealed",
+            "human_visible",
+            "machine_only",
+            "ephemeral",
+            "auditable"
+          ]
+        },
+        "additionalTrustZones": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "public",
+              "network_trusted",
+              "workspace_private",
+              "agent_sealed",
+              "human_visible",
+              "machine_only",
+              "ephemeral",
+              "auditable"
+            ]
+          }
+        },
+        "memoryScope": { "$ref": "#/$defs/stringArray" },
+        "requireReviewFor": { "$ref": "#/$defs/stringArray" },
+        "toolRestrictions": { "$ref": "#/$defs/stringArray" },
+        "operatorMayPause": { "const": true }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "maxBudgetSats", "shadowMode"],
+      "properties": {
+        "currency": { "const": "sats" },
+        "maxBudgetSats": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "shadowMode": {
+          "type": "boolean"
+        }
+      }
+    },
+    "taskOwnership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskRef", "title", "ownerNpub", "claimedByNpub", "status", "workspaceRef"],
+      "properties": {
+        "taskRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ownerNpub": {
+          "anyOf": [
+            { "$ref": "#/$defs/npub" },
+            { "type": "null" }
+          ]
+        },
+        "claimedByNpub": {
+          "anyOf": [
+            { "$ref": "#/$defs/npub" },
+            { "type": "null" }
+          ]
+        },
+        "status": {
+          "enum": ["offered", "claimed", "in_progress", "blocked", "completed", "failed", "aborted"]
+        },
+        "workspaceRef": { "$ref": "#/$defs/nullableString" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "collaboration_context_v1",
+      "contextId": "ctx_auth_refactor",
+      "title": "Auth flow refactor and validation",
+      "createdAt": "2026-04-19T00:00:00Z",
+      "createdBy": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+      "participants": [
+        {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "agentId": "agent_default",
+          "runtimeHost": "codex",
+          "role": "originator",
+          "displayName": "OnlyBots Codex"
+        },
+        {
+          "npub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+          "agentId": "agent_research",
+          "runtimeHost": "claude-code",
+          "role": "assignee",
+          "displayName": "OnlyBots Claude Research"
+        }
+      ],
+      "policy": {
+        "primaryTrustZone": "workspace_private",
+        "additionalTrustZones": ["auditable", "machine_only"],
+        "memoryScope": ["hot", "warm", "handoff_capsules"],
+        "requireReviewFor": ["schema_changes", "prod_writes"],
+        "toolRestrictions": ["no_external_network_write"],
+        "operatorMayPause": true
+      },
+      "budget": {
+        "currency": "sats",
+        "maxBudgetSats": 2500,
+        "shadowMode": true
+      },
+      "taskOwnership": {
+        "taskRef": "task-master:95",
+        "title": "Define typed collaboration inbox events",
+        "ownerNpub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "claimedByNpub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "status": "claimed",
+        "workspaceRef": "repo:example-org/example-repo"
+      },
+      "artifactRefs": ["artifact:spec-draft-1"],
+      "handoffRefs": ["handoff_123"],
+      "outcomeRefs": ["outcome_456"],
+      "notes": ["Structured collaboration context carried over existing message APIs."]
+    }
+  ]
+}

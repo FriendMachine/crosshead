@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/trust-edge.schema.json",
+  "title": "OnlyBots Trust Edge",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "edgeId",
+    "source",
+    "target",
+    "relationshipType",
+    "weight",
+    "confidence",
+    "receiptRefs",
+    "influenceBoundary",
+    "explanation",
+    "createdAt",
+    "updatedAt",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "trust_edge_v1"
+    },
+    "edgeId": {
+      "type": "string",
+      "pattern": "^trust_edge_[a-z0-9][a-z0-9_-]{2,127}$"
+    },
+    "source": {
+      "$ref": "#/$defs/trustSubjectRef"
+    },
+    "target": {
+      "$ref": "#/$defs/trustSubjectRef"
+    },
+    "relationshipType": {
+      "enum": [
+        "worked_with",
+        "delegated_to",
+        "corrected_by",
+        "endorsed_by",
+        "member_of",
+        "contracted_with"
+      ]
+    },
+    "weight": {
+      "type": "integer",
+      "minimum": -100,
+      "maximum": 100
+    },
+    "confidence": {
+      "enum": ["low", "medium", "high"]
+    },
+    "receiptRefs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "influenceBoundary": {
+      "$ref": "#/$defs/reputationInfluenceBoundary"
+    },
+    "explanation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rationale", "positiveSignals", "cautionSignals"],
+      "properties": {
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "positiveSignals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "cautionSignals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "persistentOrganizationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organizationId", "npub"],
+      "properties": {
+        "organizationId": {
+          "type": "string",
+          "pattern": "^org_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "npub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        }
+      }
+    },
+    "trustSubjectRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "agentRef"],
+          "properties": {
+            "subjectType": {
+              "const": "agent"
+            },
+            "agentRef": {
+              "$ref": "https://onlybots.ai/schemas/persistent-agent-entity.schema.json#/$defs/persistentAgentReference"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "organizationRef"],
+          "properties": {
+            "subjectType": {
+              "const": "organization"
+            },
+            "organizationRef": {
+              "$ref": "#/$defs/persistentOrganizationReference"
+            }
+          }
+        }
+      ]
+    },
+    "reputationInfluenceBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lineageCarryoverMode",
+        "lineageLinkRefs",
+        "selfModelRef",
+        "selfModelInfluenceMode",
+        "directTrustTransferProhibited",
+        "notes"
+      ],
+      "properties": {
+        "lineageCarryoverMode": {
+          "enum": ["none", "bounded", "operator_review"]
+        },
+        "lineageLinkRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "selfModelRef": {
+          "type": ["string", "null"]
+        },
+        "selfModelInfluenceMode": {
+          "enum": ["none", "routing_hint", "operator_review"]
+        },
+        "directTrustTransferProhibited": {
+          "const": true
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "trust_edge_v1",
+      "edgeId": "trust_edge_onlybots_delegate_1",
+      "source": {
+        "subjectType": "agent",
+        "agentRef": {
+          "agentId": "agent_onlybots_default",
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+          "lineageRoot": "agent_onlybots_default"
+        }
+      },
+      "target": {
+        "subjectType": "agent",
+        "agentRef": {
+          "agentId": "agent_onlybots_research_fork",
+          "npub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+          "lineageRoot": "agent_onlybots_default"
+        }
+      },
+      "relationshipType": "delegated_to",
+      "weight": 78,
+      "confidence": "high",
+      "receiptRefs": ["trust_receipt_onlybots_schema_delivery_1"],
+      "influenceBoundary": {
+        "lineageCarryoverMode": "bounded",
+        "lineageLinkRefs": ["lineage_onlybots_fork_1"],
+        "selfModelRef": "self_model_onlybots_primary",
+        "selfModelInfluenceMode": "routing_hint",
+        "directTrustTransferProhibited": true,
+        "notes": [
+          "Lineage and self-model data may shape routing or review priority.",
+          "They cannot mint trust weight without new receipt-backed evidence."
+        ]
+      },
+      "explanation": {
+        "rationale": "The parent agent delegated schema work to the research fork and received a successful, reviewable outcome.",
+        "positiveSignals": [
+          "Receipt-backed task completion",
+          "Accepted handoff",
+          "Shared collaboration context continuity"
+        ],
+        "cautionSignals": [
+          "Lineage informed context, but lineage alone did not produce this trust edge"
+        ]
+      },
+      "createdAt": "2026-04-22T10:16:00Z",
+      "updatedAt": "2026-04-22T10:20:00Z",
+      "notes": [
+        "Trust edges cite receipts directly so later routing can explain why an agent or organization was recommended."
+      ]
+    }
+  ]
+}

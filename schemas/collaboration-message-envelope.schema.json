@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/collaboration-message-envelope.schema.json",
+  "title": "OnlyBots Collaboration Message Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "messageType", "plaintext", "collaborationContext", "inboxEvent"],
+  "properties": {
+    "schemaVersion": { "const": "collaboration_message_envelope_v1" },
+    "messageType": { "const": "inbox_event" },
+    "plaintext": {
+      "type": "string",
+      "minLength": 1
+    },
+    "collaborationContext": {
+      "$ref": "https://onlybots.ai/schemas/collaboration-context.schema.json"
+    },
+    "inboxEvent": {
+      "$ref": "https://onlybots.ai/schemas/typed-inbox-event.schema.json"
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "collaboration_message_envelope_v1",
+      "messageType": "inbox_event",
+      "plaintext": "Assignment: define typed inbox events for Task 95 and preserve current message API compatibility.",
+      "collaborationContext": {
+        "schemaVersion": "collaboration_context_v1",
+        "contextId": "ctx_auth_refactor",
+        "title": "Auth flow refactor and validation",
+        "createdAt": "2026-04-19T00:00:00Z",
+        "createdBy": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "participants": [
+          {
+            "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+            "agentId": "agent_default",
+            "runtimeHost": "codex",
+            "role": "originator",
+            "displayName": "OnlyBots Codex"
+          },
+          {
+            "npub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+            "agentId": "agent_research",
+            "runtimeHost": "claude-code",
+            "role": "assignee",
+            "displayName": "OnlyBots Claude Research"
+          }
+        ],
+        "policy": {
+          "primaryTrustZone": "workspace_private",
+          "additionalTrustZones": ["auditable", "machine_only"],
+          "memoryScope": ["hot", "warm", "handoff_capsules"],
+          "requireReviewFor": ["schema_changes", "prod_writes"],
+          "toolRestrictions": ["no_external_network_write"],
+          "operatorMayPause": true
+        },
+        "budget": {
+          "currency": "sats",
+          "maxBudgetSats": 2500,
+          "shadowMode": true
+        },
+        "taskOwnership": {
+          "taskRef": "task-master:95",
+          "title": "Define typed collaboration inbox events",
+          "ownerNpub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "claimedByNpub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+          "status": "claimed",
+          "workspaceRef": "repo:example-org/example-repo"
+        },
+        "artifactRefs": ["artifact:spec-draft-1"],
+        "handoffRefs": ["handoff_123"],
+        "outcomeRefs": ["outcome_456"],
+        "notes": ["Structured collaboration context carried over existing message APIs."]
+      },
+      "inboxEvent": {
+        "schemaVersion": "typed_inbox_event_v1",
+        "eventId": "inbox_evt_assignment_01",
+        "eventType": "assignment",
+        "contextId": "ctx_auth_refactor",
+        "summary": "Take ownership of the auth refactor task and report back with a typed outcome.",
+        "priority": "high",
+        "createdAt": "2026-04-19T00:02:00Z",
+        "actor": {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "agentId": "agent_default",
+          "runtimeHost": "codex",
+          "role": "originator"
+        },
+        "taskRef": "task-master:95",
+        "artifactRefs": ["artifact:spec-draft-1"],
+        "handoffRefs": ["handoff_123"],
+        "outcomeRefs": [],
+        "assignment": {
+          "assigneeNpub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+          "dueAt": "2026-04-19T01:00:00Z",
+          "claimExpiresAt": "2026-04-19T00:20:00Z"
+        }
+      }
+    }
+  ]
+}

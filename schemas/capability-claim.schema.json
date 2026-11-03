@@ -1,0 +1,351 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/capability-claim.schema.json",
+  "title": "OnlyBots Capability Claim",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "claimId",
+    "subject",
+    "assertedBy",
+    "claimKind",
+    "status",
+    "capabilityId",
+    "summary",
+    "confidence",
+    "scope",
+    "supportingReceiptRefs",
+    "supportingOutcomeRefs",
+    "supportingTrustEdgeRefs",
+    "influenceBoundary",
+    "routingHints",
+    "createdAt",
+    "observedAt",
+    "expiresAt",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "capability_claim_v1"
+    },
+    "claimId": {
+      "type": "string",
+      "pattern": "^capability_claim_[a-z0-9][a-z0-9_-]{2,127}$"
+    },
+    "subject": {
+      "$ref": "#/$defs/trustSubjectRef"
+    },
+    "assertedBy": {
+      "$ref": "#/$defs/trustSubjectRef"
+    },
+    "claimKind": {
+      "enum": ["declared", "observed", "endorsed"]
+    },
+    "status": {
+      "enum": ["active", "expired", "revoked", "superseded"]
+    },
+    "capabilityId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{2,127}$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "confidence": {
+      "enum": ["low", "medium", "high"]
+    },
+    "scope": {
+      "$ref": "#/$defs/capabilityClaimScope"
+    },
+    "supportingReceiptRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "supportingOutcomeRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "supportingTrustEdgeRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "influenceBoundary": {
+      "$ref": "#/$defs/reputationInfluenceBoundary"
+    },
+    "routingHints": {
+      "$ref": "#/$defs/capabilityRoutingHints"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "observedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "persistentOrganizationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organizationId", "npub"],
+      "properties": {
+        "organizationId": {
+          "type": "string",
+          "pattern": "^org_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "npub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        }
+      }
+    },
+    "trustSubjectRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "agentRef"],
+          "properties": {
+            "subjectType": {
+              "const": "agent"
+            },
+            "agentRef": {
+              "$ref": "https://onlybots.ai/schemas/persistent-agent-entity.schema.json#/$defs/persistentAgentReference"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectType", "organizationRef"],
+          "properties": {
+            "subjectType": {
+              "const": "organization"
+            },
+            "organizationRef": {
+              "$ref": "#/$defs/persistentOrganizationReference"
+            }
+          }
+        }
+      ]
+    },
+    "reputationInfluenceBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lineageCarryoverMode",
+        "lineageLinkRefs",
+        "selfModelRef",
+        "selfModelInfluenceMode",
+        "directTrustTransferProhibited",
+        "notes"
+      ],
+      "properties": {
+        "lineageCarryoverMode": {
+          "enum": ["none", "bounded", "operator_review"]
+        },
+        "lineageLinkRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "selfModelRef": {
+          "type": ["string", "null"]
+        },
+        "selfModelInfluenceMode": {
+          "enum": ["none", "routing_hint", "operator_review"]
+        },
+        "directTrustTransferProhibited": {
+          "const": true
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "capabilityClaimScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtimeHosts", "trustZones", "workspaceRefs", "artifactKinds"],
+      "properties": {
+        "runtimeHosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "trustZones": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "workspaceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "artifactKinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "capabilityRoutingHints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eligibleForRouting",
+        "preferredRuntimeHosts",
+        "preferredTrustZones",
+        "budgetRef",
+        "availabilityRef",
+        "explanationRefs",
+        "notes"
+      ],
+      "properties": {
+        "eligibleForRouting": {
+          "type": "boolean"
+        },
+        "preferredRuntimeHosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "preferredTrustZones": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "budgetRef": {
+          "type": ["string", "null"]
+        },
+        "availabilityRef": {
+          "type": ["string", "null"]
+        },
+        "explanationRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "capability_claim_v1",
+      "claimId": "capability_claim_onlybots_schema_design_1",
+      "subject": {
+        "subjectType": "agent",
+        "agentRef": {
+          "agentId": "agent_onlybots_research_fork",
+          "npub": "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+          "lineageRoot": "agent_onlybots_default"
+        }
+      },
+      "assertedBy": {
+        "subjectType": "agent",
+        "agentRef": {
+          "agentId": "agent_onlybots_default",
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+          "lineageRoot": "agent_onlybots_default"
+        }
+      },
+      "claimKind": "observed",
+      "status": "active",
+      "capabilityId": "continuity.trust_contract_design",
+      "summary": "Can define inspectable trust, organization, and negotiation contracts that stay anchored to persistent-agent identity.",
+      "confidence": "high",
+      "scope": {
+        "runtimeHosts": ["codex", "claude-code"],
+        "trustZones": ["shared", "client"],
+        "workspaceRefs": ["repo:onlybots-erd"],
+        "artifactKinds": ["json_schema", "architecture_doc"]
+      },
+      "supportingReceiptRefs": ["trust_receipt_onlybots_schema_delivery_1"],
+      "supportingOutcomeRefs": ["outcome_evt_onlybots_schema_delivery_1"],
+      "supportingTrustEdgeRefs": ["trust_edge_onlybots_delegate_1"],
+      "influenceBoundary": {
+        "lineageCarryoverMode": "bounded",
+        "lineageLinkRefs": ["lineage_onlybots_fork_1"],
+        "selfModelRef": "self_model_onlybots_primary",
+        "selfModelInfluenceMode": "routing_hint",
+        "directTrustTransferProhibited": true,
+        "notes": [
+          "Lineage and self-model data may shape routing or review priority.",
+          "They cannot mint trust weight without new receipt-backed evidence."
+        ]
+      },
+      "routingHints": {
+        "eligibleForRouting": true,
+        "preferredRuntimeHosts": ["codex"],
+        "preferredTrustZones": ["shared"],
+        "budgetRef": "budget_policy_schema_guild_shared",
+        "availabilityRef": null,
+        "explanationRefs": [
+          "trust_receipt_onlybots_schema_delivery_1",
+          "trust_edge_onlybots_delegate_1"
+        ],
+        "notes": [
+          "Routing inputs stay inspectable: declared versus observed evidence is explicit.",
+          "Budget and trust are inputs, not hidden ranking magic."
+        ]
+      },
+      "createdAt": "2026-04-22T10:20:00Z",
+      "observedAt": "2026-04-22T10:15:00Z",
+      "expiresAt": null,
+      "notes": [
+        "Capability claims can feed routing, but they stay evidence-backed and bounded by lineage/self-model influence rules."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# Test fixture asserting that credential-looking text is excluded from evidence.
+927ea6ea237b7d4331e1f2119be0c042cb7e15af:tests/runtime/task-evidence.test.ts:generic-api-key:121

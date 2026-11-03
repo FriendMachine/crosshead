@@ -1,0 +1,431 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onlybots.ai/schemas/persistent-agent-entity.schema.json",
+  "title": "Persistent Agent Entity",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "agentRef",
+    "createdAt",
+    "status",
+    "projectModelRefs",
+    "currentRuntimeAttachments",
+    "engineAttachmentHistory",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "persistent_agent_entity_v1"
+    },
+    "agentRef": {
+      "$ref": "#/$defs/persistentAgentReference"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": ["active", "inactive", "forked", "archived", "suspended"]
+    },
+    "policyRef": {
+      "type": ["string", "null"]
+    },
+    "projectModelRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "selfModelRef": {
+      "type": ["string", "null"]
+    },
+    "passportRef": {
+      "type": ["string", "null"]
+    },
+    "currentRuntimeAttachments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/runtimeAttachment"
+      }
+    },
+    "currentEngineAttachment": {
+      "anyOf": [
+        {
+          "$ref": "https://onlybots.ai/schemas/engine-attachment.schema.json#/$defs/engineAttachment"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "engineAttachmentHistory": {
+      "type": "array",
+      "items": {
+        "$ref": "https://onlybots.ai/schemas/engine-attachment.schema.json#/$defs/engineAttachment"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "persistentAgentReference": {
+      "type": "object",
+      "required": ["agentId", "npub", "lineageRoot"],
+      "properties": {
+        "agentId": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "npub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        },
+        "lineageRoot": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        }
+      }
+    },
+    "runtimeAttachment": {
+      "type": "object",
+      "required": [
+        "attachmentId",
+        "runtimeHost",
+        "workspaceId",
+        "sessionId",
+        "attachedAt",
+        "status",
+        "passportRef",
+        "continuityStateRef",
+        "notes"
+      ],
+      "properties": {
+        "attachmentId": {
+          "type": "string",
+          "pattern": "^attach_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "runtimeHost": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspaceId": {
+          "type": ["string", "null"]
+        },
+        "sessionId": {
+          "type": ["string", "null"]
+        },
+        "attachedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "enum": ["active", "paused", "ended"]
+        },
+        "passportRef": {
+          "type": ["string", "null"]
+        },
+        "continuityStateRef": {
+          "type": ["string", "null"]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "lineageLink": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "linkId",
+        "parentAgentId",
+        "childAgentId",
+        "lineageRoot",
+        "forkReason",
+        "inheritedRefs",
+        "excludedRefs",
+        "trustCarryoverMode",
+        "inheritanceBoundaryRef",
+        "signedAt",
+        "signedByNpub",
+        "payloadHash",
+        "signature",
+        "notes"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "lineage_link_v1"
+        },
+        "linkId": {
+          "type": "string",
+          "pattern": "^lineage_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "parentAgentId": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "childAgentId": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "lineageRoot": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "forkReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inheritedRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excludedRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "trustCarryoverMode": {
+          "enum": ["none", "bounded", "operator_review"]
+        },
+        "inheritanceBoundaryRef": {
+          "type": ["string", "null"]
+        },
+        "signedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signedByNpub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        },
+        "payloadHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-fA-F]{64}$"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{128}$"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "inheritanceBoundary": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "boundaryId",
+        "parentAgentId",
+        "childAgentId",
+        "lineageRoot",
+        "policyMode",
+        "policyRef",
+        "selfModelMode",
+        "selfModelRef",
+        "projectModelMode",
+        "projectModelRefs",
+        "hotMemoryMode",
+        "warmMemoryMode",
+        "coldMemoryMode",
+        "inheritedRefs",
+        "excludedRefs",
+        "passportMode",
+        "derivedPassportRef",
+        "runtimeAttachmentMode",
+        "engineAttachmentMode",
+        "trustCarryoverMode",
+        "signedAt",
+        "signedByNpub",
+        "payloadHash",
+        "signature",
+        "notes"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "inheritance_boundary_v1"
+        },
+        "boundaryId": {
+          "type": "string",
+          "pattern": "^inheritance_boundary_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "parentAgentId": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "childAgentId": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "lineageRoot": {
+          "type": "string",
+          "pattern": "^agent_[a-z0-9][a-z0-9_-]{2,127}$"
+        },
+        "policyMode": {
+          "enum": ["inherit", "reset"]
+        },
+        "policyRef": {
+          "type": ["string", "null"]
+        },
+        "selfModelMode": {
+          "enum": ["inherit", "reset"]
+        },
+        "selfModelRef": {
+          "type": ["string", "null"]
+        },
+        "projectModelMode": {
+          "enum": ["inherit", "reset"]
+        },
+        "projectModelRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "hotMemoryMode": {
+          "const": "reset"
+        },
+        "warmMemoryMode": {
+          "enum": ["reference_only", "reset"]
+        },
+        "coldMemoryMode": {
+          "enum": ["reference_only", "reset"]
+        },
+        "inheritedRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excludedRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "passportMode": {
+          "enum": ["derive", "reset"]
+        },
+        "derivedPassportRef": {
+          "type": ["string", "null"]
+        },
+        "runtimeAttachmentMode": {
+          "const": "reset"
+        },
+        "engineAttachmentMode": {
+          "const": "reset"
+        },
+        "trustCarryoverMode": {
+          "enum": ["none", "bounded", "operator_review"]
+        },
+        "signedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signedByNpub": {
+          "type": "string",
+          "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+        },
+        "payloadHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-fA-F]{64}$"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{128}$"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemaVersion": "persistent_agent_entity_v1",
+      "agentRef": {
+        "agentId": "agent_onlybots_default",
+        "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw0x2r",
+        "lineageRoot": "agent_onlybots_default"
+      },
+      "createdAt": "2026-04-15T00:00:00Z",
+      "status": "active",
+      "policyRef": "continuity_policy_v1:sha256:policy_default",
+      "projectModelRefs": ["project_model_onlybots_main"],
+      "selfModelRef": "self_model_onlybots_primary",
+      "passportRef": "agent_passport_v1:sha256:passport_default",
+      "currentRuntimeAttachments": [
+        {
+          "attachmentId": "attach_codex_primary",
+          "runtimeHost": "codex",
+          "workspaceId": "repo:onlybots-erd",
+          "sessionId": "codex-session-42",
+          "attachedAt": "2026-04-15T00:00:00Z",
+          "status": "active",
+          "passportRef": "agent_passport_v1:sha256:passport_default",
+          "continuityStateRef": "continuity_state:agent_onlybots_default",
+          "notes": ["Managed Codex runtime attachment for active repo work."]
+        }
+      ],
+      "currentEngineAttachment": {
+        "schemaVersion": "engine_attachment_v1",
+        "attachmentId": "engine_attach_codex_gpt5_primary",
+        "provider": "openai",
+        "modelFamily": "gpt-5",
+        "modelId": "gpt-5.4",
+        "runtimeHost": "codex",
+        "hostVersion": "0.3.0",
+        "promptTransport": "additionalContext",
+        "attachedAt": "2026-04-15T00:00:00Z",
+        "detachedAt": null,
+        "portabilityNotes": ["Agent identity persists even if the engine attachment changes."],
+        "continuityFidelityNotes": ["Prompting style and tool ergonomics may drift across engines."],
+        "compensationHints": ["Inspect portability diagnostics before treating cross-model behavior as equivalent."]
+      },
+      "engineAttachmentHistory": [
+        {
+          "schemaVersion": "engine_attachment_v1",
+          "attachmentId": "engine_attach_claude_sonnet_previous",
+          "provider": "anthropic",
+          "modelFamily": "claude-sonnet-4",
+          "modelId": "claude-sonnet-4-20260301",
+          "runtimeHost": "claude-code",
+          "hostVersion": "0.3.0",
+          "promptTransport": "append_system_prompt",
+          "attachedAt": "2026-04-10T00:00:00Z",
+          "detachedAt": "2026-04-14T23:59:59Z",
+          "portabilityNotes": ["Cross-host transport changed from Claude prompt append to Codex additional context."],
+          "continuityFidelityNotes": ["Approval posture and tool ergonomics drifted across the host change."],
+          "compensationHints": ["Treat cross-host handoffs as bounded-drift until the current engine is re-benchmarked."]
+        }
+      ],
+      "notes": ["Canonical persistent agent entity shared across continuity, passport, and handoff layers."]
+    }
+  ]
+}
