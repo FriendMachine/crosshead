@@ -1,6 +1,6 @@
 {
   "name": "@crosshead/runtime",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Crosshead local runtime: persistent memory for Claude Code and Codex. CLI, daemon, host adapters and hooks.",
   "license": "Apache-2.0",
   "private": true,

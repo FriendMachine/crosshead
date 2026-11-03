@@ -540,6 +540,7 @@ export class HostedOnlyBotsClient {
       method: "POST",
       body,
       auth: true,
+      expectedStatuses: [200, 201],
     });
     return response.data;
   }
