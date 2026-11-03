@@ -1,9 +1,14 @@
-import { accessSync, chmodSync, constants, existsSync, readFileSync } from "fs";
+import { accessSync, chmodSync, constants, existsSync, readFileSync, rmSync } from "fs";
 import path from "path";
 
 import { assertManagedFilePath, parseArgs, shellQuote, writeManagedFile } from "./adapter-utils";
 import { OMP_EXTENSION_SOURCE } from "./omp-extension-template";
-import { installPiAdapter, ONLYBOTS_PI_ADAPTER_VERSION, type PiAdapterInstallResult } from "./pi-adapter";
+import {
+	installPiAdapter,
+	ONLYBOTS_PI_ADAPTER_VERSION,
+	resolvePiAdapterPaths,
+	type PiAdapterInstallResult,
+} from "./pi-adapter";
 
 export const ONLYBOTS_OMP_PROJECT_ADAPTER_VERSION = ONLYBOTS_PI_ADAPTER_VERSION;
 
@@ -138,6 +143,19 @@ export type OmpProjectInstallResult = {
 	managedFiles: string[];
 };
 
+export type OmpProjectUninstallOptions = {
+	home?: string;
+	workspaceRoot?: string;
+};
+
+export type OmpProjectUninstallResult = {
+	runtimeHome: string;
+	workspaceRoot: string;
+	removedFiles: string[];
+	updatedFiles: string[];
+	piAdapterRetained: boolean;
+};
+
 const isExecutable = (filePath: string): boolean => {
 	try {
 		accessSync(filePath, constants.X_OK);
@@ -193,6 +211,37 @@ export const ensureOmpConfigExtension = (content: string | null): string => {
 	return `${content.replace(/\n*$/, "")}\n\nextensions:\n${extensionLine}\n`;
 };
 
+export const removeOmpConfigExtension = (content: string): string => {
+	const extensionPattern = /^\s*-\s*['"]?\.\/\.omp\/extensions\/onlybots\.js['"]?\s*(?:#.*)?$/;
+	const lines = content.split(/\r?\n/);
+	const filtered = lines.filter((line) => !extensionPattern.test(line));
+	if (filtered.length === lines.length) {
+		return content;
+	}
+
+	for (let index = filtered.length - 1; index >= 0; index -= 1) {
+		const line = filtered[index]!;
+		if (!/^extensions:\s*$/.test(line)) {
+			continue;
+		}
+		let hasRemainingEntry = false;
+		for (let child = index + 1; child < filtered.length; child += 1) {
+			const candidate = filtered[child]!;
+			if (candidate.trim().length === 0 || candidate.trimStart().startsWith("#")) {
+				continue;
+			}
+			hasRemainingEntry = /^\s+-\s+/.test(candidate);
+			break;
+		}
+		if (!hasRemainingEntry) {
+			filtered.splice(index, 1);
+		}
+	}
+
+	const result = filtered.join("\n").replace(/^\n+|\n+$/g, "");
+	return result.length > 0 ? `${result}\n` : "";
+};
+
 
 const ensureSourceableDirenvHelpers = (content: string): string => {
 	if (!/(^|\n)\s*(source_up|PATH_add)\b/.test(content)) {
@@ -237,6 +286,38 @@ export ONLYBOTS_RUNTIME_HOME="$ONLYBOTS_HOME"
 PATH_add "$ONLYBOTS_HOME/bin"
 ${OMP_ENVRC_END}
 `;
+};
+
+export const removeEnvrcOnlyBotsBlock = (content: string): string => {
+	const blockPattern = new RegExp(`\\n?${OMP_ENVRC_BEGIN}[\\s\\S]*?${OMP_ENVRC_END}\\n?`, "g");
+	const result = content.replace(blockPattern, "\n").replace(/\n{3,}/g, "\n\n").trim();
+	return result.length > 0 ? `${result}\n` : "";
+};
+
+const isManagedOmpLauncher = (content: string, runtimeHome: string): boolean =>
+	content.startsWith("#!/usr/bin/env bash\nset -euo pipefail\n") &&
+	content.includes("ONLYBOTS_OMP_WRAPPER_ACTIVE") &&
+	content.includes(`export ONLYBOTS_HOME=${shellQuote(runtimeHome)}`) &&
+	content.includes(`export ONLYBOTS_RUNTIME_HOME=${shellQuote(runtimeHome)}`);
+
+const updateOrRemoveManagedFile = (options: {
+	filePath: string;
+	managedRoot: string;
+	current: string;
+	next: string;
+	removedFiles: string[];
+	updatedFiles: string[];
+}): void => {
+	if (options.current === options.next) {
+		return;
+	}
+	if (options.next.length === 0) {
+		rmSync(options.filePath, { force: true });
+		options.removedFiles.push(options.filePath);
+		return;
+	}
+	writeManagedFile(options.filePath, options.next, options.managedRoot);
+	options.updatedFiles.push(options.filePath);
 };
 
 export const installOmpProjectAdapter = async (
@@ -301,6 +382,78 @@ exec ${shellQuote(ompBinary)} "$@"
 	};
 };
 
+export const uninstallOmpProjectAdapter = async (
+	options: OmpProjectUninstallOptions = {}
+): Promise<OmpProjectUninstallResult> => {
+	const runtimeHome = resolvePiAdapterPaths(options.home).runtimeHome;
+	const workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
+	const extensionFile = path.join(workspaceRoot, ".omp", "extensions", "onlybots.js");
+	const configFile = path.join(workspaceRoot, ".omp", "config.yml");
+	const envrcFile = path.join(workspaceRoot, ".envrc");
+	const launcherFile = path.join(runtimeHome, "bin", process.platform === "win32" ? "omp.cmd" : "omp");
+	const removedFiles: string[] = [];
+	const updatedFiles: string[] = [];
+
+	const expectedExtension = hardenOmpExtensionSource(OMP_EXTENSION_SOURCE, runtimeHome);
+	if (existsSync(extensionFile)) {
+		assertManagedFilePath(extensionFile, workspaceRoot);
+		if (readFileSync(extensionFile, "utf8") !== expectedExtension) {
+			throw new Error(`Refusing to remove modified OMP extension: ${extensionFile}`);
+		}
+	}
+	if (existsSync(launcherFile)) {
+		assertManagedFilePath(launcherFile, runtimeHome);
+		if (!isManagedOmpLauncher(readFileSync(launcherFile, "utf8"), runtimeHome)) {
+			throw new Error(`Refusing to remove unmanaged OMP launcher: ${launcherFile}`);
+		}
+	}
+	if (existsSync(configFile)) {
+		assertManagedFilePath(configFile, workspaceRoot);
+	}
+	if (existsSync(envrcFile)) {
+		assertManagedFilePath(envrcFile, workspaceRoot);
+	}
+
+	if (existsSync(extensionFile)) {
+		rmSync(extensionFile, { force: true });
+		removedFiles.push(extensionFile);
+	}
+	if (existsSync(launcherFile)) {
+		rmSync(launcherFile, { force: true });
+		removedFiles.push(launcherFile);
+	}
+	if (existsSync(configFile)) {
+		const current = readFileSync(configFile, "utf8");
+		updateOrRemoveManagedFile({
+			filePath: configFile,
+			managedRoot: workspaceRoot,
+			current,
+			next: removeOmpConfigExtension(current),
+			removedFiles,
+			updatedFiles,
+		});
+	}
+	if (existsSync(envrcFile)) {
+		const current = readFileSync(envrcFile, "utf8");
+		updateOrRemoveManagedFile({
+			filePath: envrcFile,
+			managedRoot: workspaceRoot,
+			current,
+			next: removeEnvrcOnlyBotsBlock(current),
+			removedFiles,
+			updatedFiles,
+		});
+	}
+
+	return {
+		runtimeHome,
+		workspaceRoot,
+		removedFiles,
+		updatedFiles,
+		piAdapterRetained: existsSync(resolvePiAdapterPaths(runtimeHome).configFile),
+	};
+};
+
 export const installOmpFromCli = async (argv: string[]): Promise<string> => {
 	const { flags } = parseArgs(argv);
 	const result = await installOmpProjectAdapter({
@@ -321,5 +474,23 @@ export const installOmpFromCli = async (argv: string[]): Promise<string> => {
 		`omp_extension: ${result.extensionFile}`,
 		...(result.envrcFile ? [`envrc: ${result.envrcFile}`] : []),
 		"mode: pi-compatible OMP extension",
+	].join("\n");
+};
+
+export const uninstallOmpFromCli = async (argv: string[]): Promise<string> => {
+	const { flags } = parseArgs(argv);
+	const result = await uninstallOmpProjectAdapter({
+		home: typeof flags.home === "string" ? flags.home : undefined,
+		workspaceRoot: typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : undefined,
+	});
+	return [
+		"Uninstalled OMP project adapter",
+		`runtime_home: ${result.runtimeHome}`,
+		`workspace_root: ${result.workspaceRoot}`,
+		`removed_files: ${result.removedFiles.length}`,
+		`updated_files: ${result.updatedFiles.length}`,
+		...(result.piAdapterRetained
+			? ["pi_adapter: retained (run `crosshead uninstall pi` separately if it is no longer needed)"]
+			: []),
 	].join("\n");
 };

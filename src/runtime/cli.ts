@@ -2,7 +2,7 @@ import { organizationJoinFromCli, signChallengeFromCli } from "./cli/organizatio
 import { installCodexFromCli, uninstallCodexFromCli } from "./codex-adapter";
 import { installClaudeCodeFromCli, uninstallClaudeCodeFromCli } from "./claude-code-adapter";
 import { installPiFromCli, uninstallPiFromCli } from "./pi-adapter";
-import { installOmpFromCli } from "./omp-adapter";
+import { installOmpFromCli, uninstallOmpFromCli } from "./omp-adapter";
 import path from "path";
 import { negotiationFromCli, organizationFromCli } from "./economic-governance-cli";
 import { bundleFromCli } from "./resource-bundle-cli";
@@ -224,6 +224,13 @@ export const runOnlyBotsCtlCli = async (
 				output = await uninstallPiFromCli(rest.slice(1));
 				break;
 			}
+			if (rest[0] === "omp") {
+				output = await uninstallOmpFromCli(rest.slice(1));
+				break;
+			}
+			if (rest[0] && !rest[0].startsWith("--")) {
+				throw new Error(`Unknown uninstall target: ${rest[0]}`);
+			}
 			output = await uninstallFromCli(rest);
 			break;
 		default:
@@ -332,6 +339,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead uninstall codex [--home <path>] [--codex-home <path>]",
 				"crosshead uninstall claude-code [--home <path>] [--claude-home <path>]",
 				"crosshead uninstall pi [--home <path>]",
+				"crosshead uninstall omp [--home <path>] [--workspace-root <path>]",
 			].join("\n");
 	}
 

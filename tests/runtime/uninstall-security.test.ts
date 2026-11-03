@@ -6,11 +6,23 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { installRuntimeCore, uninstallRuntimeCore } from "../../src/runtime/local-runtime";
 import { runtimeInstallMarkerFile, resolveRuntimePaths, writeJsonFile } from "../../src/runtime/runtime-persistence";
+import { runOnlyBotsCtlCli } from "../../src/runtime/cli";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
 describe("safe runtime uninstall", () => {
+	it("rejects unknown adapter names instead of falling through to core uninstall", async () => {
+		const dir = mkdtempSync(path.join(os.tmpdir(), "crosshead-uninstall-unknown-adapter-"));
+		dirs.push(dir);
+		await installRuntimeCore({ home: dir, writeWrappers: false });
+
+		await expect(runOnlyBotsCtlCli(["uninstall", "unknown-adapter", "--home", dir])).rejects.toThrow(
+			"Unknown uninstall target: unknown-adapter"
+		);
+		expect(existsSync(runtimeInstallMarkerFile(resolveRuntimePaths(dir)))).toBe(true);
+	});
+
   it("refuses to recursively delete an arbitrary unmarked directory", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "crosshead-uninstall-arbitrary-"));
     dirs.push(dir);
