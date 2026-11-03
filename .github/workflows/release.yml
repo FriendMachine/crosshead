@@ -72,6 +72,7 @@ jobs:
         run: |
           release_id="$(node -p 'require("./release/crosshead-release.json").releaseId')"
           gh release create "$GITHUB_REF_NAME" release/*.tgz release/crosshead-release.json release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Crosshead $GITHUB_REF_NAME" \
             --notes "Release ID \`$release_id\`. Verify downloads against \`SHA256SUMS\` and \`crosshead-release.json\`."
