@@ -6,6 +6,7 @@ import { parseArgs } from "../local-runtime";
 import { ensureRuntimeHomeLayout, loadProfile, loadRuntimeConfig } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
 import { installCoreFromCli, keygenFromCli, startFromCli, statusFromCli } from "./core";
+import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 
 export type QuickstartCliPaths = {
 	cliScriptPath: string;
@@ -174,7 +175,7 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 			ok: billingStatus.low_credit !== true,
 			detail:
 				billingStatus.low_credit === true
-					? "billing reachable but available credits are low; run crosshead billing checkout --credits 1000"
+					? `billing reachable but available credits are low; run crosshead billing checkout --credits ${DEFAULT_CHECKOUT_CREDIT_UNITS}`
 					: "billing reachable",
 		});
 	} catch (error) {
@@ -184,7 +185,11 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 	let checkout: Record<string, unknown> | null = null;
 	if (boolFlagDisabled(flags, "create-checkout")) {
 		const credits =
-			typeof flags.credits === "string" ? flags.credits : typeof flags["checkout-credits"] === "string" ? flags["checkout-credits"] : "1000";
+			typeof flags.credits === "string"
+				? flags.credits
+				: typeof flags["checkout-credits"] === "string"
+					? flags["checkout-credits"]
+					: String(DEFAULT_CHECKOUT_CREDIT_UNITS);
 		checkout = JSON.parse(
 			await billingFromCli(["checkout", ...flagPair("--home", home), "--profile", profileName, "--credits", credits, "--json"])
 		) as Record<string, unknown>;

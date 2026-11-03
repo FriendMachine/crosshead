@@ -3,6 +3,7 @@ import path from "path";
 import { RUNTIME_ADAPTER_NAMES, ensureRuntimeHomeLayout, loadAdapterRecord, loadRuntimeConfig, resolveRuntimeHome } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
 import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy } from "../runtime-auto-update";
+import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 
 export const installCoreFromCli = async (argv: string[], cliScriptPath: string, daemonScriptPath: string): Promise<string> => {
 	const { flags } = parseArgs(argv);
@@ -188,7 +189,9 @@ export const statusFromCli = async (argv: string[]): Promise<string> => {
 		return flags.json
 			? JSON.stringify({ ...status, billing }, null, 2)
 			: `${formatRuntimeStatus(status)}\nbilling: available=${billing.available_credits} service_credits pending=${billing.pending_credits}${
-					billing.low_credit ? "\nbilling_warning: low credits; run crosshead billing checkout --credits 1000" : ""
+					billing.low_credit
+						? `\nbilling_warning: low credits; run crosshead billing checkout --credits ${DEFAULT_CHECKOUT_CREDIT_UNITS}`
+						: ""
 				}`;
 	}
 	return flags.json ? JSON.stringify(status, null, 2) : formatRuntimeStatus(status);
