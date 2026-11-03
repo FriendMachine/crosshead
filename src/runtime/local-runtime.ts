@@ -2446,6 +2446,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const continuity = loadEffectiveContinuityGovernorState(this.paths);
 		const result = await client.prepareContextPack(applyGovernorMemoryScope(payload, continuity.governorState.memoryScope));
 		await this.persistSession(resolvedProfileName, secret, client);
+		await this.lifecycleManager.recordContextPackResult(resolvedProfileName, result, "command");
 		return result;
 	}
 
@@ -3816,6 +3817,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const continuity = loadEffectiveContinuityGovernorState(this.paths);
 		const result = await client.prepareContextPack(applyGovernorMemoryScope(payload, continuity.governorState.memoryScope));
 		await this.persistSession(profileName, secret, client);
+		await this.lifecycleManager.recordContextPackResult(profileName, result, "daemon_proxy");
 		saveHealthState(this.paths, {
 			...loadHealthState(this.paths),
 			lastSuccessfulSyncAt: nowIso(),

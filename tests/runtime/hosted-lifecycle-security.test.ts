@@ -5,6 +5,7 @@ import path from "node:path";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { contextFromCli } from "../../src/runtime/cli/context";
 import { OnlyBotsLocalRuntimeDaemon, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 
 const homes: string[] = [];
@@ -59,6 +60,14 @@ const installFetchMock = (npub: string, contextStatus: number) => {
 				fragments: [{ content: "SERVER_AUTHORED_FRAGMENT_MUST_NOT_REACH_THE_PROMPT" }],
 			});
 		}
+		if (url.pathname === "/v1/context/packs/hosted-pack-safe-id") {
+			return jsonResponse({
+				packId: "hosted-pack-safe-id",
+				goal: "Inspect the explicit context pack",
+				contextText: "Inspectable only through an explicit operator command",
+				fragments: [],
+			});
+		}
 		throw new Error(`unexpected hosted lifecycle request: ${url.pathname}`);
 	});
 };
@@ -87,6 +96,44 @@ const verifiedHotSnapshot = {
 };
 
 describe("hosted lifecycle prompt boundary", () => {
+	it("records an explicit context pack so context inspect --latest can resolve it", async () => {
+		const signer = identity();
+		const home = mkdtempSync(path.join(os.tmpdir(), "crosshead-context-latest-"));
+		homes.push(home);
+		installFetchMock(signer.npub, 200);
+		await setupRuntimeProfile({
+			home,
+			profileName: "default",
+			apiBase: "https://crosshead.sh",
+			npub: signer.npub,
+			nsec: signer.nsec,
+			memoryMode: "assist",
+		});
+
+		const created = JSON.parse(await contextFromCli([
+			"pack",
+			"--goal",
+			"Inspect the explicit context pack",
+			"--home",
+			home,
+			"--profile",
+			"default",
+			"--json",
+		])) as Record<string, unknown>;
+		expect(created.packId).toBe("hosted-pack-safe-id");
+
+		const inspected = JSON.parse(await contextFromCli([
+			"inspect",
+			"--latest",
+			"--home",
+			home,
+			"--profile",
+			"default",
+			"--json",
+		])) as Record<string, unknown>;
+		expect(inspected.packId).toBe("hosted-pack-safe-id");
+	});
+
 	it.each([
 		["a successful hosted response", 200],
 		["a payment-required hosted response", 402],
