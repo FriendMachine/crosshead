@@ -1582,6 +1582,35 @@ export class RuntimeLifecycleManager {
     };
   }
 
+  async recordContextPackResult(
+    profileName: string | null,
+    result: Record<string, unknown>,
+    source: "command" | "daemon_proxy"
+  ): Promise<RuntimeMemoryActionRecord | null> {
+    const packId = asString(result.packId);
+    if (!packId) {
+      return null;
+    }
+    return this.withLock(async () => {
+      const resolved = this.resolveProfile(profileName);
+      return this.recordAction({
+		eventId: null,
+		profileName: resolved.profileName,
+		type: "context_pack",
+		status: "completed",
+		mode: resolved.profile.memoryMode,
+		reason: "Prepared explicit hosted context pack",
+		queueItemId: null,
+		details: {
+		  packId,
+		  source,
+		  fragments: Array.isArray(result.fragments) ? result.fragments.length : 0,
+		  contextChars: asString(result.contextText)?.length ?? 0,
+		},
+      });
+    });
+  }
+
   async handleEvent(request: RuntimeLifecycleEventRequest): Promise<RuntimeLifecycleEventResponse> {
     return this.withLock(async () => {
       const state = this.loadQueueState();
