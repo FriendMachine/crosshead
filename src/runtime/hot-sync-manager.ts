@@ -179,13 +179,29 @@ export class HotSyncManager {
 			for (let i = 0; i < scopes.length && selected.size < 4; i++)
 				selected.add(scopes[(this.cursor + i) % scopes.length]![1]);
 			let syncError: unknown;
+			const resetAttempts = new Set<HotSyncReplica>();
+			// Resets must reach the cloud before import, but ordinary captures must
+			// wait until import has durably queued legacy checkpoints.
 			for (const replica of selected) {
 				if (this.stopped)
 					break;
+				if (!replica.inspect().pendingReset)
+					continue;
+				resetAttempts.add(replica);
 				try { await replica.sync(); } catch(error) { syncError ??= error; }
 			}
 			this.cursor += 2;
-			try { await this.migrateLegacy(); } catch(error) { syncError ??= error; }
+			let migrated = false;
+			try { await this.migrateLegacy(); migrated = true; } catch(error) { syncError ??= error; }
+			// A failed import must not let a first upload create the revision that
+			// would cause the next migration attempt to skip legacy history.
+			if (migrated) for (const replica of selected) {
+				if (this.stopped)
+					break;
+				if (resetAttempts.has(replica))
+					continue;
+				try { await replica.sync(); } catch(error) { syncError ??= error; }
+			}
 			if(syncError)throw syncError;
 			this.failures = 0;
 			this.metadata.error = null;

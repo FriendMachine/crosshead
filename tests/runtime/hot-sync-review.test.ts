@@ -18,9 +18,12 @@ const cp = (id: string, summary = id): HotSyncCheckpoint => ({ id, summary, devi
 class Cloud {
 	rows = new Map<string, HotSyncSnapshot>();
 	legacy: Record<string, unknown> = { scopes: [] };
+	legacyUnavailable = false;
+	writeUnavailable = false;
 	beforeRead: (() => void) | null = null;
 	read = async (namespace: string, scope: string) => { this.beforeRead?.(); return structuredClone(this.rows.get(`${namespace}/${scope}`) ?? { namespace, scope, epoch: 0, revision: 0, content: null }); };
 	write = async (base: HotSyncSnapshot, content: HotSyncEnvelope) => {
+		if (this.writeUnavailable) throw new Error("upload unavailable");
 		const current = await this.read(base.namespace, base.scope);
 		if (current.epoch !== base.epoch || current.revision !== base.revision)
 			throw new Error("409");
@@ -30,7 +33,7 @@ class Cloud {
 	};
 	reset = async (base: HotSyncSnapshot) => { const current = await this.read(base.namespace, base.scope); if (current.epoch !== base.epoch || current.revision !== base.revision)
 		throw new Error("409"); const next = { ...current, epoch: current.epoch + 1, revision: current.revision + 1, content: null }; this.rows.set(`${base.namespace}/${base.scope}`, next); return next; };
-	client(): HostedOnlyBotsClient { return { hotSyncCapabilities: async () => ({ version: 2, enabled: true }), readHotSync: this.read, writeHotSync: this.write, resetHotSync: this.reset, readHotMemory: async () => this.legacy, listHotSync: async (namespace: string) => ({ scopes: [...this.rows.values()].filter(r => r.namespace === namespace).map(r => ({ ...r, content: null })), next_cursor: null }) } as unknown as HostedOnlyBotsClient; }
+	client(): HostedOnlyBotsClient { return { hotSyncCapabilities: async () => ({ version: 2, enabled: true }), readHotSync: this.read, writeHotSync: this.write, resetHotSync: this.reset, readHotMemory: async () => { if (this.legacyUnavailable) throw new Error("legacy unavailable"); return this.legacy; }, listHotSync: async (namespace: string) => ({ scopes: [...this.rows.values()].filter(r => r.namespace === namespace).map(r => ({ ...r, content: null })), next_cursor: null }) } as unknown as HostedOnlyBotsClient; }
 }
 const replica = (stateDir: string, transport: HotSyncTransport) => new HotSyncReplica({ stateDir, origin: "https://crosshead.sh", ...identity, namespace: "default", scope: "codex" }, transport);
 const manager = (cloud: Cloud, stateDir = home()) => new HotSyncManager({ stateDir, origin: "https://crosshead.sh", ...identity, profileName: "default" }, cloud.client());
@@ -38,6 +41,42 @@ const claims = (m: HotSyncManager, inspect = false) => (m.read("all", inspect).s
 	content: string;
 }>).flatMap(e => JSON.parse(e.content).continuityCheckpoints as HotSyncCheckpoint[]);
 describe("hot-sync review regressions", () => {
+	it.each([false, true])("imports legacy before a pending first capture creates a remote revision, restart=%s", async (restart) => {
+		const cloud=new Cloud(),stateDir=home();let m=manager(cloud,stateDir);
+		cloud.legacy={scopes:[{scope:"codex",integrity:"verified",content:JSON.stringify({runtime:"codex",workspaceId:"repo:/project",continuityCheckpoints:[cp("legacy")]})}]};
+		m.capture("ignored",cp("fresh"));
+		if(restart)m=manager(cloud,stateDir);
+		await m.flush();await m.flush();
+		expect(claims(m,true).map(c=>c.summary).sort()).toEqual(["fresh","legacy"]);
+		expect(m.status().pendingCount).toBe(0);
+		const recovered=manager(cloud);recovered.workspace("repo:/project");await recovered.flush();
+		expect(claims(recovered,true).map(c=>c.summary).sort()).toEqual(["fresh","legacy"]);
+	});
+	it("processes resets but defers ordinary uploads when legacy discovery fails",async()=>{
+		const cloud=new Cloud(),stateDir=home();let m=manager(cloud,stateDir);
+		const resetScope=workspaceHotScope("codex",m.workspace("repo:/reset"))!;
+		m.reset(resetScope);m.capture("ignored",cp("fresh"));
+		const scope=workspaceHotScope("codex",m.workspace("repo:/project"))!;
+		cloud.legacy={scopes:[{scope:"codex",integrity:"verified",content:JSON.stringify({runtime:"codex",workspaceId:"repo:/project",continuityCheckpoints:[cp("legacy")]})}]};
+		cloud.legacyUnavailable=true;
+		await expect(m.flush()).rejects.toThrow("legacy unavailable");
+		expect((await cloud.read(m.namespace,resetScope)).epoch).toBe(1);
+		expect((await cloud.read(m.namespace,scope)).revision).toBe(0);
+		cloud.legacyUnavailable=false;m=manager(cloud,stateDir);await m.flush();await m.flush();
+		const recovered=manager(cloud);recovered.workspace("repo:/project");await recovered.flush();
+		expect(claims(recovered,true).map(c=>c.summary).sort()).toEqual(["fresh","legacy"]);
+	});
+	it("retains both imported and new captures through a failed first upload and restart",async()=>{
+		const cloud=new Cloud(),stateDir=home();let m=manager(cloud,stateDir);
+		cloud.legacy={scopes:[{scope:"codex",integrity:"verified",content:JSON.stringify({runtime:"codex",workspaceId:"repo:/project",continuityCheckpoints:[cp("legacy")]})}]};
+		m.capture("ignored",cp("fresh"));cloud.writeUnavailable=true;
+		await expect(m.flush()).rejects.toThrow("upload unavailable");
+		expect(m.status().pendingCount).toBe(2);
+		cloud.writeUnavailable=false;m=manager(cloud,stateDir);await m.flush();await m.flush();
+		const recovered=manager(cloud);recovered.workspace("repo:/project");await recovered.flush();
+		expect(claims(recovered,true).map(c=>c.summary).sort()).toEqual(["fresh","legacy"]);
+	});
+
 	it.each([false, true])("completes reset before legacy import, including restart=%s, and syncs unrelated scopes", async (restart) => {
 		const cloud = new Cloud(), stateDir = home();
 		let m = manager(cloud, stateDir);

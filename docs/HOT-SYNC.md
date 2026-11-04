@@ -125,10 +125,14 @@ checkpoint even if the checkpoint declaring the relationship is pruned. These
 sets are compacted with the retained view; hot memory is still bounded history.
 A lone surviving conflict variant stays marked as disputed.
 
-Scope sync/reset runs before legacy migration, and migration checks for pending
-reset both before and after its awaited read. A scope failure no longer stops
-other selected scopes from attempting their sync. Neither a reset before first
-import nor a reset racing that read can repopulate the cleared scope.
+Pending resets run before legacy migration; ordinary captures upload only after
+migration succeeds. Legacy checkpoints enter the durable outbox before a new
+capture can create the first cloud revision, including after a restart. If legacy
+discovery or import fails, ordinary uploads wait for a successful retry while
+pending resets can still proceed. Migration checks for pending reset both before
+and after its awaited read. A reset failure does not stop other selected scopes
+from attempting their sync. Neither a reset before first import nor a reset
+racing that read can repopulate the cleared scope.
 
 Conditional-read ETags bind identity, namespace, scope, epoch and revision.
 Server responses include `Vary: Authorization`. The service applies both an IP
