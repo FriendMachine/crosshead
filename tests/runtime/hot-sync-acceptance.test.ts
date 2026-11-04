@@ -193,6 +193,8 @@ describe("local-first hot-memory acceptance", () => {
 		const make = () => new RuntimeLifecycleManager({ paths: { state: stateDir }, loadDefaultProfileName: () => "default", loadProfile: () => ({ name: "default", apiBase: "https://crosshead.sh", npub: id.npub, memoryMode: "assist", features: { coldSync: false, autoWarmPromotion: false } }), loadSecret: () => ({ nsec: id.nsec, session: null }), saveSecret: () => { }, loadHealth: () => ({ queueDepth: 0, lastSuccessfulSyncAt: null, lastError: null }), saveHealth: () => { }, loadContinuityGovernorState: () => buildContinuityGovernorState(buildDefaultContinuityPolicy(), []), writeLog: () => { } });
 		let m = make();
 		await m.handleEvent({ eventId: "capture", runtime: "codex", type: "turn.completed", workspaceId: "repo:/project", payload: { goal: "repair sync", summary: "The queue must fsync before acknowledging capture." } });
+		await m.handleEvent({eventId:"acknowledgment",runtime:"codex",type:"session.ended",workspaceId:"repo:/project",payload:{summary:"Codex session ended."}});
+		expect(new HotSyncManager({stateDir,origin:"https://crosshead.sh",...id,profileName:"default"}).status().pendingCount).toBe(1);
 		await m.stop();
 		await stopHotSyncManagers(stateDir);
 		m = make();
@@ -200,6 +202,8 @@ describe("local-first hot-memory acceptance", () => {
 			const r = await m.handleEvent({ eventId: `read-${runtime}`, runtime, type: "turn.started", workspaceId: "repo:/project", payload: { goal: "continue repair sync" } });
 			expect(JSON.stringify(r.contextPack)).toContain("The queue must fsync before acknowledging capture.");
 		}
+		const suppressed=await m.handleEvent({eventId:"hot-disabled",runtime:"codex",type:"turn.started",workspaceId:"repo:/project",payload:{goal:"continue",allowedScope:{includeHotMemory:false}}});
+		expect(JSON.stringify(suppressed.contextPack)).not.toContain("The queue must fsync");
 		const elsewhere = await m.handleEvent({ eventId: "other-project", runtime: "codex", type: "turn.started", workspaceId: "repo:/elsewhere", payload: { goal: "continue" } });
 		expect(JSON.stringify(elsewhere.contextPack)).not.toContain("The queue must fsync");
 		expect(fetcher.mock.calls.some(([url]) => String(url).includes("/context/pack") || String(url).includes("/memory/hot?"))).toBe(false);
