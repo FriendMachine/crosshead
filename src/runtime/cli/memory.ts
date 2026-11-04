@@ -1,3 +1,4 @@
+import { LocalRuntimeClient } from "../local-client";
 import { HOT_SCOPE_ALL } from "../../protocol/memory";
 import { OnlyBotsLocalRuntimeDaemon, buildMemorySearchPresentation, formatHotMemoryForDisplay, formatMemorySearchPresentation, formatWarmMemoryEntryForDisplay, formatWarmMemoryEvaluation, parseArgs, summarizeRecentWarmMemoryOutcomes, truncateForPresentation } from "../local-runtime";
 
@@ -7,6 +8,14 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 	const profileName = typeof flags.profile === "string" ? flags.profile : undefined;
 	const daemon = new OnlyBotsLocalRuntimeDaemon(typeof flags.home === "string" ? flags.home : undefined);
 
+	if (subcommand === "sync" || (subcommand === "hot" && positionals[1] === "reset")) {
+		if (subcommand === "hot" && typeof flags.scope !== "string") throw new Error("memory hot reset requires --scope <scope from memory sync>");
+		const result = await new LocalRuntimeClient({home:typeof flags.home === "string" ? flags.home : undefined}).hotSyncControl({profileName,action:subcommand === "hot" ? "reset" : "status",scope:flags.scope});
+		return JSON.stringify(result, null, 2);
+	}
+	if (subcommand === "hot" && flags.inspect) {
+		return JSON.stringify(await new LocalRuntimeClient({home:typeof flags.home === "string" ? flags.home : undefined}).hotSyncControl({profileName,action:"inspect",scope:flags.scope}), null, 2);
+	}
 	if (subcommand === "hot") {
 		// Default the operator view to the cross-body union; allow --scope <name> to focus one body.
 		const hotScope = typeof flags.scope === "string" && flags.scope.length > 0 ? flags.scope : HOT_SCOPE_ALL;
@@ -162,4 +171,10 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 	}
 
 	throw new Error("memory subcommand must be one of: hot, warm, evaluate, search, export, mode");
+};
+
+export const workspaceFromCli = async (argv: string[]): Promise<string> => {
+	const {positionals, flags} = parseArgs(argv);
+	if (positionals[0] !== "link" || typeof flags.name !== "string" || typeof flags["workspace-root"] !== "string") throw new Error("workspace link requires --name <shared-label> --workspace-root <path>");
+	return JSON.stringify(await new LocalRuntimeClient({home:typeof flags.home === "string" ? flags.home : undefined}).hotSyncControl({action:"link",name:flags.name,root:flags["workspace-root"],profileName:flags.profile}), null, 2);
 };

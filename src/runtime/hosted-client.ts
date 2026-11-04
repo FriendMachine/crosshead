@@ -233,13 +233,15 @@ export class HostedOnlyBotsRequestError extends Error {
   readonly status: number;
   readonly code: string | null;
   readonly details: unknown;
+  readonly retryAfterMs: number;
 
-  constructor(input: { message: string; status: number; code?: string | null; details?: unknown }) {
+  constructor(input: { message: string; status: number; code?: string | null; details?: unknown; retryAfterMs?: number }) {
     super(input.message);
     this.name = "HostedOnlyBotsRequestError";
     this.status = input.status;
     this.code = input.code ?? null;
     this.details = input.details;
+    this.retryAfterMs = input.retryAfterMs ?? 0;
   }
 }
 
@@ -402,12 +404,13 @@ export class HostedOnlyBotsClient {
       redirect: "error",
       signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
     });
-    const data = await readBoundedJson<T>(response);
+    const data = response.status === 304 ? undefined as T : await readBoundedJson<T>(response);
     const expected = options.expectedStatuses ?? [200];
     if (!expected.includes(response.status)) {
       const error = extractHostedError(data);
       throw new HostedOnlyBotsRequestError({
 				status: response.status,
+				retryAfterMs: Math.max(0, Number(response.headers.get("retry-after")) * 1000 || Date.parse(response.headers.get("retry-after") ?? "") - Date.now() || 0),
 				code: error.code,
 				details: error.details,
 				message: error.message ?? `Hosted API request failed with ${response.status}`,
@@ -959,27 +962,34 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
-  async readHotSync(namespace: string, scope: string): Promise<HotSyncSnapshot> {
+  async hotSyncCapabilities(): Promise<{version:number;enabled:boolean}> {
     await this.ensureSession();
-    return (await this.request<HotSyncSnapshot>(`/memory/hot-sync?namespace=${encodeURIComponent(namespace)}&scope=${encodeURIComponent(scope)}`, {auth:true})).data;
+    return (await this.request<{version:number;enabled:boolean}>("/memory/hot-sync/capabilities",{auth:true,timeoutMs:5000})).data;
+  }
+  async readHotSync(namespace: string, scope: string, known?: HotSyncSnapshot): Promise<HotSyncSnapshot> {
+    await this.ensureSession();
+    const response=await this.request<HotSyncSnapshot>(`/memory/hot-sync?namespace=${encodeURIComponent(namespace)}&scope=${encodeURIComponent(scope)}`, {auth:true,timeoutMs:5000,expectedStatuses:[200,304],headers:known && known.revision>0?{"if-none-match":`"${known.epoch}-${known.revision}"`}:undefined});
+    if(response.status===304){if(!known)throw new Error("Unexpected unchanged hot-sync response");return known;}
+    return response.data;
   }
   async writeHotSync(base: HotSyncSnapshot, content: HotSyncEnvelope): Promise<HotSyncSnapshot> {
     await this.ensureSession();
-    return (await this.request<HotSyncSnapshot>("/memory/hot-sync", {method:"PUT",auth:true,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision,content}})).data;
+    return (await this.request<HotSyncSnapshot>("/memory/hot-sync", {method:"PUT",auth:true,timeoutMs:5000,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision,content}})).data;
   }
   async resetHotSync(base: HotSyncSnapshot): Promise<HotSyncSnapshot> {
     await this.ensureSession();
-    return (await this.request<HotSyncSnapshot>("/memory/hot-sync/reset", {method:"POST",auth:true,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision}})).data;
+    return (await this.request<HotSyncSnapshot>("/memory/hot-sync/reset", {method:"POST",auth:true,timeoutMs:5000,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision}})).data;
   }
   async listHotSync(namespace: string, cursor: string | null = null): Promise<{scopes: HotSyncSnapshot[];next_cursor:string|null}> {
     await this.ensureSession();
-    return (await this.request<{scopes:HotSyncSnapshot[];next_cursor:string|null}>(`/memory/hot-sync/scopes?namespace=${encodeURIComponent(namespace)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {auth:true})).data;
+    return (await this.request<{scopes:HotSyncSnapshot[];next_cursor:string|null}>(`/memory/hot-sync/scopes?namespace=${encodeURIComponent(namespace)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {auth:true,timeoutMs:5000})).data;
   }
 
-  async readHotMemory(scope?: string): Promise<Record<string, unknown>> {
+  async readHotMemory(scope?: string, timeoutMs?: number): Promise<Record<string, unknown>> {
     await this.ensureSession();
     const suffix = scope ? `?scope=${encodeURIComponent(scope)}` : "";
     const response = await this.request<Record<string, unknown>>(`/memory/hot${suffix}`, {
+      timeoutMs,
       method: "GET",
       auth: true,
     });

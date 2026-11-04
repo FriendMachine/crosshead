@@ -1,3 +1,5 @@
+import { getHotSyncManager, hotSyncEnabled } from "./hot-sync-manager";
+import { isLocalOnlyRuntimeProfile } from "./local-hot-memory";
 import { existsSync } from "fs";
 import path from "path";
 import { daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState } from "./daemon-ownership";
@@ -446,8 +448,14 @@ export const buildRuntimeStatus = async (paths: RuntimePaths, profileName?: stri
 	const dreamReview = selectedProfileName ? readRuntimeDreamReviewHudSnapshot(paths.state, selectedProfileName) : null;
 	const integrityIssues = collectRuntimeIntegrityIssues(paths);
 	const continuity = buildContinuityInspection(paths);
+	let hotSync: Record<string, unknown> | undefined;
+	if (hotSyncEnabled() && profile && secret && !isLocalOnlyRuntimeProfile(profile)) {
+		try { hotSync = getHotSyncManager({stateDir:paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:profile.name}).status(); }
+		catch { hotSync = {enabled:true,state:"needs_attention",error:"local_store_invalid"}; }
+	}
 
 	return {
+		...(hotSync ? {hotSync} : {}),
 		coreVersion: config.coreVersion,
 		channel: config.channel,
 		home: paths.home,
@@ -581,6 +589,7 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 							.join(" | "),
 	});
 
+	if (status.hotSync) checks.push({id:"hot_sync",ok:status.hotSync.state !== "needs_attention",message:JSON.stringify(status.hotSync)});
 	const adapterChecks = status.adapters.map((adapter) => evaluateAdapterAutomation(adapter));
 	checks.push(...adapterChecks);
 

@@ -1618,6 +1618,7 @@ export class RuntimeLifecycleManager {
       const { profileName, profile, secret } = this.resolveProfile(request.profileName ?? null);
       const localOnlyProfile = isLocalOnlyRuntimeProfile(profile);
       const event = this.hydrateEventFromPriorTurnStart(this.normalizeEvent(request, profileName));
+      if(hotSyncEnabled() && !localOnlyProfile && event.workspaceId)getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).activate(event.runtime,event.workspaceId);
       const continuity = this.deps.loadContinuityGovernorState();
       // Apply capture policy before the event log as well as before hot storage.
       // This also covers a mode/pause change racing a native hook's status read.
@@ -1724,9 +1725,9 @@ export class RuntimeLifecycleManager {
               })
             );
           } else {
-						if (localOnlyProfile) {
+						if (localOnlyProfile || (hotSyncEnabled() && packRequest.recallPolicy !== "bounded")) {
 							if (!hasHotMemoryOverride(packRequest)) {
-								packRequest.hotMemorySnapshot = readLocalHotMemory(this.deps.paths.state, HOT_SCOPE_ALL);
+								packRequest.hotMemorySnapshot = localOnlyProfile ? readLocalHotMemory(this.deps.paths.state, HOT_SCOPE_ALL) : getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).read();
 							}
 							contextPack = buildLocalOnlyContextPack(event, packRequest);
 							actions.push(
@@ -1951,12 +1952,13 @@ export class RuntimeLifecycleManager {
 					if (hotSyncEnabled() && !localOnlyProfile) {
 						const manager=getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName});
 						const scope=workspaceHotScope(event.runtime,event.workspaceId) ?? "shared";
-						const current=parseStructuredHotState(String(manager.read(scope).content ?? ""));
+						const current=parseStructuredHotState(String(manager.readWorkspace(event.runtime,event.workspaceId ?? "").content ?? ""));
 						const hot=buildHotState(current,event);
 						const checkpoints=Array.isArray(hot.continuityCheckpoints)?hot.continuityCheckpoints:[];
 						const last=checkpoints[checkpoints.length-1] as Record<string,unknown>|undefined;
 						if(last && ["turn.completed","turn.failed","session.ended","compact.started"].includes(event.type)) {
-						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:event.turnId,...(last.evidence ? {evidence:last.evidence} : {})});
+						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:event.turnId,...(Array.isArray(event.payload.supersedes) ? {supersedes:event.payload.supersedes.filter((v):v is string=>typeof v === "string")} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
+							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));
 						}
 					} else {
 					const scope = event.runtime || undefined;
@@ -2922,7 +2924,7 @@ export class RuntimeLifecycleManager {
       return state;
     }
 
-    if (hotSyncEnabled()) tickHotSyncManagers();
+    if (hotSyncEnabled()) tickHotSyncManagers(this.deps.paths.state);
     const now = this.now().getTime();
     const remaining: RuntimeQueueItem[] = [];
     const ready = state.items.filter((item) => force || new Date(item.availableAt).getTime() <= now);
