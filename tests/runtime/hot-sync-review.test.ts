@@ -131,6 +131,13 @@ describe("hot-sync review regressions", () => {
 			expect(claims(view).some(c => c.id === "target")).toBe(false);
 		}
 	});
+	it("withholds targets referenced by an already-divergent declaration",async()=>{
+		const cloud=new Cloud(),m=manager(cloud),workspaceId=m.workspace("repo:/project"),scope=workspaceHotScope("codex",workspaceId)!;
+		const document={version:HOT_SYNC_VERSION,namespace:m.namespace,scope,epoch:0,checkpoints:[{...cp("target"),workspaceId},{...cp("variant:declaration"),workspaceId,conflictOf:"declaration",conflictsWith:["target"]}]};
+		cloud.rows.set(`${m.namespace}/${scope}`,{namespace:m.namespace,scope,epoch:0,revision:1,content:signHotSync(document,identity.nsec)});
+		await m.flush();expect(claims(m,true)).toHaveLength(2);expect(claims(m)).toEqual([]);
+	});
+
 	it("retires device watermarks without resurrecting acknowledged history from stale devices", async () => {
 		const cloud = new Cloud();
 		const old = cp("old");
