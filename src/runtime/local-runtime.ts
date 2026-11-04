@@ -1,4 +1,4 @@
-import { getHotSyncManager, hotSyncEnabled } from "./hot-sync-manager";
+import { getHotSyncManager, hotSyncEnabled, stopHotSyncManagers } from "./hot-sync-manager";
 import { shellQuote, writeManagedFile } from "./adapter-utils";
 import { renderAgentMarkText } from "../protocol/agent-mark";
 import {
@@ -317,6 +317,7 @@ export type RuntimeAdapterSnapshot = {
 
 
 export type RuntimeStatus = {
+	hotSync?: Record<string, unknown>;
 	coreVersion: string;
 	channel: RuntimeChannel;
 	home: string;
@@ -2239,6 +2240,10 @@ export class OnlyBotsLocalRuntimeDaemon {
 				startedAt: nowIso(), lastHeartbeat: nowIso(), lastError: null,
 			});
 			this.server = server;
+			if (hotSyncEnabled()) for (const file of readdirSync(this.paths.profiles).filter(name => name.endsWith(".json"))) {
+				const name = file.slice(0, -5), profile = loadProfile(this.paths, name), secret = loadSecret(this.paths, name);
+				if (profile && secret && !isLocalOnlyRuntimeProfile(profile)) getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:name});
+			}
 			this.lifecycleManager.start();
 			this.heartbeatTimer = setInterval(() => {
 				try {
@@ -2318,6 +2323,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		try { await this.organizationalWorker?.shutdown?.(); } catch (error) { failures.push(error); }
 		await closed;
 		try { await this.lifecycleManager.stop(); } catch (error) { failures.push(error); }
+		try { await stopHotSyncManagers(this.paths.state); } catch (error) { failures.push(error); }
 		try { await this.runtimeCleanup(); } catch (error) { failures.push(error); }
 		return failures;
 	}
@@ -3187,6 +3193,20 @@ export class OnlyBotsLocalRuntimeDaemon {
 		return result;
 	}
 
+	async hotSyncControl(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+		if (!this.ownsRuntimeHome()) throw new Error("Start the daemon before changing hot sync");
+		if (!hotSyncEnabled()) throw new Error("Local hot sync is not enabled on this daemon");
+		const {profileName, secret} = await this.withProfileBody(body);
+		const profile = loadProfile(this.paths, profileName)!;
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("This profile uses local-only memory");
+		const manager = getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName});
+		if (body.action === "link" && typeof body.root === "string" && typeof body.name === "string") return manager.link(body.root, body.name);
+		if (body.action === "reset" && typeof body.scope === "string") return manager.reset(body.scope);
+		if (body.action === "inspect") return manager.read(typeof body.scope === "string" ? body.scope : "all", true);
+		if (body.action === "status") return manager.status();
+		throw new Error("Invalid hot-sync control action");
+	}
+
 	async readHotMemory(profileName?: string, scope?: string): Promise<Record<string, unknown>> {
 		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({
 			profileName,
@@ -3197,7 +3217,6 @@ export class OnlyBotsLocalRuntimeDaemon {
 		}
 		if (profile && hotSyncEnabled()) {
 			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
-			if (!loadEffectiveContinuityGovernorState(this.paths).governorState.paused) manager.tick();
 			return manager.read(scope ?? "shared");
 		}
 		// Pass the scope through unchanged (undefined => the server's shared default), so internal
@@ -4010,6 +4029,7 @@ export const formatRuntimeStatus = (status: RuntimeStatus): string => {
 		`backpressure: ${status.backpressure ? "yes" : "no"}`,
 		`last_sync: ${status.lastSuccessfulSyncAt ?? "never"}`,
 	];
+	if (status.hotSync) lines.push(`hot_sync: ${status.hotSync.state} (pending: ${status.hotSync.pendingCount ?? 0})${status.hotSync.error ? `; ${status.hotSync.error}` : ""}`);
 	if (status.profile) {
 		lines.push(`profile: ${status.profile.name} (${status.profile.npub})`);
 		lines.push(`agent mark (visual only):\n${renderAgentMarkText(status.profile.npub)}`);

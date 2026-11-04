@@ -16,6 +16,7 @@ export type HotSyncCheckpoint = {
 	turnId?: string | null;
 	evidence?: unknown;
 	supersedes?: string[];
+	conflictsWith?: string[];
 	conflictOf?: string;
 };
 export type HotSyncDocument = {
@@ -33,6 +34,7 @@ export type HotSyncEnvelope = {
 	signature: string;
 };
 export type HotSyncSnapshot = {
+	updated_at?: string | null;
 	namespace: string;
 	scope: string;
 	epoch: number;
@@ -51,6 +53,7 @@ export function validHotSyncDocument(value: unknown): value is HotSyncDocument {
 			[c.deviceId, c.runtime, c.workspaceId, c.goal, c.summary, c.occurredAt].every(v => typeof v === "string") &&
 			Number.isFinite(Date.parse(c.occurredAt)) && (c.sequence === undefined || hotSyncCounter(c.sequence)) &&
 			(c.supersedes === undefined || Array.isArray(c.supersedes) && c.supersedes.length <= 256 && c.supersedes.every(id => typeof id === "string")) &&
+			(c.conflictsWith === undefined || Array.isArray(c.conflictsWith) && c.conflictsWith.length <= 256 && c.conflictsWith.every(id => typeof id === "string")) &&
 			(c.conflictOf === undefined || typeof c.conflictOf === "string")) &&
 		new Set(d.checkpoints.map(c => c.id)).size === d.checkpoints.length;
 }

@@ -15,7 +15,7 @@ import { contextFromCli } from "./cli/context";
 import { continuityFromCli } from "./cli/continuity";
 import { applyFromCli, checkUpdatesFromCli, doctorFromCli, eventsFromCli, installCoreFromCli, keygenFromCli, logsFromCli, rollbackFromCli, setupProfileFromCli, startFromCli, statusFromCli, stopFromCli, uninstallFromCli, updateFromCli } from "./cli/core";
 import { handoffFromCli } from "./cli/handoff";
-import { memoryFromCli } from "./cli/memory";
+import { memoryFromCli, workspaceFromCli } from "./cli/memory";
 import { messagesFromCli } from "./cli/messages";
 import { publicFromCli } from "./cli/public";
 import { quickstartFromCli } from "./cli/quickstart";
@@ -136,6 +136,9 @@ export const runOnlyBotsCtlCli = async (
 			break;
 		case "events":
 			output = await eventsFromCli(rest);
+			break;
+		case "workspace":
+			output = await workspaceFromCli(rest);
 			break;
 		case "memory":
 			output = await memoryFromCli(rest);
@@ -262,7 +265,10 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead doctor [--home <path>] [--json]",
 				"crosshead logs [--home <path>] [--lines 50]",
 				"crosshead events [--home <path>] [--lines 50] [--json]",
-				"crosshead memory hot [--home <path>] [--profile <name>] [--json|--debug]",
+				"crosshead workspace link --name <shared-label> --workspace-root <path> [--home <path>] [--profile <name>]",
+				"crosshead memory sync [--home <path>] [--profile <name>]",
+				"crosshead memory hot reset --scope <scope> [--home <path>] [--profile <name>]",
+				"crosshead memory hot [--inspect] [--home <path>] [--profile <name>] [--json|--debug]",
 				"crosshead memory warm [--home <path>] [--profile <name>] [--type <type>] [--status <status>] [--include-system] [--json|--debug]",
 				"crosshead memory evaluate [--home <path>] [--profile <name>] [--lines 200] [--limit 50] [--apply] [--include-system] [--json|--debug]",
 				"crosshead memory search <query> [--home <path>] [--profile <name>] [--top-k <n>] [--include-system] [--json|--debug]",

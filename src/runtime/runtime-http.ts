@@ -511,6 +511,10 @@ export const handleRuntimeDaemonRequest = async (
 				sendJson(response, 200, result);
 				return;
 			}
+			if (request.method === "POST" && url.pathname === "/v1/memory/hot-sync/control") {
+				sendJson(response, 200, await daemon.hotSyncControl(await readBody(request)));
+				return;
+			}
 			if (request.method === "GET" && url.pathname === "/v1/memory/hot") {
 				sendJson(
 					response,

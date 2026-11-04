@@ -122,6 +122,10 @@ export class LocalRuntimeClient {
     }
   }
 
+  async hotSyncControl(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v1/memory/hot-sync/control", {body});
+  }
+
   async status(profileName?: string): Promise<RuntimeStatus> {
     return this.request<RuntimeStatus>("GET", "/v1/status", {
       query: {
