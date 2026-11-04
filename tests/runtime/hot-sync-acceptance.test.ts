@@ -158,6 +158,14 @@ describe("local-first hot-memory acceptance", () => {
 		expect(m.status().mixedVersion).toBe(true);
 		expect(entries(m)[0]!.summary).toBe("finding legacy");
 	});
+	it("refuses to render a validly signed checkpoint under the wrong workspace scope",async()=>{
+		const cloud=new Cloud(),id=identity(),m=new HotSyncManager({stateDir:home(),origin:"https://crosshead.sh",...id,profileName:"default"},cloud.client(id.npub));
+		m.capture("ignored",checkpoint("legitimate"));await m.flush();
+		const [key,row]=[...cloud.rows][0]!;
+		row.content=signHotSync({...row.content!.document,checkpoints:[{...row.content!.document.checkpoints[0]!,workspaceId:"another-workspace"}]},id.nsec);row.revision++;cloud.rows.set(key,row);
+		await m.flush();expect(()=>m.read()).toThrow(/another workspace scope/);
+	});
+
 	it("honors Retry-After instead of retrying every worker tick", async () => {
 		vi.useFakeTimers();
 		try {

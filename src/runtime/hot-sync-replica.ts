@@ -11,6 +11,13 @@ export interface HotSyncTransport {
 }
 export const HOT_SYNC_LOCAL_BYTES = 64 * 1024 * 1024;
 export const hotSyncTenantDirectory = (stateDir: string, origin: string, npub: string): string => path.join(stateDir, "hot-sync", createHash("sha256").update(JSON.stringify([origin, npub])).digest("hex"));
+/** One quota covers snapshots, outboxes and profile/workspace metadata. */
+export function writeHotSyncState(file: string, value: unknown): void {
+	const dir=path.dirname(file),bytes=Buffer.byteLength(JSON.stringify(value,null,2));
+	const otherBytes=existsSync(dir)?readdirSync(dir).filter(n=>n.endsWith(".json")&&path.join(dir,n)!==file).reduce((sum,n)=>sum+statSync(path.join(dir,n)).size,0):0;
+	if(bytes+otherBytes>HOT_SYNC_LOCAL_BYTES)throw new Error("Hot-sync local quota exceeded; existing captures are preserved");
+	writeJsonFile(file,value);
+}
 type RecordState = {
 	version: 2;
 	origin: string;
@@ -89,12 +96,7 @@ export class HotSyncReplica {
 		return r;
 	}
 	private save(r: RecordState): void {
-		const dir = path.dirname(this.file);
-		const bytes = Buffer.byteLength(JSON.stringify(r, null, 2));
-		const otherBytes = existsSync(dir) ? readdirSync(dir).filter(n => /^[a-f0-9]{64}\.json$/.test(n) && path.join(dir, n) !== this.file).reduce((sum, n) => sum + statSync(path.join(dir, n)).size, 0) : 0;
-		if (bytes + otherBytes > HOT_SYNC_LOCAL_BYTES)
-			throw new Error("Hot-sync local quota exceeded; existing captures are preserved");
-		writeJsonFile(this.file, r);
+		writeHotSyncState(this.file, r);
 		this.cached = { stamp: this.stamp(), record: r };
 	}
 	inspect(): HotSyncInspection {

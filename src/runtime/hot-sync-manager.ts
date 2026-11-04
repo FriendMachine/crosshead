@@ -2,10 +2,9 @@ import { createHash, createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { HotSyncReplica, hotSyncTenantDirectory } from "./hot-sync-replica";
+import { HotSyncReplica, hotSyncTenantDirectory, writeHotSyncState } from "./hot-sync-replica";
 import { HostedOnlyBotsClient, HostedOnlyBotsRequestError } from "./hosted-client";
 import { hotSyncName, HOT_SYNC_MAX_SCOPES, type HotSyncCheckpoint } from "../protocol/hot-sync";
-import { writeJsonFile } from "./runtime-persistence";
 import { workspaceHotScope } from "./workspace-hot-memory";
 import { normalizeTaskEvidence } from "./task-evidence";
 export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
@@ -68,7 +67,7 @@ export class HotSyncManager {
 					this.replica(record.base.document.scope);
 			}
 	}
-	private persist(): void { writeJsonFile(this.metadataFile, this.metadata); }
+	private persist(): void { writeHotSyncState(this.metadataFile, this.metadata); }
 	private digest(value: string): string { return createHmac("sha256", this.config.nsec).update(`crosshead-workspace-v1\n${value}`).digest("hex"); }
 	workspace(raw: string): string {
 		if (this.metadata.workspaces[raw])
@@ -118,6 +117,7 @@ export class HotSyncManager {
 	read(scope = "all", inspect = false): Record<string, unknown> {
 		const entries = (scope === "all" ? [...this.replicas.entries()] : [[scope, this.replica(scope)] as const]).flatMap(([name, replica]) => {
 			const r = replica.inspect();
+			if(r.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==name))throw new Error("Hot-sync checkpoint belongs to another workspace scope");
 			const superseded = new Set(r.local.document.checkpoints.flatMap(c => c.supersedes ?? []));
 			const disputed = new Set(r.local.document.checkpoints.flatMap(c => c.conflictsWith?.length ? [c.id, ...c.conflictsWith] : []));
 			const candidates = inspect ? r.local.document.checkpoints : r.local.document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id));
@@ -139,7 +139,7 @@ export class HotSyncManager {
 	}
 	reset(scope: string): Record<string, unknown> { this.replica(scope).resetLocally(); this.nextSync = 0; return { scope, status: "pending_reset", message: "Cleared on this machine. Other devices clear this scope when they next sync." }; }
 	status(): Record<string, unknown> {
-		const scopes = [...this.replicas].map(([scope, r]) => { const x = r.inspect(); return { scope, epoch: x.base.document.epoch, remoteRevision: x.revision, pending: x.pendingCount, pendingReset: x.pendingReset, oldestPendingAt: x.oldestPendingAt, lastSuccessfulSyncAt: x.lastSyncedAt, conflicts: x.local.document.checkpoints.filter(c => c.conflictOf || c.conflictsWith?.length).length, error: x.error, discardedByReset: x.discardedByReset }; });
+		const scopes = [...this.replicas].map(([scope, r]) => { const x = r.inspect(); return { scope, epoch: x.base.document.epoch, remoteRevision: x.revision, pending: x.pendingCount, pendingReset: x.pendingReset, oldestPendingAt: x.oldestPendingAt, lastSuccessfulSyncAt: x.lastSyncedAt, conflicts: x.local.document.checkpoints.filter(c => c.conflictOf || c.conflictsWith?.length).length, error: x.error ?? (x.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==scope) ? "workspace_boundary_invalid" : null), discardedByReset: x.discardedByReset }; });
 		return { enabled: true, initialSyncPending: !this.metadata.lastDiscoveryAt, lastSuccessfulDiscoveryAt: this.metadata.lastDiscoveryAt ?? null, pendingCount: scopes.reduce((n, s) => n + s.pending, 0), pendingScopes: scopes.filter(s => s.pending || s.pendingReset).length, state: this.metadata.error || this.metadata.mixedVersion || scopes.some(s=>s.conflicts>0 || s.error) ? "needs_attention" : scopes.some(s => s.pending || s.pendingReset) || !this.metadata.lastDiscoveryAt ? "saved_locally" : "synced", error: this.metadata.error, mixedVersion: this.metadata.mixedVersion, namespace: this.namespace, scopes };
 	}
 	tick(): void {
