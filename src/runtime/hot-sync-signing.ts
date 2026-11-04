@@ -36,10 +36,17 @@ export function verifyHotSync(value: unknown, npub: string, namespace: string, s
 		return false;
 	}
 }
+export function hotSyncConflictIds(document: HotSyncDocument): Set<string> {
+	return new Set([...(document.withheld ?? []), ...document.checkpoints.flatMap(c => c.conflictOf ? [c.conflictOf] : c.conflictsWith?.length ? [c.id, ...c.conflictsWith] : [])]);
+}
+export function hotSyncSupersededIds(document: HotSyncDocument): Set<string> {
+	return new Set([...(document.superseded ?? []), ...document.checkpoints.flatMap(c => c.supersedes ?? [])]);
+}
 /** Union by stable ID. Divergent bytes remain visible as deterministic variants. */
 export function mergeHotSync(a: HotSyncDocument, b: HotSyncDocument): HotSyncDocument {
 	if (a.namespace !== b.namespace || a.scope !== b.scope || a.epoch !== b.epoch)
 		throw new Error("Cannot merge different hot-sync boundaries");
+	const conflicted = new Set([...a.checkpoints, ...b.checkpoints].flatMap(c => c.conflictOf ? [c.conflictOf] : []));
 	const groups = new Map<string, Map<string, typeof a.checkpoints[number]>>();
 	const keep = (c: typeof a.checkpoints[number], other: HotSyncDocument) => !c.sequence || c.sequence > (other.seen?.[c.deviceId] ?? 0) || other.checkpoints.some(x => (x.conflictOf ?? x.id) === (c.conflictOf ?? c.id));
 	for (const c of [...a.checkpoints.filter(c => keep(c, b)), ...b.checkpoints.filter(c => keep(c, a))]) {
@@ -51,9 +58,11 @@ export function mergeHotSync(a: HotSyncDocument, b: HotSyncDocument): HotSyncDoc
 			groups.set(id, new Map());
 		groups.get(id)!.set(hash, normalized);
 	}
-	const checkpoints = [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).flatMap(([id, variants]) => [...variants].sort(([a], [b]) => a < b ? -1 : 1).map(([hash, c]) => variants.size === 1 ? c : { ...c, id: `variant:${hash}`, conflictOf: id }));
+	const checkpoints = [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).flatMap(([id, variants]) => [...variants].sort(([a], [b]) => a < b ? -1 : 1).map(([hash, c]) => variants.size === 1 && !conflicted.has(id) ? c : { ...c, id: `variant:${hash}`, conflictOf: id }));
 	const seen: Record<string, number> = Object.create(null);
 	for (const [device, seq] of [...Object.entries(a.seen ?? {}), ...Object.entries(b.seen ?? {})])
 		seen[device] = Math.max(seen[device] ?? 0, seq);
-	return { ...a, checkpoints, ...(Object.keys(seen).length ? { seen } : {}) };
+	const withheld = [...new Set([...hotSyncConflictIds(a), ...hotSyncConflictIds(b), ...checkpoints.flatMap(c => c.conflictOf ? [c.conflictOf] : [])])].sort();
+	const superseded = [...new Set([...hotSyncSupersededIds(a), ...hotSyncSupersededIds(b)])].sort();
+	return { ...a, checkpoints, ...(Object.keys(seen).length ? { seen } : {}), ...(withheld.length ? { withheld } : {}), ...(superseded.length ? { superseded } : {}) };
 }

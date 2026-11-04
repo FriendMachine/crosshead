@@ -94,3 +94,45 @@ This branch still requires public release and deployment validation before a
 launch: tagged artifacts, production installer/update/rollback checks, a real
 two-device production run, and authenticated production capacity measurements.
 Local test latency is development evidence, not a production capacity claim.
+
+## Review fixes in alpha.3 (protocol 2)
+
+The server advertises capability version 2. Upload and reset requests include
+`protocol_version: 2`; the server rejects earlier/missing mutation versions with
+426 `hot_sync_upgrade_required`. Upgrade every experimental alpha device before
+resuming sync. Older alpha clients stop at capability discovery and keep their
+local outbox. Signed v1 documents already stored by alpha.2 remain readable.
+
+The verified cloud CAS revision is authoritative for acknowledged history.
+Clients merge only their durable, unacknowledged captures into it, rather than
+unioning an obsolete acknowledged snapshot back into newer cloud state. This
+allows retiring device watermarks once none of that device's checkpoints remain
+in the bounded view. Vectors therefore track at most the 12 retained checkpoint
+devices, not every installation ever used. A returning installation first reads
+the current revision, retains its genuine pending work, and cannot restore
+pruned acknowledged checkpoints from its old base. Device sequences are retained
+provenance within that bounded view, not lifetime counters.
+
+Same-ID divergent pending captures become deterministic conflict variants,
+including a retry after a lost acknowledgment. Upload acknowledgment removes
+only the specific signed outbox record that was sent. A conflict group too large
+to fit the hot budget fails explicitly, retains its outbox records and verified
+conflict evidence, and requires inspection/reset instead of evicting a variant
+and claiming success.
+
+Signed `withheld` and `superseded` ID sets retain suppression for each surviving
+checkpoint even if the checkpoint declaring the relationship is pruned. These
+sets are compacted with the retained view; hot memory is still bounded history.
+A lone surviving conflict variant stays marked as disputed.
+
+Scope sync/reset runs before legacy migration, and migration checks for pending
+reset both before and after its awaited read. A scope failure no longer stops
+other selected scopes from attempting their sync. Neither a reset before first
+import nor a reset racing that read can repopulate the cleared scope.
+
+Conditional-read ETags bind identity, namespace, scope, epoch and revision.
+Server responses include `Vary: Authorization`. The service applies both an IP
+allowance before authentication (including invalid credentials) and a verified
+identity allowance after authentication; creating sessions cannot multiply it.
+These counters are per server process, as with the existing limiter; aggregate
+multi-instance capacity still requires deployment measurement.

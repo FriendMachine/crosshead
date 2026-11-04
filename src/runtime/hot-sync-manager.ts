@@ -4,8 +4,9 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { HotSyncReplica, hotSyncTenantDirectory, writeHotSyncState } from "./hot-sync-replica";
 import { HostedOnlyBotsClient, HostedOnlyBotsRequestError } from "./hosted-client";
-import { hotSyncName, HOT_SYNC_MAX_SCOPES, type HotSyncCheckpoint } from "../protocol/hot-sync";
+import { hotSyncName, HOT_SYNC_PROTOCOL_VERSION, HOT_SYNC_MAX_SCOPES, type HotSyncCheckpoint } from "../protocol/hot-sync";
 import { workspaceHotScope } from "./workspace-hot-memory";
+import { hotSyncConflictIds, hotSyncSupersededIds } from "./hot-sync-signing";
 import { normalizeTaskEvidence } from "./task-evidence";
 export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
 type Config = {
@@ -118,13 +119,13 @@ export class HotSyncManager {
 		const entries = (scope === "all" ? [...this.replicas.entries()] : [[scope, this.replica(scope)] as const]).flatMap(([name, replica]) => {
 			const r = replica.inspect();
 			if(r.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==name))throw new Error("Hot-sync checkpoint belongs to another workspace scope");
-			const superseded = new Set(r.local.document.checkpoints.flatMap(c => c.supersedes ?? []));
-			const disputed = new Set(r.local.document.checkpoints.flatMap(c => c.conflictsWith?.length ? [c.id, ...c.conflictsWith] : []));
+			const superseded = hotSyncSupersededIds(r.local.document);
+			const disputed = hotSyncConflictIds(r.local.document);
 			const candidates = inspect ? r.local.document.checkpoints : r.local.document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id));
 			const portable = candidates[0]?.workspaceId;
 			const aliases = Object.entries(this.metadata.workspaces).filter(([, id]) => id === portable).map(([raw]) => raw);
 			// Unmapped remote projects are inspectable but cannot cross into another workspace.
-			return (aliases.length ? aliases : [portable ?? "unmapped"]).map(workspaceId => ({ scope: name, content: JSON.stringify({ workspaceId, continuityCheckpoints: candidates.map(c => ({ ...c, workspaceId })) }), integrity: "verified", sync: { pending: r.dirty, pendingCount: r.pendingCount, lastSuccessfulSyncAt: r.lastSyncedAt, error: r.error, discardedByReset: r.discardedByReset, conflicts: r.local.document.checkpoints.filter(c => c.conflictOf || c.conflictsWith?.length).length } }));
+			return (aliases.length ? aliases : [portable ?? "unmapped"]).map(workspaceId => ({ scope: name, content: JSON.stringify({ workspaceId, continuityCheckpoints: candidates.map(c => ({ ...c, workspaceId })) }), integrity: "verified", sync: { pending: r.dirty, pendingCount: r.pendingCount, lastSuccessfulSyncAt: r.lastSyncedAt, error: r.error, discardedByReset: r.discardedByReset, conflicts: r.local.document.checkpoints.filter(c => c.conflictOf || hotSyncConflictIds(r.local.document).has(c.id)).length } }));
 		});
 		return scope === "all" ? { scope, scopes: entries } : entries[0]!;
 	}
@@ -139,7 +140,7 @@ export class HotSyncManager {
 	}
 	reset(scope: string): Record<string, unknown> { this.replica(scope).resetLocally(); this.nextSync = 0; return { scope, status: "pending_reset", message: "Cleared on this machine. Other devices clear this scope when they next sync." }; }
 	status(): Record<string, unknown> {
-		const scopes = [...this.replicas].map(([scope, r]) => { const x = r.inspect(); return { scope, epoch: x.base.document.epoch, remoteRevision: x.revision, pending: x.pendingCount, pendingReset: x.pendingReset, oldestPendingAt: x.oldestPendingAt, lastSuccessfulSyncAt: x.lastSyncedAt, conflicts: x.local.document.checkpoints.filter(c => c.conflictOf || c.conflictsWith?.length).length, error: x.error ?? (x.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==scope) ? "workspace_boundary_invalid" : null), discardedByReset: x.discardedByReset }; });
+		const scopes = [...this.replicas].map(([scope, r]) => { const x = r.inspect(); return { scope, epoch: x.base.document.epoch, remoteRevision: x.revision, pending: x.pendingCount, pendingReset: x.pendingReset, oldestPendingAt: x.oldestPendingAt, lastSuccessfulSyncAt: x.lastSyncedAt, conflicts: x.local.document.checkpoints.filter(c => c.conflictOf || hotSyncConflictIds(x.local.document).has(c.id)).length, error: x.error ?? (x.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==scope) ? "workspace_boundary_invalid" : null), discardedByReset: x.discardedByReset }; });
 		return { enabled: true, initialSyncPending: !this.metadata.lastDiscoveryAt, lastSuccessfulDiscoveryAt: this.metadata.lastDiscoveryAt ?? null, pendingCount: scopes.reduce((n, s) => n + s.pending, 0), pendingScopes: scopes.filter(s => s.pending || s.pendingReset).length, state: this.metadata.error || this.metadata.mixedVersion || scopes.some(s=>s.conflicts>0 || s.error) ? "needs_attention" : scopes.some(s => s.pending || s.pendingReset) || !this.metadata.lastDiscoveryAt ? "saved_locally" : "synced", error: this.metadata.error, mixedVersion: this.metadata.mixedVersion, namespace: this.namespace, scopes };
 	}
 	tick(): void {
@@ -151,7 +152,7 @@ export class HotSyncManager {
 	async flush(): Promise<void> {
 		try {
 			const capabilities = await this.client.hotSyncCapabilities();
-			if (capabilities.version !== 1 || capabilities.enabled !== true)
+			if (capabilities.version !== HOT_SYNC_PROTOCOL_VERSION || capabilities.enabled !== true)
 				throw new Error("hot_sync_unavailable");
 			let cursor: string | null = null;
 			for (let page = 0; page < 2 && !this.stopped; page++) {
@@ -169,7 +170,6 @@ export class HotSyncManager {
 					throw new Error("Invalid scope cursor");
 				cursor = listing.next_cursor;
 			}
-			await this.migrateLegacy();
 			const scopes = [...this.replicas.entries()];
 			// Two slots favor active/dirty scopes, two rotate through discovery/recovery.
 			const preferred = scopes.filter(([scope, r]) => this.active.has(scope) || r.inspect().dirty);
@@ -178,12 +178,15 @@ export class HotSyncManager {
 				selected.add(preferred[(this.cursor + i) % preferred.length]![1]);
 			for (let i = 0; i < scopes.length && selected.size < 4; i++)
 				selected.add(scopes[(this.cursor + i) % scopes.length]![1]);
+			let syncError: unknown;
 			for (const replica of selected) {
 				if (this.stopped)
 					break;
-				await replica.sync();
+				try { await replica.sync(); } catch(error) { syncError ??= error; }
 			}
 			this.cursor += 2;
+			try { await this.migrateLegacy(); } catch(error) { syncError ??= error; }
+			if(syncError)throw syncError;
 			this.failures = 0;
 			this.metadata.error = null;
 			this.metadata.lastDiscoveryAt = new Date().toISOString();
@@ -230,7 +233,10 @@ export class HotSyncManager {
 				}
 				continue;
 			}
+			// Never let a legacy import repopulate or block an explicitly reset scope.
+			if(this.replica(scope).inspect().pendingReset)continue;
 			const remote = await this.client.readHotSync(this.namespace, scope);
+			if(this.replica(scope).inspect().pendingReset)continue;
 			if (remote.revision === 0 && remote.epoch === 0) {
 				for (const checkpoint of Array.isArray(state.continuityCheckpoints) ? state.continuityCheckpoints : []) {
 					if (typeof checkpoint.summary !== "string" || typeof checkpoint.goal !== "string" || !Number.isFinite(Date.parse(checkpoint.occurredAt)))

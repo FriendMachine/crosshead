@@ -26,7 +26,7 @@ class Cloud {
 		const read = async (n: string, s: string) => structuredClone(this.rows.get(key(n, s)) ?? { namespace: n, scope: s, epoch: 0, revision: 0, content: null });
 		return {
 			hotSyncCapabilities: async () => { if (this.offline)
-				throw new Error("offline"); return { version: 1, enabled: true }; },
+				throw new Error("offline"); return { version: 2, enabled: true }; },
 			listHotSync: async (n: string) => ({ scopes: [...this.rows.entries()].filter(([k]) => JSON.parse(k)[0] === npub && JSON.parse(k)[1] === n).map(([, v]) => ({ ...v, content: null })), next_cursor: null }),
 			readHotMemory: async () => this.legacy,
 			readHotSync: read,
