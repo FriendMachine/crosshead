@@ -1258,7 +1258,7 @@ const emptyLayerManifest = (): { available: number; injected: number; omitted: n
 const buildLocalOnlyContextPack = (event: RuntimeLifecycleEvent, packRequest: Record<string, unknown>): Record<string, unknown> => {
   const goal = asString(packRequest.goal);
   const checkpoints = selectHotCheckpoints(packRequest.hotMemorySnapshot, goal, event.workspaceId);
-  const hotContextText = renderHotCheckpoints(checkpoints) || extractLocalHotContext(packRequest.hotMemorySnapshot, event.runtime, goal);
+  const hotContextText = asRecord(packRequest.allowedScope)?.includeHotMemory === false ? "" : renderHotCheckpoints(checkpoints) || extractLocalHotContext(packRequest.hotMemorySnapshot, event.runtime, goal);
   const contextText = hotContextText;
   const injected = contextText.length > 0 ? 1 : 0;
   return {
@@ -1956,7 +1956,7 @@ export class RuntimeLifecycleManager {
 						const hot=buildHotState(current,event);
 						const checkpoints=Array.isArray(hot.continuityCheckpoints)?hot.continuityCheckpoints:[];
 						const last=checkpoints[checkpoints.length-1] as Record<string,unknown>|undefined;
-						if(last && ["turn.completed","turn.failed","session.ended","compact.started"].includes(event.type)) {
+						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints && ["turn.completed","turn.failed","session.ended","compact.started"].includes(event.type)) {
 						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:event.turnId,...(Array.isArray(event.payload.supersedes) ? {supersedes:event.payload.supersedes.filter((v):v is string=>typeof v === "string")} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));
 						}
