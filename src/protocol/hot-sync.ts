@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 /** Versioned hot-sync wire contract. Counters are safe nonnegative integers. */
+export const HOT_SYNC_PROTOCOL_VERSION = 2;
 export const HOT_SYNC_VERSION = "crosshead_hot_sync_v1";
 export const HOT_SYNC_MAX_BYTES = 128 * 1024;
 export const HOT_SYNC_MAX_SCOPES = 128;
@@ -26,6 +28,9 @@ export type HotSyncDocument = {
 	epoch: number;
 	checkpoints: HotSyncCheckpoint[];
 	seen?: Record<string, number>;
+	/** Suppression survives pruning of the checkpoint that declared it. */
+	withheld?: string[];
+	superseded?: string[];
 };
 export type HotSyncEnvelope = {
 	version: "crosshead_signed_memory_v2";
@@ -48,7 +53,7 @@ export function validHotSyncDocument(value: unknown): value is HotSyncDocument {
 		return false;
 	const d = value as HotSyncDocument;
 	return d.version === HOT_SYNC_VERSION && hotSyncName(d.namespace) && hotSyncName(d.scope) &&
-		hotSyncCounter(d.epoch) && (d.seen === undefined || typeof d.seen === "object" && d.seen !== null && !Array.isArray(d.seen) && Object.keys(d.seen).length <= 128 && Object.values(d.seen).every(hotSyncCounter)) && Array.isArray(d.checkpoints) && d.checkpoints.length <= 256 &&
+		hotSyncCounter(d.epoch) && [d.withheld, d.superseded].every(ids => ids === undefined || Array.isArray(ids) && ids.length <= 256 && ids.every(id => typeof id === "string" && id.length > 0 && id.length <= 128)) && (d.seen === undefined || typeof d.seen === "object" && d.seen !== null && !Array.isArray(d.seen) && Object.keys(d.seen).length <= 128 && Object.values(d.seen).every(hotSyncCounter)) && Array.isArray(d.checkpoints) && d.checkpoints.length <= 256 &&
 		d.checkpoints.every(c => c && typeof c.id === "string" && c.id.length > 0 && c.id.length <= 128 &&
 			[c.deviceId, c.runtime, c.workspaceId, c.goal, c.summary, c.occurredAt].every(v => typeof v === "string") &&
 			Number.isFinite(Date.parse(c.occurredAt)) && (c.sequence === undefined || hotSyncCounter(c.sequence)) &&
@@ -56,4 +61,8 @@ export function validHotSyncDocument(value: unknown): value is HotSyncDocument {
 			(c.conflictsWith === undefined || Array.isArray(c.conflictsWith) && c.conflictsWith.length <= 256 && c.conflictsWith.every(id => typeof id === "string")) &&
 			(c.conflictOf === undefined || typeof c.conflictOf === "string")) &&
 		new Set(d.checkpoints.map(c => c.id)).size === d.checkpoints.length;
+}
+/** Conditional cache identity includes the authenticated owner and document boundary. */
+export function hotSyncEtag(npub: string, snapshot: Pick<HotSyncSnapshot, "namespace" | "scope" | "epoch" | "revision">): string {
+	return `"${createHash("sha256").update(JSON.stringify([npub, snapshot.namespace, snapshot.scope, snapshot.epoch, snapshot.revision])).digest("hex")}"`;
 }

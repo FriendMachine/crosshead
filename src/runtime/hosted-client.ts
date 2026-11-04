@@ -1,4 +1,5 @@
 import type { HotSyncSnapshot, HotSyncEnvelope } from "../protocol/hot-sync";
+import { hotSyncEtag, HOT_SYNC_PROTOCOL_VERSION } from "../protocol/hot-sync";
 import { RECALL_TIMEOUT_MS } from "./continuity-recall";
 import { createHash, randomUUID } from "crypto";
 import { schnorr } from "@noble/curves/secp256k1";
@@ -968,17 +969,17 @@ export class HostedOnlyBotsClient {
   }
   async readHotSync(namespace: string, scope: string, known?: HotSyncSnapshot): Promise<HotSyncSnapshot> {
     await this.ensureSession();
-    const response=await this.request<HotSyncSnapshot>(`/memory/hot-sync?namespace=${encodeURIComponent(namespace)}&scope=${encodeURIComponent(scope)}`, {auth:true,timeoutMs:5000,expectedStatuses:[200,304],headers:known && known.revision>0?{"if-none-match":`"${known.epoch}-${known.revision}"`}:undefined});
+    const response=await this.request<HotSyncSnapshot>(`/memory/hot-sync?namespace=${encodeURIComponent(namespace)}&scope=${encodeURIComponent(scope)}`, {auth:true,timeoutMs:5000,expectedStatuses:[200,304],headers:known && known.revision>0?{"if-none-match":hotSyncEtag(this.config.npub,known)}:undefined});
     if(response.status===304){if(!known)throw new Error("Unexpected unchanged hot-sync response");return known;}
     return response.data;
   }
   async writeHotSync(base: HotSyncSnapshot, content: HotSyncEnvelope): Promise<HotSyncSnapshot> {
     await this.ensureSession();
-    return (await this.request<HotSyncSnapshot>("/memory/hot-sync", {method:"PUT",auth:true,timeoutMs:5000,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision,content}})).data;
+    return (await this.request<HotSyncSnapshot>("/memory/hot-sync", {method:"PUT",auth:true,timeoutMs:5000,body:{protocol_version:HOT_SYNC_PROTOCOL_VERSION,namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision,content}})).data;
   }
   async resetHotSync(base: HotSyncSnapshot): Promise<HotSyncSnapshot> {
     await this.ensureSession();
-    return (await this.request<HotSyncSnapshot>("/memory/hot-sync/reset", {method:"POST",auth:true,timeoutMs:5000,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision}})).data;
+    return (await this.request<HotSyncSnapshot>("/memory/hot-sync/reset", {method:"POST",auth:true,timeoutMs:5000,body:{protocol_version:HOT_SYNC_PROTOCOL_VERSION,namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision}})).data;
   }
   async listHotSync(namespace: string, cursor: string | null = null): Promise<{scopes: HotSyncSnapshot[];next_cursor:string|null}> {
     await this.ensureSession();

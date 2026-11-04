@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { writeJsonFile } from "./runtime-persistence";
-import { canonicalHotSync, mergeHotSync, signHotSync, verifyHotSync } from "./hot-sync-signing";
+import { canonicalHotSync, hotSyncConflictIds, hotSyncSupersededIds, mergeHotSync, signHotSync, verifyHotSync } from "./hot-sync-signing";
 import { HOT_SYNC_VERSION, hotSyncCounter, hotSyncName, type HotSyncCheckpoint, type HotSyncDocument, type HotSyncEnvelope, type HotSyncSnapshot } from "../protocol/hot-sync";
 export interface HotSyncTransport {
 	read(namespace: string, scope: string, known?: HotSyncSnapshot): Promise<HotSyncSnapshot>;
@@ -13,10 +13,11 @@ export const HOT_SYNC_LOCAL_BYTES = 64 * 1024 * 1024;
 export const hotSyncTenantDirectory = (stateDir: string, origin: string, npub: string): string => path.join(stateDir, "hot-sync", createHash("sha256").update(JSON.stringify([origin, npub])).digest("hex"));
 /** One quota covers snapshots, outboxes and profile/workspace metadata. */
 export function writeHotSyncState(file: string, value: unknown): void {
-	const dir=path.dirname(file),bytes=Buffer.byteLength(JSON.stringify(value,null,2));
-	const otherBytes=existsSync(dir)?readdirSync(dir).filter(n=>n.endsWith(".json")&&path.join(dir,n)!==file).reduce((sum,n)=>sum+statSync(path.join(dir,n)).size,0):0;
-	if(bytes+otherBytes>HOT_SYNC_LOCAL_BYTES)throw new Error("Hot-sync local quota exceeded; existing captures are preserved");
-	writeJsonFile(file,value);
+	const dir = path.dirname(file), bytes = Buffer.byteLength(JSON.stringify(value, null, 2));
+	const otherBytes = existsSync(dir) ? readdirSync(dir).filter(n => n.endsWith(".json") && path.join(dir, n) !== file).reduce((sum, n) => sum + statSync(path.join(dir, n)).size, 0) : 0;
+	if (bytes + otherBytes > HOT_SYNC_LOCAL_BYTES)
+		throw new Error("Hot-sync local quota exceeded; existing captures are preserved");
+	writeJsonFile(file, value);
 }
 type RecordState = {
 	version: 2;
@@ -37,23 +38,40 @@ export type HotSyncInspection = RecordState & {
 	oldestPendingAt: string | null;
 };
 /** Retention only affects the view and acknowledged base; pending records stay durable. */
-export function retainHotSync(document: HotSyncDocument): HotSyncDocument {
+export function retainHotSync(document: HotSyncDocument, requiredIds: Set<string> = new Set()): HotSyncDocument {
+	const conflictIds = hotSyncConflictIds(document), supersededIds = hotSyncSupersededIds(document);
+	const required = (c: HotSyncCheckpoint) => requiredIds.has(c.conflictOf ?? c.id);
+	const size = (c: HotSyncCheckpoint) => c.goal.length + c.summary.length + JSON.stringify(c.evidence ?? "").length;
+	const mandatory = document.checkpoints.filter(required);
+	if (mandatory.length > 12 || mandatory.reduce((sum, c) => sum + size(c), 0) > 30000)
+		throw new Error("Pending conflict group exceeds the hot-memory budget; captures remain pending");
 	let chars = 0;
-	const corrected = new Set(document.checkpoints.flatMap(c => c.supersedes ?? []));
-	const checkpoints = [...document.checkpoints].sort((a, b) => Number(corrected.has(a.id)) - Number(corrected.has(b.id)) ||
-		Date.parse(b.occurredAt) - Date.parse(a.occurredAt) || a.id.localeCompare(b.id)).filter(c => {
-		const size = c.goal.length + c.summary.length + JSON.stringify(c.evidence ?? "").length;
-		if (chars + size > 30000)
-			return false;
-		chars += size;
-		return true;
-	}).slice(0, 12).sort((a, b) => a.id.localeCompare(b.id));
-	return { ...document, checkpoints };
+	const checkpoints: HotSyncCheckpoint[] = [];
+	for (const c of [...document.checkpoints].sort((a, b) => Number(required(b)) - Number(required(a)) ||
+		Number(supersededIds.has(a.id)) - Number(supersededIds.has(b.id)) || Date.parse(b.occurredAt) - Date.parse(a.occurredAt) || a.id.localeCompare(b.id))) {
+		if (checkpoints.length === 12 || chars + size(c) > 30000)
+			continue;
+		chars += size(c);
+		checkpoints.push(c);
+	}
+	checkpoints.sort((a, b) => a.id.localeCompare(b.id));
+	const retainedReferences = (ids: Set<string>) => [...new Set(checkpoints.flatMap(c => [c.id, ...(c.conflictOf ? [c.conflictOf] : [])]).filter(id => ids.has(id)))].sort();
+	// The latest CAS revision is authoritative for acknowledged history. Retire
+	// watermarks when no retained checkpoint needs them; stale bases are never unioned back.
+	const seen: Record<string, number> = Object.create(null);
+	for (const c of checkpoints)
+		if (c.sequence)
+			seen[c.deviceId] = Math.max(seen[c.deviceId] ?? 0, document.seen?.[c.deviceId] ?? 0, c.sequence);
+	const { seen: _seen, withheld: _withheld, superseded: _superseded, ...rest } = document;
+	const withheld = retainedReferences(conflictIds), superseded = retainedReferences(supersededIds);
+	return { ...rest, checkpoints, ...(Object.keys(seen).length ? { seen } : {}), ...(withheld.length ? { withheld } : {}), ...(superseded.length ? { superseded } : {}) };
 }
+/** Only unacknowledged captures are merged into the authoritative remote view. */
 function appendCheckpoint(document: HotSyncDocument, checkpoint: HotSyncCheckpoint): HotSyncDocument {
-	if (document.checkpoints.some(c => c.id === checkpoint.id))
-		return document;
-	return { ...document, seen: { ...document.seen, [checkpoint.deviceId]: Math.max(document.seen?.[checkpoint.deviceId] ?? 0, checkpoint.sequence ?? 0) }, checkpoints: [...document.checkpoints, checkpoint] };
+	// A watermark cannot acknowledge a different pending event or erase a divergent
+	// same-ID claim. Merge stable identities/variants before applying retention.
+	const merged = mergeHotSync({ ...document, seen: undefined }, { ...document, seen: undefined, checkpoints: [checkpoint] });
+	return { ...merged, seen: { ...document.seen, [checkpoint.deviceId]: Math.max(document.seen?.[checkpoint.deviceId] ?? 0, checkpoint.sequence ?? 0) } };
 }
 export class HotSyncReplica {
 	private readonly file: string;
@@ -115,7 +133,8 @@ export class HotSyncReplica {
 		const r = this.load();
 		if (r.pendingReset)
 			throw new Error("Hot-memory reset is pending; retry capture after reset");
-		if ([...r.base.document.checkpoints, ...r.pending.flatMap(e => e.document.checkpoints)].some(c => c.id === checkpoint.id))
+		const captureBytes = (c: HotSyncCheckpoint) => canonicalHotSync({ ...c, id: c.conflictOf ?? c.id, conflictOf: undefined, sequence: undefined });
+		if ([...r.base.document.checkpoints, ...r.pending.flatMap(e => e.document.checkpoints)].some(c => captureBytes(c) === captureBytes(checkpoint)))
 			return;
 		const sequence = Math.max(r.base.document.seen?.[checkpoint.deviceId] ?? 0, ...r.pending.map(e => e.document.seen?.[checkpoint.deviceId] ?? 0)) + 1;
 		const record = { ...checkpoint, sequence };
@@ -128,7 +147,7 @@ export class HotSyncReplica {
 	}
 	resetLocally(): void {
 		const r = this.load();
-		this.save({ ...r, base: signHotSync({ ...r.base.document, checkpoints: [] }, this.config.nsec), pending: [], pendingReset: true, discardedByReset: r.pending.length });
+		this.save({ ...r, base: signHotSync({ ...this.empty(), epoch: r.base.document.epoch }, this.config.nsec), pending: [], pendingReset: true, discardedByReset: r.pending.length });
 	}
 	sync(): Promise<void> {
 		if (!this.syncing)
@@ -160,16 +179,18 @@ export class HotSyncReplica {
 				this.save({ ...r, base: remote.content ?? signHotSync({ ...this.empty(), epoch: remote.epoch }, c.nsec), pending: [], revision: remote.revision, pendingReset: false, lastSyncedAt: new Date().toISOString(), error: null, discardedByReset: r.discardedByReset + r.pending.length });
 				return;
 			}
-			let merged = retainHotSync(remote.content ? mergeHotSync(r.base.document, remote.content.document) : r.base.document);
+			// Persist verified conflict evidence even if a pending upload cannot fit or fails.
+			// The durable outbox stays separate, so this does not acknowledge local captures.
+			if (remote.revision > r.revision) {
+				r = { ...r, base: remote.content ?? signHotSync({ ...this.empty(), epoch: remote.epoch }, c.nsec), revision: remote.revision };
+				this.save(r);
+			}
+			let merged = retainHotSync(remote.content?.document ?? { ...this.empty(), epoch: remote.epoch });
 			// One bounded batch per visit makes progress fair across active scopes.
 			const batch = r.pending.slice(0, 1);
 			for (const envelope of batch) {
 				const checkpoint = envelope.document.checkpoints[0]!;
-				// Keep the newly accepted checkpoint even when its device clock is old.
-				let prior = retainHotSync(merged).checkpoints.filter(c => c.id !== checkpoint.id);
-				while (prior.length >= 12 || [...prior, checkpoint].reduce((n, c) => n + c.goal.length + c.summary.length + JSON.stringify(c.evidence ?? "").length, 0) > 30000)
-					prior.pop();
-				merged = appendCheckpoint({ ...merged, checkpoints: prior }, checkpoint);
+				merged = retainHotSync(appendCheckpoint(merged, checkpoint), new Set([checkpoint.conflictOf ?? checkpoint.id]));
 			}
 			const content = signHotSync(merged, c.nsec);
 			let accepted = remote;
@@ -181,8 +202,8 @@ export class HotSyncReplica {
 			r = this.load();
 			if (r.pendingReset)
 				return;
-			const acknowledged = new Set(batch.map(e => e.document.checkpoints[0]!.id));
-			this.save({ ...r, base: accepted.content ?? content, pending: r.pending.filter(e => !acknowledged.has(e.document.checkpoints[0]!.id)), revision: accepted.revision, lastSyncedAt: new Date().toISOString(), error: null });
+			const acknowledged = new Set(batch.map(e => e.signature));
+			this.save({ ...r, base: accepted.content ?? content, pending: r.pending.filter(e => !acknowledged.has(e.signature)), revision: accepted.revision, lastSyncedAt: new Date().toISOString(), error: null });
 		}
 		catch (error) {
 			const r = this.load();
