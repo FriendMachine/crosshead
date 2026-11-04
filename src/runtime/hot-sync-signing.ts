@@ -37,7 +37,7 @@ export function verifyHotSync(value: unknown, npub: string, namespace: string, s
 	}
 }
 export function hotSyncConflictIds(document: HotSyncDocument): Set<string> {
-	return new Set([...(document.withheld ?? []), ...document.checkpoints.flatMap(c => c.conflictOf ? [c.conflictOf] : c.conflictsWith?.length ? [c.id, ...c.conflictsWith] : [])]);
+	return new Set([...(document.withheld ?? []), ...document.checkpoints.flatMap(c => [...(c.conflictOf ? [c.conflictOf] : []), ...(c.conflictsWith?.length ? [c.id, ...c.conflictsWith] : [])])]);
 }
 export function hotSyncSupersededIds(document: HotSyncDocument): Set<string> {
 	return new Set([...(document.superseded ?? []), ...document.checkpoints.flatMap(c => c.supersedes ?? [])]);
