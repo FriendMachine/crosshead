@@ -3197,7 +3197,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		}
 		if (profile && hotSyncEnabled()) {
 			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
-			if (!loadEffectiveContinuityGovernorState(this.paths).paused) manager.tick();
+			if (!loadEffectiveContinuityGovernorState(this.paths).governorState.paused) manager.tick();
 			return manager.read(scope ?? "shared");
 		}
 		// Pass the scope through unchanged (undefined => the server's shared default), so internal
