@@ -1,3 +1,4 @@
+import { getHotSyncManager, hotSyncEnabled } from "./hot-sync-manager";
 import { shellQuote, writeManagedFile } from "./adapter-utils";
 import { renderAgentMarkText } from "../protocol/agent-mark";
 import {
@@ -3193,6 +3194,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const profile = loadProfile(this.paths, resolvedProfileName);
 		if (profile && isLocalOnlyRuntimeProfile(profile)) {
 			return readLocalHotMemory(this.paths.state, scope);
+		}
+		if (profile && hotSyncEnabled()) {
+			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
+			if (!loadEffectiveContinuityGovernorState(this.paths).paused) manager.tick();
+			return manager.read(scope ?? "shared");
 		}
 		// Pass the scope through unchanged (undefined => the server's shared default), so internal
 		// callers like adapter handoff summaries keep the single-doc shape. The operator CLI opts

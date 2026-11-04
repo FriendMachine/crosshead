@@ -1,3 +1,4 @@
+import type { HotSyncSnapshot, HotSyncEnvelope } from "../protocol/hot-sync";
 import { RECALL_TIMEOUT_MS } from "./continuity-recall";
 import { createHash, randomUUID } from "crypto";
 import { schnorr } from "@noble/curves/secp256k1";
@@ -956,6 +957,23 @@ export class HostedOnlyBotsClient {
       headers: this.paidHeaders("memory_search_v1", body, idempotencyKey),
     });
     return response.data;
+  }
+
+  async readHotSync(namespace: string, scope: string): Promise<HotSyncSnapshot> {
+    await this.ensureSession();
+    return (await this.request<HotSyncSnapshot>(`/memory/hot-sync?namespace=${encodeURIComponent(namespace)}&scope=${encodeURIComponent(scope)}`, {auth:true})).data;
+  }
+  async writeHotSync(base: HotSyncSnapshot, content: HotSyncEnvelope): Promise<HotSyncSnapshot> {
+    await this.ensureSession();
+    return (await this.request<HotSyncSnapshot>("/memory/hot-sync", {method:"PUT",auth:true,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision,content}})).data;
+  }
+  async resetHotSync(base: HotSyncSnapshot): Promise<HotSyncSnapshot> {
+    await this.ensureSession();
+    return (await this.request<HotSyncSnapshot>("/memory/hot-sync/reset", {method:"POST",auth:true,body:{namespace:base.namespace,scope:base.scope,expected_epoch:base.epoch,expected_revision:base.revision}})).data;
+  }
+  async listHotSync(namespace: string, cursor: string | null = null): Promise<{scopes: HotSyncSnapshot[];next_cursor:string|null}> {
+    await this.ensureSession();
+    return (await this.request<{scopes:HotSyncSnapshot[];next_cursor:string|null}>(`/memory/hot-sync/scopes?namespace=${encodeURIComponent(namespace)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {auth:true})).data;
   }
 
   async readHotMemory(scope?: string): Promise<Record<string, unknown>> {

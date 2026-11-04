@@ -1,3 +1,4 @@
+import { getHotSyncManager, hotSyncEnabled, tickHotSyncManagers } from "./hot-sync-manager";
 import { encodeArchivedTurn } from "./continuity-recall";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
@@ -1747,6 +1748,7 @@ export class RuntimeLifecycleManager {
 							);
 						} else {
 							const client = this.buildClient(profile, secret);
+						if(hotSyncEnabled() && !localOnlyProfile) packRequest.hotMemorySnapshot=getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).read();
 						await attachHotMemorySnapshot(client, packRequest, warnings);
 						try {
 							const hostedPack = await client.prepareContextPack(packRequest, `context_pack_v1-${createHash("sha256").update(event.eventId).digest("hex").slice(0, 48)}`);
@@ -1946,6 +1948,17 @@ export class RuntimeLifecycleManager {
 						})
 					);
 				} else {
+					if (hotSyncEnabled() && !localOnlyProfile) {
+						const manager=getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName});
+						const scope=workspaceHotScope(event.runtime,event.workspaceId) ?? "shared";
+						const current=parseStructuredHotState(String(manager.read(scope).content ?? ""));
+						const hot=buildHotState(current,event);
+						const checkpoints=Array.isArray(hot.continuityCheckpoints)?hot.continuityCheckpoints:[];
+						const last=checkpoints[checkpoints.length-1] as Record<string,unknown>|undefined;
+						if(last && ["turn.completed","turn.failed","session.ended","compact.started"].includes(event.type)) {
+						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:event.turnId,...(last.evidence ? {evidence:last.evidence} : {})});
+						}
+					} else {
 					const scope = event.runtime || undefined;
 					const partitionScope = workspaceHotScope(scope, event.workspaceId);
 					const client = localOnlyProfile ? null : this.buildClient(profile, secret);
@@ -1982,6 +1995,7 @@ export class RuntimeLifecycleManager {
 						})
 					);
 				}
+					}
 			} else if (
 				event.type === "session.started" ||
 				event.type === "session.ended" ||
@@ -2908,6 +2922,7 @@ export class RuntimeLifecycleManager {
       return state;
     }
 
+    if (hotSyncEnabled()) tickHotSyncManagers();
     const now = this.now().getTime();
     const remaining: RuntimeQueueItem[] = [];
     const ready = state.items.filter((item) => force || new Date(item.availableAt).getTime() <= now);
