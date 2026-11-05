@@ -1,8 +1,8 @@
 # Crosshead runtime
 
-Persistent memory for Claude Code and Codex. This repository contains everything
+Persistent memory for Claude Code, Codex, Hermes, and OpenCode. This repository contains everything
 that runs on your machine: the `crosshead` CLI (`xhd` for short; `onlybotsctl`
-remains for existing scripts), the local daemon, the Claude Code, Codex and Pi
+remains for existing scripts), the local daemon, the Claude Code, Codex, Pi, Hermes, and OpenCode
 adapters, and their lifecycle hooks. The hosted service at
 [crosshead.sh](https://crosshead.sh) is a separate codebase.
 
@@ -63,6 +63,22 @@ same bytes (see [Releases](#releases)).
 
 `crosshead uninstall` removes the runtime; `crosshead uninstall claude-code`
 and `crosshead uninstall codex` remove the hooks.
+
+## Hermes and OpenCode
+
+Install the host first, then use a native Crosshead plugin:
+
+```bash
+crosshead quickstart --api-base https://crosshead.sh --adapter hermes --workspace-root .
+# Or:
+crosshead quickstart --api-base https://crosshead.sh --adapter opencode --workspace-root .
+```
+
+For an existing Crosshead profile, use `crosshead install hermes` or
+`crosshead install opencode`. Restart the host to load the plugin. Both share
+the local daemon and workspace memory with the existing adapters. See
+[native host setup and verification](docs/NATIVE-HOSTS.md) for custom homes,
+uninstall commands, supported versions, and Docker tests.
 
 ## Repository layout
 

@@ -50,7 +50,7 @@ import type {
 } from "./local-runtime";
 
 export const ONLYBOTS_RUNTIME_CORE_VERSION = "0.3.0";
-export const RUNTIME_ADAPTER_NAMES: RuntimeAdapterName[] = ["codex", "claude-code", "pi"];
+export const RUNTIME_ADAPTER_NAMES: RuntimeAdapterName[] = ["codex", "claude-code", "pi", "hermes", "opencode"];
 
 export const sanitizeLogValue = (value: string): string =>
 	value

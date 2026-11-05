@@ -2,6 +2,7 @@ import { installCodexFromCli } from "../codex-adapter";
 import { installClaudeCodeFromCli } from "../claude-code-adapter";
 import { installPiFromCli } from "../pi-adapter";
 import { installOmpFromCli } from "../omp-adapter";
+import { nativeHostFromCli } from "../native-host-adapter";
 import { parseArgs } from "../local-runtime";
 import { ensureRuntimeHomeLayout, loadProfile, loadRuntimeConfig } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
@@ -17,7 +18,7 @@ export type QuickstartCliPaths = {
 	claudeCodeHookScriptPath: string;
 };
 
-type QuickstartAdapter = "codex" | "claude-code" | "pi" | "omp" | "none";
+type QuickstartAdapter = "codex" | "claude-code" | "pi" | "omp" | "hermes" | "opencode" | "none";
 
 type QuickstartStep = {
 	id: string;
@@ -32,10 +33,10 @@ const boolFlagDisabled = (flags: Record<string, string | boolean>, name: string)
 
 const selectedAdapter = (flags: Record<string, string | boolean>): QuickstartAdapter => {
 	const raw = typeof flags.adapter === "string" ? flags.adapter : typeof flags.host === "string" ? flags.host : "pi";
-	if (raw === "codex" || raw === "claude-code" || raw === "pi" || raw === "omp" || raw === "none") {
+	if (raw === "codex" || raw === "claude-code" || raw === "pi" || raw === "omp" || raw === "hermes" || raw === "opencode" || raw === "none") {
 		return raw;
 	}
-	throw new Error("--adapter must be one of: codex, claude-code, pi, omp, none");
+	throw new Error("--adapter must be one of: codex, claude-code, pi, omp, hermes, opencode, none");
 };
 
 const installAdapter = async (input: {
@@ -46,6 +47,7 @@ const installAdapter = async (input: {
 	if (input.adapter === "none") {
 		return "Skipped adapter install";
 	}
+	if (input.adapter === "hermes" || input.adapter === "opencode") return nativeHostFromCli(input.adapter, input.args);
 	if (input.adapter === "codex") {
 		return installCodexFromCli(input.args, input.paths.codexBridgeScriptPath, input.paths.codexHookScriptPath);
 	}
@@ -99,6 +101,9 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 		workspaceScope,
 	];
 	const adapterArgs = [
+		...flagPair("--hermes-home", typeof flags["hermes-home"] === "string" ? flags["hermes-home"] : undefined),
+		...flagPair("--hermes-bin", typeof flags["hermes-bin"] === "string" ? flags["hermes-bin"] : undefined),
+		...flagPair("--opencode-home", typeof flags["opencode-home"] === "string" ? flags["opencode-home"] : undefined),
 		...flagPair("--home", home),
 		"--profile",
 		profileName,

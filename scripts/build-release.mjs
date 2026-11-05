@@ -26,6 +26,7 @@ const version = pkg.version;
 const REQUIRED_ENTRIES = [
 	"cli", "daemon", "local-runtime", "codex-adapter", "claude-code-adapter", "pi-adapter",
 	"codex-bridge", "codex-hook", "claude-code-bridge", "claude-code-hook",
+	"native-host-adapter", "native-host-hook", "hermes-plugin", "opencode-plugin",
 ].map((name) => `dist/runtime/${name}.js`);
 
 const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");

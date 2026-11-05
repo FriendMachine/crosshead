@@ -1,0 +1,42 @@
+name: Native host plugins
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/runtime/**'
+      - 'tests/runtime/native-host-plugins.test.ts'
+      - 'scripts/*native-host*'
+      - 'package-lock.json'
+      - '.github/workflows/native-hosts.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-hosts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: bash scripts/test-native-hosts.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: native-host-plugin-results
+          path: .native-host-test-logs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

@@ -111,7 +111,7 @@ export class HotSyncManager {
 	}
 	activate(runtime: string, raw: string): void {
 		const workspace = this.workspace(raw);
-		for (const source of new Set([runtime, "codex", "claude-code", "pi", "omp"]))
+		for (const source of new Set([runtime, "codex", "claude-code", "pi", "omp", "hermes", "opencode"]))
 			this.active.add(workspaceHotScope(source, workspace)!);
 	}
 	readWorkspace(runtime: string, raw: string): Record<string, unknown> { this.activate(runtime, raw); return this.read(workspaceHotScope(runtime, this.workspace(raw))!); }
