@@ -30,7 +30,7 @@ plugin_cleanup() {
 trap plugin_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-docker run -d --name "$plugin_container" --cpus 2 --memory 3g --memory-swap 3g \
+docker run -d --rm --name "$plugin_container" --cpus 2 --memory 3g --memory-swap 3g \
   --tmpfs /tmp:rw,size=384m --tmpfs /test:rw,exec,size=768m,uid=1000,gid=1000 \
   --mount "type=bind,src=$plugin_repo,dst=/crosshead,readonly" \
   --user 0:0 "$plugin_image" sleep infinity > "$plugin_logs/container.txt"
