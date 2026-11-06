@@ -23,7 +23,20 @@ jobs:
           set -euo pipefail
           mkdir -m 700 fixture-state
           fixture_container="crosshead-hn-${GITHUB_RUN_ID}-a"
-          trap 'docker rm -f -v "$fixture_container" >/dev/null 2>&1 || true' EXIT
+          cleanup() {
+            result=$?
+            trap - EXIT
+            if ! docker rm -f -v "$fixture_container" >/dev/null; then
+              echo 'Owned fixture container removal failed' >&2
+              exit 1
+            fi
+            if docker inspect "$fixture_container" >/dev/null 2>&1; then
+              echo 'Owned fixture container still exists' >&2
+              exit 1
+            fi
+            exit "$result"
+          }
+          trap cleanup EXIT
           docker run -d --name "$fixture_container" --user "$(id -u):$(id -g)" --cpus 1 --memory 512m --memory-swap 512m --tmpfs /tmp:rw,size=64m --env CROSSHEAD_HN_FIXTURE_NSEC --mount "type=bind,src=$PWD,dst=/crosshead,readonly" --mount "type=bind,src=$PWD/fixture-state,dst=/fixture" node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d sleep infinity
           docker exec "$fixture_container" node /crosshead/scripts/accept-hot-sync-production.mjs --phase a-online --home /fixture/state --run-id "$GITHUB_RUN_ID" --allow-production
           docker network disconnect bridge "$fixture_container"

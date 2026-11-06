@@ -70,5 +70,5 @@ try{
  // Enforce the artifact contract even if transport cleanup failed.
  const inspect=dir=>{for(const e of readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);if(e.isDirectory())inspect(file);else{const content=readFileSync(file,'utf8');assert(!content.includes(nsec)&&!content.includes('nsec1')&&!content.includes('ob_sess_'),'Secret found in fixture artifact');}}};
  try{inspect(home);}catch(error){failures.push(error.message);}
- if(failures.length){writeFileSync(path.join(home,'cleanup-errors.json'),JSON.stringify({failures},null,2)+'\n');if(!primaryFailure)throw new Error(failures.join('; '));}
+ if(failures.length){console.error('Fixture cleanup failures: '+failures.join('; '));writeFileSync(path.join(home,'cleanup-errors.json'),JSON.stringify({failures},null,2)+'\n');if(!primaryFailure)throw new Error(failures.join('; '));}
 }

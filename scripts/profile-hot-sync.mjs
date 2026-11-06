@@ -68,7 +68,7 @@ try {
 			try { const revoked = await originalFetch(`${origin}/v1/auth/revoke`, { method: 'POST', headers: { authorization: `Bearer ${session.sessionToken}` }, signal: AbortSignal.timeout(10000) });
 			const result = await revoked.json();
 			summary.cleanup.push({device:i,sessionRevoked:revoked.ok && result.revoked === true,status:revoked.status});
-            } catch { summary.cleanup.push({device:i,sessionRevoked:false}); }
+			} catch { summary.cleanup.push({device:i,sessionRevoked:false}); }
 		}
 	}
 	summary.requests = Object.values(observations.reduce((all, x) => { const key = `${x.phase} ${x.method} ${x.route}`; const row = all[key] ??= { route: key, count: 0, statuses: {}, latencies: [] }; row.count++; row.statuses[x.status] = (row.statuses[x.status] ?? 0)+1; row.latencies.push(x.ms); return all; }, {})).map(({latencies, ...row}) => ({ ...row, p95Ms: Math.round(quantile(latencies,.95)) }));
