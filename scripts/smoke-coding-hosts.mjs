@@ -29,7 +29,7 @@ const env = { PATH: `${path.dirname(process.execPath)}:${process.env.PATH}`, TMP
 	ANTHROPIC_API_KEY: 'fixture-only', ANTHROPIC_AUTH_TOKEN: 'fixture-only', FIXTURE_API_KEY: 'fixture-only' };
 let stage = 'capture', requests = [], cleanup = async () => {};
 const publicInstall=process.env.CROSSHEAD_TEST_INSTALL_SOURCE==='public';
-let publishedCli=null;
+let publishedCli=null, baselineCli=null;
 const marker = 'duration-fixture-8427';
 const finding = `Finding ${marker}: serialize durations as decimal nanosecond strings. Zero is valid; negative durations are rejected. Do not convert to floating-point milliseconds. Next validate the transport round trip.`;
 const server = createServer(async (req, res) => {
@@ -85,6 +85,8 @@ try {
 	await tar.x({ file: archive, cwd: installed });
 	results.hosts = { claude: (await run('claude-version', nativeClaude, ['--version'])).trim(), codex: (await run('codex-version', nativeCodex, ['--version'])).trim() };
 	await run('runtime-dependencies', 'npm', ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], installed);
+	const fromInstalled = createRequire(path.join(installed, 'package.json'));
+	const expectedCoreVersion=fromInstalled('./dist/runtime/runtime-persistence.js').ONLYBOTS_RUNTIME_CORE_VERSION;
 	if(publicInstall){
 		const script=await (await fetch('https://crosshead.sh/install',{signal:AbortSignal.timeout(30000)})).text();
 		assert(script.includes(`RELEASE_ID="${manifest.releaseId}"`),'Production installer is not serving this release candidate');
@@ -94,7 +96,8 @@ try {
 		const freshCli=path.join(freshHome,'lib/runtime',manifest.releaseId,'dist/runtime/cli.js');
 		await run('public-fresh-core',process.execPath,[freshCli,'install','--home',freshHome]);
 		const status=JSON.parse(await run('public-fresh-status',process.execPath,[freshCli,'status','--home',freshHome,'--json']));
-		assert.equal(status.coreVersion,manifest.version);
+		assert.equal(status.coreVersion,expectedCoreVersion);
+		assert.equal(JSON.parse(readFileSync(path.join(freshHome,'lib/runtime',manifest.releaseId,'package.json'),'utf8')).version,manifest.version);
 		env.CROSSHEAD_HOME=env.ONLYBOTS_HOME=home;
 		const originalBaseline=readFileSync(path.resolve('tests/fixtures/published-alpha6-install.sh'),'utf8');
 		assert.equal(createHash('sha256').update(originalBaseline).digest('hex'),'b8af3866f720577fed81630769dddae1128cb11cb8973614f11e58b9d10635da');
@@ -106,12 +109,9 @@ try {
 		const match=originalBaseline.match(/^RELEASE_ID="([^"]+)"/m);assert(match);
 		const oldCli=path.join(home,'lib/runtime',match[1],'dist/runtime/cli.js');
 		await run('published-alpha6-core',process.execPath,[oldCli,'install','--home',home]);
-		await run('public-alpha6-to-candidate-update',process.execPath,[oldCli,'update','--home',home,'--base-url','https://crosshead.sh','--sha256',manifest.artifacts.install.sha256,'--no-restart']);
-		publishedCli=path.join(home,'lib/runtime',manifest.releaseId,'dist/runtime/cli.js');
-		assert.equal(JSON.parse(await run('public-updated-status',process.execPath,[publishedCli,'status','--home',home,'--json'])).coreVersion,manifest.version);
-		results.checks.push('actual public installer fresh install', 'alpha.6 installer with immutable archive URL and original digest, updated using independently built candidate digest');
+		baselineCli=oldCli;
 	}
-	const fromInstalled = createRequire(path.join(installed, 'package.json'));
+
 	const { generateSecretKey, getPublicKey, nip19 } = fromInstalled('nostr-tools');
 	const persistence = fromInstalled('./dist/runtime/runtime-persistence.js');
 	const { LocalRuntimeClient } = fromInstalled('./dist/runtime/local-client.js');
@@ -120,6 +120,14 @@ try {
 	const key = generateSecretKey(), now = new Date().toISOString(), paths = persistence.ensureRuntimeHomeLayout(home);
 	persistence.saveProfile(paths, { name: 'default', apiBase: 'https://crosshead.invalid', npub: nip19.npubEncode(getPublicKey(key)), memoryMode: 'assist', workspaceScope: 'repo', features: { feedback: false, relay: false, coldSync: false, autoWarmPromotion: false }, secureStoreMode: 'file', createdAt: now, updatedAt: now });
 	persistence.saveSecret(paths, 'default', { nsec: nip19.nsecEncode(key), session: null });
+	if(publicInstall){
+		const profileBefore=readFileSync(path.join(paths.profiles,'default.json'),'utf8');
+		await run('public-alpha6-to-candidate-update',process.execPath,[baselineCli,'update','--home',home,'--base-url','https://crosshead.sh','--sha256',manifest.artifacts.install.sha256,'--no-restart']);
+		publishedCli=path.join(home,'lib/runtime',manifest.releaseId,'dist/runtime/cli.js');
+		assert.equal(JSON.parse(await run('public-updated-status',process.execPath,[publishedCli,'status','--home',home,'--json'])).coreVersion,expectedCoreVersion);
+		assert.equal(readFileSync(path.join(paths.profiles,'default.json'),'utf8'),profileBefore,'Upgrade changed the existing profile');
+		results.checks.push('actual public installer fresh install','alpha.6 installer with immutable archive URL and original digest, upgraded with independently built candidate digest; profile preserved');
+	}
 	writeFileSync(path.join(claudeHome, 'settings.json'), JSON.stringify({ env: { FIXTURE_PRESERVED: 'yes' } }));
 	writeFileSync(path.join(codexHome, 'config.toml'), `model = "crosshead-fixture"\nmodel_provider = "crosshead_fixture"\n[model_providers.crosshead_fixture]\nname = "Local deterministic fixture"\nbase_url = "${base}/v1"\nenv_key = "FIXTURE_API_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n`);
 	const cli = publishedCli ?? path.join(installed, 'dist/runtime/cli.js');
