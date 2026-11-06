@@ -6,12 +6,12 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 const require = createRequire(import.meta.url);
 const tar = require('tar');
-const root = mkdtempSync(path.join(os.tmpdir(), 'crosshead-coding-hosts-'));
+const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'crosshead-coding-hosts-')));
 const output = path.resolve(process.env.CROSSHEAD_TEST_LOG_DIR ?? '.coding-host-test-logs');
 mkdirSync(output, { recursive: true });
 const installed = path.join(root, 'installed'), home = path.join(root, 'runtime'), project = path.join(root, 'project');
@@ -74,6 +74,7 @@ const run = async (name, binary, args, cwd = project) => {
 	assert.equal(code, 0, `${name} exited ${code}; inspect ${output}/${name}.log`); return stdout;
 };
 const results = { platform: process.platform, checks: [], fixture: true };
+let primaryFailure = null;
 try {
 	const releaseDir = path.resolve(process.argv[2] ?? 'release');
 	const manifest = JSON.parse(readFileSync(path.join(releaseDir, 'crosshead-release.json'), 'utf8'));
@@ -125,7 +126,15 @@ try {
 	results.releaseId = manifest.releaseId; results.source = manifest.source;
 	writeFileSync(path.join(output, 'result.json'), JSON.stringify(results, null, 2) + '\n');
 	console.log(JSON.stringify(results));
-} finally {
+} catch (error) { primaryFailure = error; throw error; } finally {
 	writeFileSync(path.join(output, 'provider-observations.json'), JSON.stringify(requests.map(({stage, path: route, body}) => ({ stage, route, hasFinding: JSON.stringify(body).includes(marker), hasCaptureContract: JSON.stringify(body).includes('Crosshead hooks automatically capture') })), null, 2) + '\n');
-	await cleanup(); await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true });
+	let cleaned = false;
+	try { await cleanup(); cleaned = true; }
+	catch (error) {
+		writeFileSync(path.join(output, 'cleanup-error.log'), `${error.message}\nRetained fixture home: ${root}\n`);
+		if (!primaryFailure) throw error;
+	} finally {
+		await new Promise(resolve => server.close(resolve));
+		if (cleaned) rmSync(root, { recursive: true, force: true });
+	}
 }
