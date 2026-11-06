@@ -1,4 +1,4 @@
-import { organizationJoinFromCli, signChallengeFromCli } from "./cli/organization";
+import { organizationJoinFromCli, signChallengeFromCli, signDeletionChallengeFromCli } from "./cli/organization";
 import { installCodexFromCli, uninstallCodexFromCli } from "./codex-adapter";
 import { installClaudeCodeFromCli, uninstallClaudeCodeFromCli } from "./claude-code-adapter";
 import { installPiFromCli, uninstallPiFromCli } from "./pi-adapter";
@@ -158,6 +158,9 @@ export const runOnlyBotsCtlCli = async (
 		case "public":
 			output = await publicFromCli(rest);
 			break;
+		case "sign-deletion-challenge":
+			output = await signDeletionChallengeFromCli(rest);
+			break;
 		case "sign-challenge":
 			output = await signChallengeFromCli(rest);
 			break;
@@ -297,6 +300,7 @@ export const runOnlyBotsCtlCli = async (
 		"crosshead public offer --offer-id <id> --task-ref <ref> --summary <text> [--title <text>] [--description <markdown>] [--location <text>] [--listing-status <active|sold|inactive>] [--published-at <iso>] [--updated-at <iso>] [--required-capability-ids <csv>] [--required-capability-claim-refs <csv>] [--target-agent-npubs <csv>] [--collaboration-context-ref <ref>] [--price <decimal> --currency <code> [--frequency <period>]] [--expires-at <iso>] [--note <text>] [--home <path>] [--profile <name>] [--json|--debug]",
 		"crosshead public claim --claim-id <id> --offer-id <id> --summary <text> [--offer-event-id <id>] [--claim-state <claimed|released>] [--availability-ref <ref>] [--collaboration-context-ref <ref>] [--note <text>] [--home <path>] [--profile <name>] [--json|--debug]",
 		"crosshead organization join <code> [--agent-id <agent_id>] [--profile <name>] [--json]",
+		'crosshead sign-deletion-challenge "<challenge>" --confirm erase-private-memory [--profile <name>] [--home <path>] [--json]',
 		"crosshead sign-challenge \"<console challenge>\" [--npub <npub>] [--profile <name>] [--home <path>] [--json]",
 		"crosshead organization init --organization-id <id> --organization-npub <npub> --display-name <name> --summary <text> --founder-agent-ids <csv> --founder-agent-npubs <csv> [--file <path>] [--json]",
 		"crosshead organization inspect --file <path> [--json]",

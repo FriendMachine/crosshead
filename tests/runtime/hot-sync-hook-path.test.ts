@@ -7,7 +7,7 @@ import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { HostRuntimeAdapterBase, type HostAdapterIdentity } from "../../src/runtime/host-adapter-base";
 import { RuntimeLifecycleManager } from "../../src/runtime/lifecycle-engine";
 import { HostedOnlyBotsClient } from "../../src/runtime/hosted-client";
-import { getHotSyncManager, stopHotSyncManagers } from "../../src/runtime/hot-sync-manager";
+import { getHotSyncManager, stopHotSyncManagers, hotSyncEnabled } from "../../src/runtime/hot-sync-manager";
 import { buildContinuityGovernorState } from "../../src/runtime/continuity-governor";
 import { buildDefaultContinuityPolicy } from "../../src/runtime/continuity-policy";
 import type { LocalRuntimeClient } from "../../src/runtime/local-client";
@@ -53,6 +53,11 @@ afterEach(async () => {
 });
 
 describe("real adapter local hot-memory path", () => {
+	it("uses local hot sync by default and supports an explicit rollback opt-out", () => {
+		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", undefined); expect(hotSyncEnabled()).toBe(true);
+		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "false"); expect(hotSyncEnabled()).toBe(false);
+		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "true"); expect(hotSyncEnabled()).toBe(true);
+	});
 	it.each(["codex", "claude-code", "pi", "hermes", "opencode"])("prepares and durably completes %s while hosted requests hang", async runtime => {
 		const h = harness(runtime);
 		const input = { workspaceRoot: "/fixture-project", sessionId: "session", turnId: "first", prompt: "Repair the queue" };

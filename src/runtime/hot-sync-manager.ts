@@ -8,7 +8,7 @@ import { hotSyncName, HOT_SYNC_PROTOCOL_VERSION, HOT_SYNC_MAX_SCOPES, type HotSy
 import { workspaceHotScope } from "./workspace-hot-memory";
 import { hotSyncConflictIds, hotSyncSupersededIds } from "./hot-sync-signing";
 import { normalizeTaskEvidence } from "./task-evidence";
-export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
+export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === undefined || process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
 type Config = {
 	stateDir: string;
 	origin: string;

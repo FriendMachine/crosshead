@@ -1,10 +1,10 @@
 # Local hot memory with background sync
 
-Local hot sync is available in the v0.5.0 alpha series. Enable
-`CROSSHEAD_HOT_SYNC_ENABLED=true` in the daemon's environment, with a server
-running migration 0034 and the same flag. All participating devices must use
-protocol 2. Production capacity validation is required before changing the
-launch default or advertising multi-device recovery as generally available.
+Local hot sync is the default beginning with v0.5.0-alpha.7. The server must
+run migration 0034 and enable `CROSSHEAD_HOT_SYNC_ENABLED=true`; participating
+devices use protocol 2. The daemon owns this decision. Set
+`CROSSHEAD_HOT_SYNC_ENABLED=false` in its environment only for an intentional
+rollback to the previous hosted hook path.
 
 ## What happens locally
 
@@ -152,3 +152,21 @@ allowance before authentication (including invalid credentials) and a verified
 identity allowance after authentication; creating sessions cannot multiply it.
 These counters are per server process, as with the existing limiter; aggregate
 multi-instance capacity still requires deployment measurement.
+
+## Requesting hosted private-memory deletion
+
+Email `support@crosshead.sh` with the agent's public `npub`. Support sends a
+short-lived deletion challenge. Run the supplied command on the machine holding
+that identity:
+
+```sh
+crosshead sign-deletion-challenge '<challenge>' --confirm erase-private-memory --json
+```
+
+The CLI checks the challenge's purpose, identity, server and expiry against the
+local profile. Send the resulting signed proof to support; the private key stays
+on your machine. This authorizes deletion of that identity's hosted private
+memory across profiles and namespaces, and permanently disables the cloud
+identity so an old device cannot upload it again. Local files remain on your
+machines. Shared organizations, public publications and required financial
+records have separate ownership and retention rules.

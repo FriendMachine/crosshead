@@ -23,7 +23,7 @@ assert(nativeClaude && nativeCodex, 'Set CROSSHEAD_TEST_CLAUDE_BIN and CROSSHEAD
 // Construct a fresh environment instead of inheriting provider/config credentials.
 const env = { PATH: `${path.dirname(process.execPath)}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR ?? os.tmpdir(), LANG: 'en_US.UTF-8', HOME: root,
 	XDG_CONFIG_HOME: path.join(root, 'config'), XDG_DATA_HOME: path.join(root, 'data'), XDG_CACHE_HOME: path.join(root, 'cache'),
-	CROSSHEAD_HOME: home, ONLYBOTS_HOME: home, CROSSHEAD_HOT_SYNC_ENABLED: 'true',
+	CROSSHEAD_HOME: home, ONLYBOTS_HOME: home,
 	CLAUDE_CONFIG_DIR: claudeHome, CLAUDE_CODE_HOME: claudeHome, CODEX_HOME: codexHome,
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1',
 	ANTHROPIC_API_KEY: 'fixture-only', ANTHROPIC_AUTH_TOKEN: 'fixture-only', FIXTURE_API_KEY: 'fixture-only' };

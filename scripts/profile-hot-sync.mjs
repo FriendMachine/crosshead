@@ -28,11 +28,12 @@ globalThis.fetch = async (...args) => {
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const quantile = (a, q) => [...a].sort((x,y) => x-y)[Math.max(0, Math.ceil(a.length*q)-1)] ?? 0;
-const summary = { origin, clients: count, seconds, captureMs, startedAt: new Date().toISOString(), synthetic: true, cleanup: [] };
+const summary = { origin, clients: count, seconds, captureMs, startedAt: new Date().toISOString(), synthetic: true, npubs: [], cleanup: [] };
 try {
 	for (let i = 0; i < count; i++) {
 		const key = generateSecretKey(), identity = { nsec: nip19.nsecEncode(key), npub: nip19.npubEncode(getPublicKey(key)) };
 		const client = new HostedOnlyBotsClient({ apiBase: origin, ...identity });
+		summary.npubs.push(identity.npub);
 		clients.push(client); managers.push(new HotSyncManager({ stateDir: path.join(root, String(i)), origin, ...identity, profileName: 'launch-capacity-fixture' }, client));
 	}
 	const start = performance.now(); let nextCapture = 0, event = 0;
@@ -63,11 +64,14 @@ try {
 			catch (error) { summary.cleanup.push({ device: i, scopeCleared: false, status: error.status, code: error.code }); }
 		}
 		const session = client.session();
-		if (session) await originalFetch(`${origin}/v1/auth/revoke`, { method: 'POST', headers: { authorization: `Bearer ${session.sessionToken}` }, signal: AbortSignal.timeout(10000) });
+		if (session) {
+			const revoked = await originalFetch(`${origin}/v1/auth/revoke`, { method: 'POST', headers: { authorization: `Bearer ${session.sessionToken}` }, signal: AbortSignal.timeout(10000) });
+			summary.cleanup.push({device:i,sessionRevoked:revoked.ok,status:revoked.status});
+		}
 	}
 	summary.requests = Object.values(observations.reduce((all, x) => { const key = `${x.phase} ${x.method} ${x.route}`; const row = all[key] ??= { route: key, count: 0, statuses: {}, latencies: [] }; row.count++; row.statuses[x.status] = (row.statuses[x.status] ?? 0)+1; row.latencies.push(x.ms); return all; }, {})).map(({latencies, ...row}) => ({ ...row, p95Ms: Math.round(quantile(latencies,.95)) }));
 	summary.finishedAt = new Date().toISOString();
 	globalThis.fetch = originalFetch; rmSync(root, { recursive: true, force: true });
 	console.log(JSON.stringify(summary, null, 2));
 }
-if (summary.abort || summary.cleanup.some(x => !x.scopeCleared)) process.exitCode = 2;
+if (summary.abort || summary.cleanup.some(x => x.scopeCleared === false || x.sessionRevoked === false)) process.exitCode = 2;
