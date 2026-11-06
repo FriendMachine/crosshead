@@ -317,6 +317,9 @@ export class HotSyncManager {
 			// Never let a legacy import repopulate or block an explicitly reset scope.
 			if(this.replica(scope).inspect().pendingReset)continue;
 			const remote = await this.client.readHotSync(this.namespace, scope);
+			// Linking can change the mapping while the cloud read is pending. Its
+			// absence/reset proof is valid only for the scope that was read.
+			if (workspaceHotScope(runtime, this.workspace(raw)) !== scope) continue;
 			if(this.replica(scope).inspect().pendingReset)continue;
 			if (remote.revision === 0 && remote.epoch === 0) {
 				for (const checkpoint of Array.isArray(state.continuityCheckpoints) ? state.continuityCheckpoints : []) {

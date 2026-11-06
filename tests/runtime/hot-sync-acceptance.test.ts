@@ -93,6 +93,25 @@ describe("local-first hot-memory acceptance", () => {
 		} finally { release?.(); await flushing; }
 	});
 
+	it("does not use an old-scope absence proof after a workspace is relinked", async () => {
+		const cloud = new Cloud(), id = identity(), config = { origin: "https://crosshead.sh", ...id, profileName: "default" };
+		const other = new HotSyncManager({ ...config, stateDir: home() }, cloud.client(id.npub));
+		other.link("/remote-copy", "shared-target"); other.capture("codex", { ...checkpoint("old"), workspaceId: "repo:/remote-copy" });
+		const target = (other.status().scopes as Array<{scope:string}>)[0]!.scope;
+		other.reset(target); await other.flush();
+		cloud.legacy = { scopes: [{ scope: "codex", integrity: "verified", content: JSON.stringify({ runtime: "codex", workspaceId: "repo:/project", continuityCheckpoints: [{ goal: "Recover", summary: "Must not revive after target reset", occurredAt: "2026-11-03T00:00:00Z" }] }) }] };
+		const client = cloud.client(id.npub), m = new HotSyncManager({ ...config, stateDir: home() }, client);
+		m.workspace("repo:/project"); const original = client.readHotSync.bind(client); let release!: () => void;
+		const read = vi.spyOn(client, "readHotSync").mockImplementationOnce((...args) => new Promise(resolve => { release = () => resolve(original(...args)); }));
+		const flushing = m.flush(false);
+		try {
+			await vi.waitFor(() => expect(read).toHaveBeenCalled());
+			m.link("/project", "shared-target"); release(); await flushing; await m.flush(false);
+			expect(entries(m)).toHaveLength(0);
+			expect((await original(m.namespace, target)).epoch).toBe(1);
+		} finally { release?.(); await flushing; }
+	});
+
 	it("imports identical queued legacy findings on two devices without false conflicts", async () => {
 		const cloud = new Cloud(), id = identity();
 		const config = { origin: "https://crosshead.sh", ...id, profileName: "default" };
