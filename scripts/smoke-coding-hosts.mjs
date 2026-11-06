@@ -96,15 +96,20 @@ try {
 		const status=JSON.parse(await run('public-fresh-status',process.execPath,[freshCli,'status','--home',freshHome,'--json']));
 		assert.equal(status.coreVersion,manifest.version);
 		env.CROSSHEAD_HOME=env.ONLYBOTS_HOME=home;
-		const baseline=path.resolve('tests/fixtures/published-alpha6-install.sh');
+		const originalBaseline=readFileSync(path.resolve('tests/fixtures/published-alpha6-install.sh'),'utf8');
+		assert.equal(createHash('sha256').update(originalBaseline).digest('hex'),'b8af3866f720577fed81630769dddae1128cb11cb8973614f11e58b9d10635da');
+		// The original public archive alias moves on deploy. Substitute only the
+		// immutable GitHub alpha.6 archive URL; retain its original digest check.
+		const baseline=path.join(root,'alpha6-immutable-install.sh');
+		writeFileSync(baseline,originalBaseline.replace(/^CROSSHEAD_RELEASE_URL=.+$/m,'CROSSHEAD_RELEASE_URL="https://github.com/FriendMachine/crosshead/releases/download/v0.5.0-alpha.6/crosshead-runtime-install-0.5.0-alpha.6.tgz"'));
 		await run('published-alpha6-install','bash',[baseline]);
-		const match=readFileSync(baseline,'utf8').match(/^RELEASE_ID="([^"]+)"/m);assert(match);
+		const match=originalBaseline.match(/^RELEASE_ID="([^"]+)"/m);assert(match);
 		const oldCli=path.join(home,'lib/runtime',match[1],'dist/runtime/cli.js');
 		await run('published-alpha6-core',process.execPath,[oldCli,'install','--home',home]);
 		await run('public-alpha6-to-candidate-update',process.execPath,[oldCli,'update','--home',home,'--base-url','https://crosshead.sh','--sha256',manifest.artifacts.install.sha256,'--no-restart']);
 		publishedCli=path.join(home,'lib/runtime',manifest.releaseId,'dist/runtime/cli.js');
 		assert.equal(JSON.parse(await run('public-updated-status',process.execPath,[publishedCli,'status','--home',home,'--json'])).coreVersion,manifest.version);
-		results.checks.push('actual public installer fresh install', 'actual alpha.6 installation updated using independently built candidate digest');
+		results.checks.push('actual public installer fresh install', 'alpha.6 installer with immutable archive URL and original digest, updated using independently built candidate digest');
 	}
 	const fromInstalled = createRequire(path.join(installed, 'package.json'));
 	const { generateSecretKey, getPublicKey, nip19 } = fromInstalled('nostr-tools');
