@@ -56,7 +56,7 @@ try {
 	summary.devices = managers.map(m => { const s = m.status(); return { state: s.state, pending: s.pendingCount, error: s.error }; });
 } finally {
 	phase = 'cleanup';
-	await Promise.all(managers.map(m => m.stop()));
+	for (const [device,result] of (await Promise.allSettled(managers.map(m => m.stop()))).entries()) if(result.status === "rejected") summary.cleanup.push({device,stopFailed:true});
 	for (const [i, manager] of managers.entries()) {
 		const client = clients[i];
 		for (const {scope} of manager.status().scopes) {
@@ -65,8 +65,10 @@ try {
 		}
 		const session = client.session();
 		if (session) {
-			const revoked = await originalFetch(`${origin}/v1/auth/revoke`, { method: 'POST', headers: { authorization: `Bearer ${session.sessionToken}` }, signal: AbortSignal.timeout(10000) });
-			summary.cleanup.push({device:i,sessionRevoked:revoked.ok,status:revoked.status});
+			try { const revoked = await originalFetch(`${origin}/v1/auth/revoke`, { method: 'POST', headers: { authorization: `Bearer ${session.sessionToken}` }, signal: AbortSignal.timeout(10000) });
+			const result = await revoked.json();
+			summary.cleanup.push({device:i,sessionRevoked:revoked.ok && result.revoked === true,status:revoked.status});
+            } catch { summary.cleanup.push({device:i,sessionRevoked:false}); }
 		}
 	}
 	summary.requests = Object.values(observations.reduce((all, x) => { const key = `${x.phase} ${x.method} ${x.route}`; const row = all[key] ??= { route: key, count: 0, statuses: {}, latencies: [] }; row.count++; row.statuses[x.status] = (row.statuses[x.status] ?? 0)+1; row.latencies.push(x.ms); return all; }, {})).map(({latencies, ...row}) => ({ ...row, p95Ms: Math.round(quantile(latencies,.95)) }));
@@ -74,4 +76,4 @@ try {
 	globalThis.fetch = originalFetch; rmSync(root, { recursive: true, force: true });
 	console.log(JSON.stringify(summary, null, 2));
 }
-if (summary.abort || summary.cleanup.some(x => x.scopeCleared === false || x.sessionRevoked === false)) process.exitCode = 2;
+if (summary.abort || summary.cleanup.some(x => x.scopeCleared === false || x.sessionRevoked === false || x.stopFailed)) process.exitCode = 2;
