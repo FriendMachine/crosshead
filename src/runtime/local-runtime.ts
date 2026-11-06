@@ -3440,7 +3440,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		}
 
 		const basePayload = {
-			schemaVersion: "public_discovery_event_v1" as const,
+			schemaVersion: "public_discovery_event_v2" as const,
 			eventType: eventType as PublicDiscoveryEvent["eventType"],
 			publishedAt: readString(request.publishedAt, request.published_at) ?? nowIso(),
 			summary: readString(request.summary) ?? "",
@@ -3454,11 +3454,36 @@ export class OnlyBotsLocalRuntimeDaemon {
 			throw new Error("public discovery publish requires --summary <text>");
 		}
 
+      const listing = eventType === "capability_advertisement" || eventType === "task_offer";
+      if (listing && !readString(eventType === "task_offer" ? request.offerId ?? request.offer_id : request.advertisementId ?? request.advertisement_id)) {
+        throw new Error("listing requires an explicit --advertisement-id or --offer-id");
+      }
+      const priceAmount = request.price;
+      const currency = request.currency;
+      const frequency = request.frequency;
+      if (listing && ((priceAmount !== undefined && (typeof priceAmount !== "string" || typeof currency !== "string"))
+        || (priceAmount === undefined && (currency !== undefined || frequency !== undefined)))) {
+        throw new Error("listings require --price <decimal> and --currency <three-letter code> together; --frequency is optional");
+      }
+      if (listing && (request.budgetSats !== undefined || request.budget_sats !== undefined)) {
+        throw new Error("use --price and --currency for NIP-99 listings");
+      }
+      const listingFields = {
+        title: readString(request.title) ?? basePayload.summary,
+        description: readString(request.description) ?? basePayload.summary,
+        location: readString(request.location) ?? null,
+        price: priceAmount === undefined ? null : { amount: priceAmount, currency, frequency: frequency ?? null },
+        listingStatus: readString(request.listingStatus, request.listing_status) ?? "active",
+        updatedAt: readString(request.updatedAt, request.updated_at) ?? nowIso(),
+        expiresAt: readString(request.expiresAt, request.expires_at) ?? null,
+      };
+
 		let payload: PublicDiscoveryEvent;
 		switch (eventType) {
 			case "capability_advertisement":
 		payload = {
 		  ...basePayload,
+      ...listingFields,
 		  eventType,
 		  advertisementId: readString(request.advertisementId, request.advertisement_id) ?? "",
 		  capabilityIds: readCsv(request.capabilityIds, request.capability_ids),
@@ -3499,6 +3524,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			case "task_offer":
 		payload = {
 		  ...basePayload,
+      ...listingFields,
 		  eventType,
 		  offerId: readString(request.offerId, request.offer_id) ?? "",
 		  taskRef: readString(request.taskRef, request.task_ref) ?? "",
@@ -3506,8 +3532,6 @@ export class OnlyBotsLocalRuntimeDaemon {
 		  requiredCapabilityClaimRefs: readCsv(request.requiredCapabilityClaimRefs, request.required_capability_claim_refs),
 		  targetAgentNpubs: readCsv(request.targetAgentNpubs, request.target_agent_npubs),
 		  collaborationContextRef: readString(request.collaborationContextRef, request.collaboration_context_ref) ?? null,
-		  budgetSats: readOptionalInteger(request.budgetSats, request.budget_sats),
-		  expiresAt: readString(request.expiresAt, request.expires_at) ?? null,
 		} as PublicDiscoveryEvent;
 		break;
 			case "task_claim": {

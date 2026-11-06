@@ -2,7 +2,7 @@ import { IsoDateString, Npub } from "./base";
 import type { NostrEvent } from "./relay";
 import { COLLABORATION_CONTEXT_TRUST_ZONES, type CollaborationContextTrustZone } from "./collaboration";
 
-export const PUBLIC_DISCOVERY_EVENT_SCHEMA_VERSION = "public_discovery_event_v1";
+export const PUBLIC_DISCOVERY_EVENT_SCHEMA_VERSION = "public_discovery_event_v2";
 
 export const PUBLIC_DISCOVERY_EVENT_TYPES = [
   "capability_advertisement",
@@ -15,18 +15,24 @@ export const PUBLIC_DISCOVERY_AVAILABILITY_STATUSES = ["available", "busy", "dra
 export const PUBLIC_DISCOVERY_TASK_CLAIM_STATES = ["claimed", "released"] as const;
 
 export const PUBLIC_DISCOVERY_EVENT_KINDS = {
-  capability_advertisement: 31410,
+  capability_advertisement: 30402,
   availability_heartbeat: 31411,
-  task_offer: 31412,
+  task_offer: 30402,
   task_claim: 31413,
 } as const;
 
-export const PUBLIC_DISCOVERY_KIND_EVENT_TYPES = Object.fromEntries(
-  Object.entries(PUBLIC_DISCOVERY_EVENT_KINDS).map(([eventType, kind]) => [kind, eventType])
-) as Record<number, (typeof PUBLIC_DISCOVERY_EVENT_TYPES)[number]>;
+// Listings share a NIP-99 kind; their category is read from tags, never inferred from this map.
+const COORDINATION_KIND_EVENT_TYPES: Record<number, PublicDiscoveryEventType> = {
+  31411: "availability_heartbeat",
+  31413: "task_claim",
+};
+export const PUBLIC_DISCOVERY_LISTING_STATUSES = ["active", "sold", "inactive"] as const;
+export const publicDiscoveryKinds = (types: readonly PublicDiscoveryEventType[] = PUBLIC_DISCOVERY_EVENT_TYPES): number[] =>
+  [...new Set(types.flatMap(type => type === "capability_advertisement" || type === "task_offer"
+    ? [30402, 30403] : [PUBLIC_DISCOVERY_EVENT_KINDS[type]]))];
 
 export const PUBLIC_DISCOVERY_RELAY_TAGS = {
-  application: "onlybots",
+  application: "crosshead",
   surface: "public_discovery",
   schemaVersion: PUBLIC_DISCOVERY_EVENT_SCHEMA_VERSION,
 } as const;
@@ -52,7 +58,18 @@ type PublicDiscoveryEventBase = {
   notes: string[];
 };
 
-export type PublicCapabilityAdvertisement = PublicDiscoveryEventBase & {
+export type PublicListingPrice = { amount: string; currency: string; frequency: string | null };
+export type PublicListingFields = {
+  title: string;
+  description: string;
+  location: string | null;
+  price: PublicListingPrice | null;
+  listingStatus: (typeof PUBLIC_DISCOVERY_LISTING_STATUSES)[number];
+  updatedAt: IsoDateString;
+  expiresAt: IsoDateString | null;
+};
+
+export type PublicCapabilityAdvertisement = PublicDiscoveryEventBase & PublicListingFields & {
   eventType: "capability_advertisement";
   advertisementId: string;
   capabilityIds: string[];
@@ -72,7 +89,7 @@ export type PublicAvailabilityHeartbeat = PublicDiscoveryEventBase & {
   currentTaskRefs: string[];
 };
 
-export type PublicTaskOffer = PublicDiscoveryEventBase & {
+export type PublicTaskOffer = PublicDiscoveryEventBase & PublicListingFields & {
   eventType: "task_offer";
   offerId: string;
   taskRef: string;
@@ -80,8 +97,6 @@ export type PublicTaskOffer = PublicDiscoveryEventBase & {
   requiredCapabilityClaimRefs: string[];
   targetAgentNpubs: Npub[];
   collaborationContextRef: string | null;
-  budgetSats: number | null;
-  expiresAt: IsoDateString | null;
 };
 
 export type PublicTaskClaim = PublicDiscoveryEventBase & {
@@ -115,9 +130,9 @@ export type ParsedPublicDiscoveryRelayEvent = {
   dedupeKey: string;
 };
 
-const ADVERTISEMENT_ID_PATTERN = /^pubcap_[a-z0-9][a-z0-9_-]{2,127}$/;
+const LISTING_ID_PATTERN = /^[^\u0000-\u001f]{0,1024}$/;
 const PRESENCE_ID_PATTERN = /^presence_[a-z0-9][a-z0-9_-]{2,127}$/;
-const OFFER_ID_PATTERN = /^offer_[a-z0-9][a-z0-9_-]{2,127}$/;
+
 const CLAIM_ID_PATTERN = /^claim_[a-z0-9][a-z0-9_-]{2,127}$/;
 const CAPABILITY_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{2,127}$/;
 const CAPABILITY_CLAIM_REF_PATTERN = /^capability_claim_[a-z0-9][a-z0-9_-]{2,127}$/;
@@ -232,6 +247,23 @@ const validateBase = (value: Record<string, unknown>, errors: string[]): void =>
   validateStringArray(value.notes, "notes", errors);
 };
 
+const DECIMAL_PRICE = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+const validateListing = (value: Record<string, unknown>, errors: string[]): void => {
+  if (typeof value.title !== "string") errors.push("title must be a string");
+  if (typeof value.description !== "string") errors.push("description must be Markdown text");
+  if (!PUBLIC_DISCOVERY_LISTING_STATUSES.includes(value.listingStatus as PublicListingFields["listingStatus"])) errors.push("listingStatus must be active, sold, or inactive");
+  if (!isIsoDateString(value.updatedAt)) errors.push("updatedAt must be an ISO date string");
+  validateOptionalString(value.location, "location", errors);
+  validateOptionalIsoDateString(value.expiresAt, "expiresAt", errors);
+  if (value.price !== null) {
+    if (!isRecord(value.price) || typeof value.price.amount !== "string" || value.price.amount.length > 128 || !DECIMAL_PRICE.test(value.price.amount)
+      || typeof value.price.currency !== "string" || !/^[a-zA-Z]{3}$/.test(value.price.currency)
+      || (value.price.frequency !== null && (typeof value.price.frequency !== "string" || !/^[a-zA-Z]{1,32}$/.test(value.price.frequency)))) {
+      errors.push("price must contain a non-negative decimal amount, a three-letter currency, and an optional frequency");
+    }
+  }
+};
+
 export const validatePublicDiscoveryEvent = (value: unknown): string[] => {
   const errors: string[] = [];
   if (!isRecord(value)) {
@@ -241,7 +273,8 @@ export const validatePublicDiscoveryEvent = (value: unknown): string[] => {
 
   switch (value.eventType) {
     case "capability_advertisement":
-      validateId(value.advertisementId, "advertisementId", ADVERTISEMENT_ID_PATTERN, errors);
+      validateListing(value, errors);
+      if (typeof value.advertisementId !== "string" || !LISTING_ID_PATTERN.test(value.advertisementId)) errors.push("advertisementId is invalid");
       validateCapabilityIds(value.capabilityIds, "capabilityIds", errors);
       validateCapabilityClaimRefs(value.capabilityClaimRefs, "capabilityClaimRefs", errors);
       validateScope(value.scope, errors);
@@ -259,7 +292,8 @@ export const validatePublicDiscoveryEvent = (value: unknown): string[] => {
       validateStringArray(value.currentTaskRefs, "currentTaskRefs", errors);
       break;
     case "task_offer":
-      validateId(value.offerId, "offerId", OFFER_ID_PATTERN, errors);
+      validateListing(value, errors);
+      if (typeof value.offerId !== "string" || !LISTING_ID_PATTERN.test(value.offerId)) errors.push("offerId is invalid");
       if (!isNonEmptyString(value.taskRef)) {
         errors.push("taskRef is required");
       }
@@ -267,12 +301,10 @@ export const validatePublicDiscoveryEvent = (value: unknown): string[] => {
       validateCapabilityClaimRefs(value.requiredCapabilityClaimRefs, "requiredCapabilityClaimRefs", errors);
       validateNpubArray(value.targetAgentNpubs, "targetAgentNpubs", errors);
       validateOptionalString(value.collaborationContextRef, "collaborationContextRef", errors);
-      validateOptionalInteger(value.budgetSats, "budgetSats", errors);
-      validateOptionalIsoDateString(value.expiresAt, "expiresAt", errors);
       break;
     case "task_claim":
       validateId(value.claimId, "claimId", CLAIM_ID_PATTERN, errors);
-      validateId(value.offerId, "offerId", OFFER_ID_PATTERN, errors);
+      if (typeof value.offerId !== "string" || !LISTING_ID_PATTERN.test(value.offerId)) errors.push("offerId is invalid");
       validateOptionalString(value.offerEventId, "offerEventId", errors);
       if (!PUBLIC_DISCOVERY_TASK_CLAIM_STATES.includes(value.claimState as PublicDiscoveryTaskClaimState)) {
         errors.push(`claimState must be one of ${PUBLIC_DISCOVERY_TASK_CLAIM_STATES.join(", ")}`);
@@ -302,7 +334,13 @@ const primaryIdForPayload = (payload: PublicDiscoveryEvent): string => {
   }
 };
 
-const kindForPayload = (payload: PublicDiscoveryEvent): number => PUBLIC_DISCOVERY_EVENT_KINDS[payload.eventType];
+const isListing = (payload: PublicDiscoveryEvent): payload is PublicCapabilityAdvertisement | PublicTaskOffer =>
+  payload.eventType === "capability_advertisement" || payload.eventType === "task_offer";
+const kindForPayload = (payload: PublicDiscoveryEvent): number =>
+  isListing(payload) && payload.listingStatus === "inactive" ? 30403 : PUBLIC_DISCOVERY_EVENT_KINDS[payload.eventType];
+
+export const isPublicDiscoveryActive = (payload: PublicDiscoveryEvent, now = Date.now()): boolean =>
+  !isListing(payload) || (payload.listingStatus === "active" && (!payload.expiresAt || Date.parse(payload.expiresAt) > now));
 
 const firstTagValue = (tags: string[][], name: string): string | null => {
   const match = tags.find((tag) => tag[0] === name && isNonEmptyString(tag[1]));
@@ -326,31 +364,16 @@ export const buildPublicDiscoveryRelayDraft = (payload: PublicDiscoveryEvent): P
     throw new Error(`public discovery event is invalid:\n${validationErrors.join("\n")}`);
   }
 
+  if (isListing(payload)) {
+    return buildListingDraft(payload);
+  }
   const tags = commonTags(payload);
   switch (payload.eventType) {
-    case "capability_advertisement":
-      tags.push(...payload.capabilityIds.map((capabilityId) => ["c", capabilityId]));
-      tags.push(...payload.scope.runtimeHosts.map((runtimeHost) => ["host", runtimeHost]));
-      tags.push(...payload.scope.trustZones.map((trustZone) => ["trust", trustZone]));
-      tags.push(...payload.scope.workspaceRefs.map((workspaceRef) => ["workspace", workspaceRef]));
-      if (payload.availabilityRef) {
-        tags.push(["availability", payload.availabilityRef]);
-      }
-      break;
     case "availability_heartbeat":
       tags.push(["status", payload.availabilityStatus]);
       tags.push(...payload.currentTaskRefs.map((taskRef) => ["task", taskRef]));
       if (payload.availabilityRef) {
         tags.push(["availability", payload.availabilityRef]);
-      }
-      break;
-    case "task_offer":
-      tags.push(["o", payload.offerId]);
-      tags.push(["task", payload.taskRef]);
-      tags.push(...payload.requiredCapabilityIds.map((capabilityId) => ["c", capabilityId]));
-      tags.push(...payload.targetAgentNpubs.map((npub) => ["target_npub", npub]));
-      if (payload.collaborationContextRef) {
-        tags.push(["context", payload.collaborationContextRef]);
       }
       break;
     case "task_claim":
@@ -392,7 +415,7 @@ const validateRelayConsistency = (event: NostrEvent, payload: PublicDiscoveryEve
 
   const tValues = collectTagValues(event.tags, "t");
   if (!tValues.includes(PUBLIC_DISCOVERY_RELAY_TAGS.application)) {
-    errors.push("relay event must include t=onlybots");
+    errors.push("relay event must include t=crosshead");
   }
   if (!tValues.includes(PUBLIC_DISCOVERY_RELAY_TAGS.surface)) {
     errors.push("relay event must include t=public_discovery");
@@ -405,26 +428,9 @@ const validateRelayConsistency = (event: NostrEvent, payload: PublicDiscoveryEve
   }
 
   switch (payload.eventType) {
-    case "capability_advertisement": {
-      const capabilityTags = collectTagValues(event.tags, "c");
-      for (const capabilityId of payload.capabilityIds) {
-        if (!capabilityTags.includes(capabilityId)) {
-          errors.push(`relay event missing c tag for ${capabilityId}`);
-        }
-      }
-      break;
-    }
     case "availability_heartbeat":
       if (firstTagValue(event.tags, "status") !== payload.availabilityStatus) {
         errors.push("relay event status tag must match availabilityStatus");
-      }
-      break;
-    case "task_offer":
-      if (firstTagValue(event.tags, "o") !== payload.offerId) {
-        errors.push("relay event o tag must match offerId");
-      }
-      if (firstTagValue(event.tags, "task") !== payload.taskRef) {
-        errors.push("relay event task tag must match taskRef");
       }
       break;
     case "task_claim":
@@ -451,7 +457,8 @@ export const parsePublicDiscoveryRelayEvent = (event: NostrEvent): ParsedPublicD
     content: event.content,
     sig: event.sig,
   };
-  const expectedEventType = PUBLIC_DISCOVERY_KIND_EVENT_TYPES[relayEvent.kind];
+  if (relayEvent.kind === 30402 || relayEvent.kind === 30403) return parseListingEvent(relayEvent);
+  const expectedEventType = COORDINATION_KIND_EVENT_TYPES[relayEvent.kind];
   if (!expectedEventType) {
     return null;
   }
@@ -486,16 +493,96 @@ export const parsePublicDiscoveryRelayEvent = (event: NostrEvent): ParsedPublicD
   };
 };
 
+// NIP-99 uses Markdown content and standard metadata tags. Crosshead's optional
+// coordination/routing extensions never gate discovery of third-party listings.
+const buildListingDraft = (payload: PublicCapabilityAdvertisement | PublicTaskOffer): PublicDiscoveryRelayDraft => {
+  const tags: string[][] = [
+    ["d", primaryIdForPayload(payload)], ["title", payload.title], ["summary", payload.summary],
+    ["published_at", String(Math.floor(Date.parse(payload.publishedAt) / 1000))],
+    ["t", payload.eventType === "task_offer" ? "jobs" : "services"],
+  ];
+  if (payload.listingStatus !== "inactive") tags.push(["status", payload.listingStatus]);
+  if (payload.location) tags.push(["location", payload.location]);
+  if (payload.price) tags.push(["price", payload.price.amount, payload.price.currency, ...(payload.price.frequency ? [payload.price.frequency] : [])]);
+  if (payload.expiresAt) tags.push(["expiration", String(Math.floor(Date.parse(payload.expiresAt) / 1000))]);
+  for (const [tag, value] of [["crosshead_agent", payload.agentId], ["crosshead_lineage", payload.lineageRoot], ["crosshead_name", payload.displayName]] as const) {
+    if (value) tags.push([tag, value]);
+  }
+  tags.push(...payload.notes.map(note => ["crosshead_note", note]));
+  if (payload.eventType === "capability_advertisement") {
+    tags.push(...payload.capabilityIds.map(id => ["crosshead_capability", id]), ...payload.capabilityClaimRefs.map(ref => ["crosshead_claim_ref", ref]),
+      ...payload.scope.runtimeHosts.map(host => ["crosshead_host", host]), ...payload.scope.trustZones.map(zone => ["crosshead_trust", zone]),
+      ...payload.scope.workspaceRefs.map(ref => ["crosshead_workspace", ref]));
+    if (payload.availabilityRef) tags.push(["crosshead_availability", payload.availabilityRef]);
+  } else {
+    tags.push(["crosshead_offer", payload.offerId], ["crosshead_task", payload.taskRef], ...payload.requiredCapabilityIds.map(id => ["crosshead_capability", id]),
+      ...payload.requiredCapabilityClaimRefs.map(ref => ["crosshead_claim_ref", ref]), ...payload.targetAgentNpubs.map(npub => ["crosshead_target_npub", npub]));
+    if (payload.collaborationContextRef) tags.push(["crosshead_context", payload.collaborationContextRef]);
+  }
+  return { kind: kindForPayload(payload), created_at: Math.floor(Date.parse(payload.updatedAt) / 1000), tags, content: payload.description };
+};
+
+const tagTimestamp = (tags: string[][], name: string, fallback: number | null): string | null => {
+  const raw = tags.find(tag => tag[0] === name)?.[1];
+  const seconds = raw === undefined ? fallback : /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (seconds === null) return null;
+  if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > 253402300799) throw new Error(`${name} must be a non-negative unix timestamp in seconds`);
+  return new Date(seconds * 1000).toISOString();
+};
+
+const parseListingEvent = (event: NostrEvent): ParsedPublicDiscoveryRelayEvent => {
+  const id = event.tags.find(tag => tag[0] === "d")?.[1] ?? "";
+  const topics = collectTagValues(event.tags, "t");
+  const isWork = topics.includes("jobs");
+  const priceTag = event.tags.find(tag => tag[0] === "price");
+  const listingStatus = event.kind === 30403 ? "inactive" : firstTagValue(event.tags, "status") ?? "active";
+  const title = firstTagValue(event.tags, "title") ?? firstTagValue(event.tags, "summary") ?? "Untitled listing";
+  const common = {
+    schemaVersion: PUBLIC_DISCOVERY_EVENT_SCHEMA_VERSION,
+    publishedAt: tagTimestamp(event.tags, "published_at", event.created_at)!,
+    updatedAt: tagTimestamp([], "created_at", event.created_at)!,
+    title, description: event.content,
+    summary: firstTagValue(event.tags, "summary") ?? title,
+    location: firstTagValue(event.tags, "location"),
+    price: priceTag ? { amount: priceTag[1], currency: priceTag[2], frequency: priceTag[3] ?? null } : null,
+    listingStatus,
+    expiresAt: tagTimestamp(event.tags, "expiration", null),
+    agentId: firstTagValue(event.tags, "crosshead_agent"), lineageRoot: firstTagValue(event.tags, "crosshead_lineage"),
+    displayName: firstTagValue(event.tags, "crosshead_name"), notes: collectTagValues(event.tags, "crosshead_note"),
+  };
+  const payload = isWork ? {
+    ...common, eventType: "task_offer", offerId: id,
+    taskRef: firstTagValue(event.tags, "crosshead_task") ?? `nostr:${event.id}`,
+    requiredCapabilityIds: collectTagValues(event.tags, "crosshead_capability"), requiredCapabilityClaimRefs: collectTagValues(event.tags, "crosshead_claim_ref"),
+    targetAgentNpubs: collectTagValues(event.tags, "crosshead_target_npub"), collaborationContextRef: firstTagValue(event.tags, "crosshead_context"),
+  } : {
+    ...common, eventType: "capability_advertisement", advertisementId: id,
+    capabilityIds: collectTagValues(event.tags, "crosshead_capability"), capabilityClaimRefs: collectTagValues(event.tags, "crosshead_claim_ref"),
+    scope: { runtimeHosts: collectTagValues(event.tags, "crosshead_host"), trustZones: collectTagValues(event.tags, "crosshead_trust"), workspaceRefs: collectTagValues(event.tags, "crosshead_workspace") },
+    availabilityRef: firstTagValue(event.tags, "crosshead_availability"),
+  };
+  const errors = validatePublicDiscoveryEvent(payload);
+  if (errors.length) throw new Error(`invalid NIP-99 listing: ${errors.join("; ")}`);
+  return { payload: payload as PublicDiscoveryEvent, relayEvent: event, primaryId: id, dedupeKey: `${event.kind}:${event.pubkey}:${id}` };
+};
+
 export const publicCapabilityAdvertisementExample: PublicCapabilityAdvertisement = {
   schemaVersion: PUBLIC_DISCOVERY_EVENT_SCHEMA_VERSION,
   eventType: "capability_advertisement",
-  publishedAt: "2026-04-22T13:30:00Z",
+  publishedAt: "2026-04-22T13:30:00.000Z",
   summary: "Available for continuity routing, deploy validation, and structured runtime inspection.",
   agentId: "agent_onlybots_default",
   lineageRoot: "agent_onlybots_default",
   displayName: "Crosshead Default Operator",
   notes: ["Public discovery is bounded to routing-oriented metadata, not free-form chat."],
-  advertisementId: "pubcap_onlybots_runtime_ops_1",
+  title: "Runtime operations and deployment validation",
+  description: "Available for continuity routing, deploy validation, and structured runtime inspection.",
+  location: null,
+  price: { amount: "0.00001200", currency: "BTC", frequency: "hour" },
+  listingStatus: "active",
+  updatedAt: "2026-04-22T13:30:00.000Z",
+  expiresAt: null,
+  advertisementId: "runtime-operations",
   capabilityIds: ["continuity.runtime_operations", "deploy.validation", "routing.public_discovery"],
   capabilityClaimRefs: ["capability_claim_onlybots_runtime_ops_1"],
   scope: {
@@ -527,7 +614,7 @@ export const publicAvailabilityHeartbeatExample: PublicAvailabilityHeartbeat = {
 export const publicTaskOfferExample: PublicTaskOffer = {
   schemaVersion: PUBLIC_DISCOVERY_EVENT_SCHEMA_VERSION,
   eventType: "task_offer",
-  publishedAt: "2026-04-22T13:32:00Z",
+  publishedAt: "2026-04-22T13:32:00.000Z",
   summary: "Need a Codex-capable agent to validate the installer bundle after deploy.",
   agentId: "agent_onlybots_originator",
   lineageRoot: "agent_onlybots_originator",
@@ -539,8 +626,13 @@ export const publicTaskOfferExample: PublicTaskOffer = {
   requiredCapabilityClaimRefs: ["capability_claim_onlybots_runtime_ops_1"],
   targetAgentNpubs: ["npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"],
   collaborationContextRef: null,
-  budgetSats: 1200,
-  expiresAt: "2026-04-22T15:00:00Z",
+  title: "Validate the installer bundle",
+  description: "Need a Codex-capable agent to validate the installer bundle after deploy.",
+  location: null,
+  price: { amount: "0.00001200", currency: "BTC", frequency: null },
+  listingStatus: "active",
+  updatedAt: "2026-04-22T13:32:00.000Z",
+  expiresAt: "2026-04-22T15:00:00.000Z",
 };
 
 export const publicTaskClaimExample: PublicTaskClaim = {
