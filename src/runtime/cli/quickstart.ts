@@ -6,9 +6,12 @@ import { nativeHostFromCli } from "../native-host-adapter";
 import { parseArgs } from "../local-runtime";
 import { ensureRuntimeHomeLayout, loadProfile, loadRuntimeConfig } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
-import { installCoreFromCli, keygenFromCli, startFromCli, statusFromCli } from "./core";
+import { installCoreFromCli, keygenFromCli, statusFromCli } from "./core";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
-import { probeRuntimeDaemonHealth, readDaemonOwnershipState } from "../daemon-ownership";
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { readDaemonOwnershipState, readRuntimeDaemonHealth } from "../daemon-ownership";
+import { startDetachedRuntimeDaemon, stopDetachedRuntimeDaemon } from "../local-runtime";
 import { resolveRuntimePaths } from "../runtime-persistence";
 
 export type QuickstartCliPaths = {
@@ -82,6 +85,74 @@ const formatQuickstart = (result: Record<string, unknown>): string => {
 	return lines.join("\n");
 };
 
+const canonicalScript = (scriptPath: string): string => {
+	try {
+		return realpathSync(scriptPath);
+	} catch {
+		return path.resolve(scriptPath);
+	}
+};
+
+/**
+ * Starts the daemon, or reuses a healthy one so quickstart for a second host
+ * shares it. A daemon still running another release (for example after the
+ * installer updated the runtime) is restarted on the installed release through
+ * the ownership-checked stop/start path; if that is not safe, the mismatch is
+ * reported instead. `--port` is honored on start and restart, and a running
+ * daemon on another port is reported rather than silently kept.
+ */
+export const ensureQuickstartDaemon = async (input: {
+	home?: string;
+	daemonScriptPath: string;
+	port?: string;
+}): Promise<QuickstartStep> => {
+	const requestedPort = input.port === undefined ? undefined : Number(input.port);
+	if (requestedPort !== undefined && (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535)) {
+		throw new Error("--port must be an integer between 0 and 65535");
+	}
+	const state = readDaemonOwnershipState(resolveRuntimePaths(input.home));
+	const health = state ? await readRuntimeDaemonHealth(state) : null;
+	if (!state || !health) {
+		const started = await startDetachedRuntimeDaemon({ home: input.home, port: requestedPort, daemonScriptPath: input.daemonScriptPath });
+		return { id: "daemon", ok: true, detail: `Started onlybotsd on port ${started.port}` };
+	}
+	const installed = canonicalScript(input.daemonScriptPath);
+	const running = health.daemonScriptPath ? canonicalScript(health.daemonScriptPath) : null;
+	if (running === installed) {
+		if (requestedPort !== undefined && requestedPort !== 0 && requestedPort !== state.port) {
+			return {
+				id: "daemon",
+				ok: false,
+				detail: `onlybotsd already running on port ${state.port}; --port ${requestedPort} was not applied. Run crosshead stop, then crosshead start --port ${requestedPort}.`,
+			};
+		}
+		return { id: "daemon", ok: true, detail: `onlybotsd already running on port ${state.port}` };
+	}
+	const runningLabel = running ?? "a release that predates release reporting";
+	if (state.organizationalWorkerConfigPath) {
+		return {
+			id: "daemon",
+			ok: false,
+			detail: `onlybotsd on port ${state.port} runs ${runningLabel}, but ${installed} is installed. It hosts an organizational worker, which needs an explicit operator restart: run crosshead stop, then crosshead start.`,
+		};
+	}
+	try {
+		await stopDetachedRuntimeDaemon(input.home);
+		const restarted = await startDetachedRuntimeDaemon({
+			home: input.home,
+			port: requestedPort ?? state.port ?? undefined,
+			daemonScriptPath: input.daemonScriptPath,
+		});
+		return { id: "daemon", ok: true, detail: `Restarted onlybotsd on port ${restarted.port}: it was running ${runningLabel}; now ${installed}` };
+	} catch (error) {
+		return {
+			id: "daemon",
+			ok: false,
+			detail: `onlybotsd on port ${state.port} runs ${runningLabel}, but ${installed} is installed, and it could not be restarted safely (${error instanceof Error ? error.message : String(error)}). Run crosshead stop, then crosshead start.`,
+		};
+	}
+};
+
 export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPaths): Promise<string> => {
 	const { flags } = parseArgs(argv);
 	const home = typeof flags.home === "string" ? flags.home : undefined;
@@ -153,13 +224,14 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 		detail: adapter === "omp" ? `${adapterOutput}; OMP uses the Pi embedded adapter path` : adapterOutput,
 	});
 
-	const runningDaemon = readDaemonOwnershipState(resolveRuntimePaths(home));
-	if (!boolFlagDisabled(flags, "no-start") && runningDaemon && (await probeRuntimeDaemonHealth(runningDaemon))) {
-		// Quickstart for a second host shares the daemon the first one started.
-		steps.push({ id: "daemon", ok: true, detail: `onlybotsd already running on port ${runningDaemon.port}` });
-	} else if (!boolFlagDisabled(flags, "no-start")) {
-		const startOutput = await startFromCli([...flagPair("--home", home), ...flagPair("--port", typeof flags.port === "string" ? flags.port : undefined)]);
-		steps.push({ id: "daemon", ok: true, detail: startOutput });
+	if (!boolFlagDisabled(flags, "no-start")) {
+		steps.push(
+			await ensureQuickstartDaemon({
+				home,
+				daemonScriptPath: paths.daemonScriptPath,
+				port: typeof flags.port === "string" ? flags.port : undefined,
+			})
+		);
 	} else {
 		steps.push({ id: "daemon", ok: false, detail: "skipped by --no-start" });
 	}
