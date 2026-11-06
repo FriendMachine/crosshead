@@ -1,3 +1,4 @@
+import { publicDiscoveryRawEvents } from "./public-discovery";
 import { readFileSync, writeFileSync } from "fs";
 import path from "path";
 
@@ -169,13 +170,13 @@ const loadTrustInputs = (flags: Record<string, string | boolean>) => {
 	const receipts = loadDocuments(receiptFiles).flatMap((document) => extractTrustReceipts(document));
 	const capabilityClaims = loadDocuments(claimFiles).flatMap((document) => extractCapabilityClaims(document));
 	const trustEdges = loadDocuments(edgeFiles).flatMap((document) => extractTrustEdges(document));
-	const publicDiscoveryItems = loadDocuments(eventFiles).flatMap((document) => extractPublicDiscoveryObservations(document));
+	const publicDiscoveryEvents = loadDocuments(eventFiles).flatMap(publicDiscoveryRawEvents);
 
 	return {
 		receipts,
 		capabilityClaims,
 		trustEdges,
-		publicDiscoveryItems,
+		publicDiscoveryEvents,
 	};
 };
 
@@ -210,7 +211,7 @@ const fetchLivePublicDiscovery = async (
 		},
 		profileName
 	);
-	return extractPublicDiscoveryObservations(result);
+	return publicDiscoveryRawEvents(result);
 };
 
 export const trustFromCli = async (argv: string[]): Promise<string> => {
@@ -254,14 +255,13 @@ export const trustFromCli = async (argv: string[]): Promise<string> => {
 
 	if (subcommand === "graph") {
 		const inputs = loadTrustInputs(flags);
-		const shouldFetchPublic =
-			parseBoolean(
-				typeof flags["fetch-public"] === "string" ? flags["fetch-public"] : flags.fetchPublic,
-				false
-			) || typeof flags.authors === "string" || typeof flags["event-type"] === "string" || inputs.publicDiscoveryItems.length > 0;
-		const publicDiscoveryItems = shouldFetchPublic
-			? [...inputs.publicDiscoveryItems, ...(await fetchLivePublicDiscovery(daemon, flags, profileName))]
-			: inputs.publicDiscoveryItems;
+    const requestedFetch = flags["fetch-public"] ?? flags.fetchPublic;
+    const shouldFetchPublic = requestedFetch !== undefined ? parseBoolean(requestedFetch, false)
+      : typeof flags.authors === "string" || typeof flags["event-type"] === "string" || inputs.publicDiscoveryEvents.length > 0;
+    const events = shouldFetchPublic
+      ? [...inputs.publicDiscoveryEvents, ...(await fetchLivePublicDiscovery(daemon, flags, profileName))]
+      : inputs.publicDiscoveryEvents;
+    const publicDiscoveryItems = extractPublicDiscoveryObservations({ revision_events: events });
 		const result = await inspectTrustGraph({
 			trustReceipts: inputs.receipts,
 			capabilityClaims: inputs.capabilityClaims,
@@ -277,11 +277,11 @@ export const trustFromCli = async (argv: string[]): Promise<string> => {
 			throw new Error("trust route requires --required-capability-ids <csv>");
 		}
 		const inputs = loadTrustInputs(flags);
-		const publicDiscoveryItems =
-			inputs.publicDiscoveryItems.length > 0 &&
-			parseBoolean(typeof flags["fetch-public"] === "string" ? flags["fetch-public"] : flags.fetchPublic, true) === false
-				? inputs.publicDiscoveryItems
-				: [...inputs.publicDiscoveryItems, ...(await fetchLivePublicDiscovery(daemon, flags, profileName))];
+    const shouldFetchPublic = parseBoolean(flags["fetch-public"] ?? flags.fetchPublic, true);
+    const events = shouldFetchPublic
+      ? [...inputs.publicDiscoveryEvents, ...(await fetchLivePublicDiscovery(daemon, flags, profileName))]
+      : inputs.publicDiscoveryEvents;
+    const publicDiscoveryItems = extractPublicDiscoveryObservations({ revision_events: events });
 		const result = await explainCapabilityRouting({
 			trustReceipts: inputs.receipts,
 			capabilityClaims: inputs.capabilityClaims,

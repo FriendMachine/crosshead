@@ -1,0 +1,474 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crosshead.sh/schemas/public-discovery-event.schema.json",
+  "title": "Crosshead Public Discovery (NIP-99 listings and coordination)",
+  "type": "object",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/capabilityAdvertisement"
+    },
+    {
+      "$ref": "#/$defs/availabilityHeartbeat"
+    },
+    {
+      "$ref": "#/$defs/taskOffer"
+    },
+    {
+      "$ref": "#/$defs/taskClaim"
+    }
+  ],
+  "$defs": {
+    "npub": {
+      "type": "string",
+      "pattern": "^npub1[023456789acdefghjklmnpqrstuvwxyz]+$"
+    },
+    "isoDateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "base": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "eventType",
+        "publishedAt",
+        "summary",
+        "agentId",
+        "lineageRoot",
+        "displayName",
+        "notes"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": "public_discovery_event_v2"
+        },
+        "eventType": {
+          "enum": [
+            "capability_advertisement",
+            "availability_heartbeat",
+            "task_offer",
+            "task_claim"
+          ]
+        },
+        "publishedAt": {
+          "$ref": "#/$defs/isoDateTime"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "lineageRoot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "capabilityScope": {
+      "type": "object",
+      "required": [
+        "runtimeHosts",
+        "trustZones",
+        "workspaceRefs"
+      ],
+      "properties": {
+        "runtimeHosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "trustZones": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "public",
+              "network_trusted",
+              "workspace_private",
+              "agent_sealed",
+              "human_visible",
+              "machine_only",
+              "ephemeral",
+              "auditable"
+            ]
+          }
+        },
+        "workspaceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "capabilityAdvertisement": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "$ref": "#/$defs/listing"
+        },
+        {
+          "type": "object",
+          "required": [
+            "advertisementId",
+            "capabilityIds",
+            "capabilityClaimRefs",
+            "scope",
+            "availabilityRef"
+          ],
+          "properties": {
+            "eventType": {
+              "const": "capability_advertisement"
+            },
+            "advertisementId": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001f]*$"
+            },
+            "capabilityIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._:-]{2,127}$"
+              }
+            },
+            "capabilityClaimRefs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^capability_claim_[a-z0-9][a-z0-9_-]{2,127}$"
+              }
+            },
+            "scope": {
+              "$ref": "#/$defs/capabilityScope"
+            },
+            "availabilityRef": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "availabilityHeartbeat": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "required": [
+            "presenceId",
+            "availabilityStatus",
+            "claimedJobs",
+            "maxConcurrentJobs",
+            "nextHeartbeatDueAt",
+            "availabilityRef",
+            "currentTaskRefs"
+          ],
+          "properties": {
+            "eventType": {
+              "const": "availability_heartbeat"
+            },
+            "presenceId": {
+              "type": "string",
+              "pattern": "^presence_[a-z0-9][a-z0-9_-]{2,127}$"
+            },
+            "availabilityStatus": {
+              "type": "string",
+              "enum": [
+                "available",
+                "busy",
+                "draining",
+                "offline"
+              ]
+            },
+            "claimedJobs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "maxConcurrentJobs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "nextHeartbeatDueAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "availabilityRef": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "currentTaskRefs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "taskOffer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "$ref": "#/$defs/listing"
+        },
+        {
+          "type": "object",
+          "required": [
+            "offerId",
+            "taskRef",
+            "requiredCapabilityIds",
+            "requiredCapabilityClaimRefs",
+            "targetAgentNpubs",
+            "collaborationContextRef",
+            "expiresAt"
+          ],
+          "properties": {
+            "eventType": {
+              "const": "task_offer"
+            },
+            "offerId": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001f]*$"
+            },
+            "taskRef": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requiredCapabilityIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._:-]{2,127}$"
+              }
+            },
+            "requiredCapabilityClaimRefs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^capability_claim_[a-z0-9][a-z0-9_-]{2,127}$"
+              }
+            },
+            "targetAgentNpubs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/npub"
+              }
+            },
+            "collaborationContextRef": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "expiresAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        }
+      ]
+    },
+    "taskClaim": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "required": [
+            "claimId",
+            "offerId",
+            "offerEventId",
+            "claimState",
+            "availabilityRef",
+            "collaborationContextRef",
+            "note"
+          ],
+          "properties": {
+            "eventType": {
+              "const": "task_claim"
+            },
+            "claimId": {
+              "type": "string",
+              "pattern": "^claim_[a-z0-9][a-z0-9_-]{2,127}$"
+            },
+            "offerId": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001f]*$"
+            },
+            "offerEventId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "claimState": {
+              "type": "string",
+              "enum": [
+                "claimed",
+                "released"
+              ]
+            },
+            "availabilityRef": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "collaborationContextRef": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "listing": {
+      "type": "object",
+      "required": [
+        "title",
+        "description",
+        "location",
+        "price",
+        "listingStatus",
+        "updatedAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "location": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "amount",
+                "currency",
+                "frequency"
+              ],
+              "properties": {
+                "amount": {
+                  "type": "string",
+                  "maxLength": 128,
+                  "pattern": "^(?:0|[1-9]\\d*)(?:\\.\\d+)?$"
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z]{3}$"
+                },
+                "frequency": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[a-zA-Z]{1,32}$"
+                }
+              }
+            }
+          ]
+        },
+        "listingStatus": {
+          "enum": [
+            "active",
+            "sold",
+            "inactive"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/isoDateTime"
+        },
+        "expiresAt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/isoDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -36,7 +36,7 @@ const formatPublicDiscoveryStateForDisplay = (result: Record<string, unknown>): 
 		}
 		if (payload?.eventType === "task_offer") {
 		  detail.push(
-			`  task: ${String(payload.taskRef ?? "none")} budget_sats=${String(payload.budgetSats ?? "none")} targets=${Array.isArray(payload.targetAgentNpubs) ? payload.targetAgentNpubs.join(", ") : "none"}`
+			`  task: ${String(payload.taskRef ?? "none")} price=${payload.price ? JSON.stringify(payload.price) : "unspecified"} status=${String(payload.listingStatus ?? "") } targets=${Array.isArray(payload.targetAgentNpubs) ? payload.targetAgentNpubs.join(", ") : "none"}`
 		  );
 		}
 		if (payload?.eventType === "task_claim") {
@@ -175,9 +175,16 @@ export const publicFromCli = async (argv: string[]): Promise<string> => {
 		throw new Error("public requires one of: schema, state, advertise, availability, offer, claim");
 	}
 
-	const result = await daemon.publishPublicDiscoveryEvent(
+  for (const name of ["price", "currency", "frequency"]) {
+    if (flags[name] !== undefined && (typeof flags[name] !== "string" || !String(flags[name]).trim())) throw new Error(`--${name} requires a value`);
+  }
+  if (flags["budget-sats"] !== undefined || flags.budgetSats !== undefined) throw new Error("use --price and --currency for NIP-99 listings");
+  const result = await daemon.publishPublicDiscoveryEvent(
 		{
-			profileName,
+      profileName,
+      title: csv(flags.title), description: csv(flags.description), location: csv(flags.location),
+      price: csv(flags.price), currency: csv(flags.currency), frequency: csv(flags.frequency),
+      listing_status: csv(flags["listing-status"]), published_at: csv(flags["published-at"]), updated_at: csv(flags["updated-at"]),
 			eventType,
 			summary: typeof flags.summary === "string" ? flags.summary : undefined,
 			note: typeof flags.note === "string" ? flags.note : undefined,
@@ -290,12 +297,6 @@ export const publicFromCli = async (argv: string[]): Promise<string> => {
 		  ? flags["collaboration-context-ref"]
 		  : typeof flags.collaborationContextRef === "string"
 			? flags.collaborationContextRef
-			: undefined,
-			budget_sats:
-		typeof flags["budget-sats"] === "string"
-		  ? flags["budget-sats"]
-		  : typeof flags.budgetSats === "string"
-			? flags.budgetSats
 			: undefined,
 			expires_at:
 		typeof flags["expires-at"] === "string"

@@ -1,3 +1,4 @@
+import { collectPublicDiscoveryEvents, publicDiscoveryRawEvents } from "./public-discovery";
 import { createHash, randomUUID } from "crypto";
 import { TextEncoder } from "util";
 
@@ -7,7 +8,7 @@ import { nip19, verifyEvent } from "nostr-tools";
 import type { CapabilityClaim, CapabilityClaimKind, CapabilityClaimStatus, TrustConfidenceLevel, TrustEdge, TrustReceipt, TrustReceiptType, TrustSubjectRef } from "../protocol/trust";
 import type { CollaborationContextTrustZone } from "../protocol/collaboration";
 import type { PersistentAgentReference } from "../protocol/persistent-agents";
-import { parsePublicDiscoveryRelayEvent, type PublicDiscoveryEvent, type PublicDiscoveryEventType } from "../protocol/public-discovery";
+import { isPublicDiscoveryActive, parsePublicDiscoveryRelayEvent, type PublicDiscoveryEvent, type PublicDiscoveryEventType } from "../protocol/public-discovery";
 import type { NostrEvent } from "../protocol/relay";
 import { CAPABILITY_CLAIM_SCHEMA_VERSION, TRUST_EDGE_SCHEMA_VERSION, TRUST_RECEIPT_SCHEMA_VERSION, validateCapabilityClaim, validateTrustEdge, validateTrustReceipt } from "../protocol/trust";
 import type { HandoffOutcomeEvent, HandoffStoredRecord } from "./handoff-capsules";
@@ -474,23 +475,11 @@ export const extractCapabilityClaims = (value: unknown): CapabilityClaim[] => {
 };
 
 export const extractPublicDiscoveryObservations = (value: unknown): TrustPublicDiscoveryObservation[] => {
-	if (Array.isArray(value)) {
-		return extractArray(value, normalizePublicDiscoveryObservation);
-	}
-	if (!isRecord(value)) {
-		return [];
-	}
-	if (Array.isArray(value.items)) {
-		return extractArray(value.items, normalizePublicDiscoveryObservation);
-	}
-	if (Array.isArray(value.publicDiscoveryItems)) {
-		return extractArray(value.publicDiscoveryItems, normalizePublicDiscoveryObservation);
-	}
-	if (Array.isArray(value.public_discovery_items)) {
-		return extractArray(value.public_discovery_items, normalizePublicDiscoveryObservation);
-	}
-	const single = normalizePublicDiscoveryObservation(value);
-	return single ? [single] : [];
+  const events = publicDiscoveryRawEvents(value);
+  return collectPublicDiscoveryEvents(events).items.flatMap(parsed => {
+    const observation = normalizePublicDiscoveryObservation({ rawEvent: parsed.relayEvent });
+    return observation ? [observation] : [];
+  });
 };
 
 type VerifiedReceiptInspection = {
@@ -856,7 +845,7 @@ const deriveDeclaredClaims = (observations: TrustPublicDiscoveryObservation[]): 
 				},
 				createdAt: observation.publishedAt,
 				observedAt: observation.publishedAt,
-				expiresAt: null,
+				expiresAt: payload.expiresAt,
 				notes: dedupeStrings(payload.notes),
 			};
 			claims.set(`${subjectKey(subject)}:${capabilityId}:${claim.claimKind}`, claim);
@@ -960,7 +949,18 @@ export const inspectTrustGraph = async (input: TrustGraphInspectionInput): Promi
 	const nowIso = (input.now?.() ?? new Date()).toISOString();
 	const derivedEdges = accumulateTrustEdges(receipts, nowIso);
 	const providedEdges = (input.trustEdges ?? []).filter((edge) => validateTrustEdge(edge).length === 0);
-	const observations = input.publicDiscoveryItems ?? [];
+	const latest = new Map<string, TrustPublicDiscoveryObservation>();
+  for (const observation of input.publicDiscoveryItems ?? []) {
+    const payload = observation.payload;
+    const listing = payload.eventType === "capability_advertisement" || payload.eventType === "task_offer";
+    const key = `${observation.authorNpub}:${listing ? (payload.listingStatus === "inactive" ? 30403 : 30402) : payload.eventType}:${observation.primaryId}`;
+    const previous = latest.get(key);
+    const timestamp = listing ? Date.parse(payload.updatedAt) : Date.parse(payload.publishedAt);
+    const oldPayload = previous?.payload;
+    const oldTimestamp = oldPayload ? Date.parse("updatedAt" in oldPayload ? oldPayload.updatedAt : oldPayload.publishedAt) : -Infinity;
+    if (!previous || timestamp > oldTimestamp || (timestamp === oldTimestamp && (observation.relayEventId ?? "") < (previous.relayEventId ?? ""))) latest.set(key, observation);
+  }
+  const observations = [...latest.values()].filter(observation => isPublicDiscoveryActive(observation.payload, Date.parse(nowIso)));
 	const derivedClaims = [
 		...deriveDeclaredClaims(observations),
 		...deriveObservedClaims(receipts, [...providedEdges, ...derivedEdges], nowIso),

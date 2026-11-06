@@ -126,3 +126,5 @@ node scripts/verify-release.mjs --smoke  # digests, layout, content scan, smoke 
 Pushing a `v<version>` tag runs the release workflow, which rebuilds,
 verifies and attaches these files to a GitHub release. The hosted service
 vendors a verified release; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Public service advertisements and work opportunities use [NIP-99 listings](docs/NOSTR-LISTINGS.md).
