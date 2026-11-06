@@ -28,6 +28,8 @@ const env = { PATH: `${path.dirname(process.execPath)}:${process.env.PATH}`, TMP
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1',
 	ANTHROPIC_API_KEY: 'fixture-only', ANTHROPIC_AUTH_TOKEN: 'fixture-only', FIXTURE_API_KEY: 'fixture-only' };
 let stage = 'capture', requests = [], cleanup = async () => {};
+const publicInstall=process.env.CROSSHEAD_TEST_INSTALL_SOURCE==='public';
+let publishedCli=null;
 const marker = 'duration-fixture-8427';
 const finding = `Finding ${marker}: serialize durations as decimal nanosecond strings. Zero is valid; negative durations are rejected. Do not convert to floating-point milliseconds. Next validate the transport round trip.`;
 const server = createServer(async (req, res) => {
@@ -83,6 +85,27 @@ try {
 	await tar.x({ file: archive, cwd: installed });
 	results.hosts = { claude: (await run('claude-version', nativeClaude, ['--version'])).trim(), codex: (await run('codex-version', nativeCodex, ['--version'])).trim() };
 	await run('runtime-dependencies', 'npm', ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], installed);
+	if(publicInstall){
+		const script=await (await fetch('https://crosshead.sh/install',{signal:AbortSignal.timeout(30000)})).text();
+		assert(script.includes(`RELEASE_ID="${manifest.releaseId}"`),'Production installer is not serving this release candidate');
+		const publishedScript=path.join(root,'public-install.sh');writeFileSync(publishedScript,script);
+		const freshHome=path.join(root,'fresh-public');env.CROSSHEAD_HOME=env.ONLYBOTS_HOME=freshHome;
+		await run('public-fresh-install','bash',[publishedScript]);
+		const freshCli=path.join(freshHome,'lib/runtime',manifest.releaseId,'dist/runtime/cli.js');
+		await run('public-fresh-core',process.execPath,[freshCli,'install','--home',freshHome]);
+		const status=JSON.parse(await run('public-fresh-status',process.execPath,[freshCli,'status','--home',freshHome,'--json']));
+		assert.equal(status.coreVersion,manifest.version);
+		env.CROSSHEAD_HOME=env.ONLYBOTS_HOME=home;
+		const baseline=path.resolve('tests/fixtures/published-alpha6-install.sh');
+		await run('published-alpha6-install','bash',[baseline]);
+		const match=readFileSync(baseline,'utf8').match(/^RELEASE_ID="([^"]+)"/m);assert(match);
+		const oldCli=path.join(home,'lib/runtime',match[1],'dist/runtime/cli.js');
+		await run('published-alpha6-core',process.execPath,[oldCli,'install','--home',home]);
+		await run('public-alpha6-to-candidate-update',process.execPath,[oldCli,'update','--home',home,'--base-url','https://crosshead.sh','--sha256',manifest.artifacts.install.sha256,'--no-restart']);
+		publishedCli=path.join(home,'lib/runtime',manifest.releaseId,'dist/runtime/cli.js');
+		assert.equal(JSON.parse(await run('public-updated-status',process.execPath,[publishedCli,'status','--home',home,'--json'])).coreVersion,manifest.version);
+		results.checks.push('actual public installer fresh install', 'actual alpha.6 installation updated using independently built candidate digest');
+	}
 	const fromInstalled = createRequire(path.join(installed, 'package.json'));
 	const { generateSecretKey, getPublicKey, nip19 } = fromInstalled('nostr-tools');
 	const persistence = fromInstalled('./dist/runtime/runtime-persistence.js');
@@ -94,7 +117,7 @@ try {
 	persistence.saveSecret(paths, 'default', { nsec: nip19.nsecEncode(key), session: null });
 	writeFileSync(path.join(claudeHome, 'settings.json'), JSON.stringify({ env: { FIXTURE_PRESERVED: 'yes' } }));
 	writeFileSync(path.join(codexHome, 'config.toml'), `model = "crosshead-fixture"\nmodel_provider = "crosshead_fixture"\n[model_providers.crosshead_fixture]\nname = "Local deterministic fixture"\nbase_url = "${base}/v1"\nenv_key = "FIXTURE_API_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n`);
-	const cli = path.join(installed, 'dist/runtime/cli.js');
+	const cli = publishedCli ?? path.join(installed, 'dist/runtime/cli.js');
 	const installClaude = ['install', 'claude-code', '--home', home, '--claude-home', claudeHome, '--claude-bin', nativeClaude, '--workspace-root', project];
 	const installCodex = ['install', 'codex', '--home', home, '--codex-home', codexHome, '--codex-bin', nativeCodex];
 	await run('install-claude', process.execPath, [cli, ...installClaude]);
