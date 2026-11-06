@@ -246,6 +246,18 @@ export class HostedOnlyBotsRequestError extends Error {
   }
 }
 
+/**
+ * Classify a failed hosted request for local diagnostics without copying its
+ * message, URL, headers or body: a timeout, an HTTP status/code, or an error name.
+ */
+export const describeHostedFailure = (error: unknown): Record<string, string | number | null> => {
+  if (error instanceof HostedOnlyBotsRequestError) return { errorClass: "http", status: error.status, code: error.code };
+  const name = error instanceof Error ? error.name : typeof error;
+  if (name === "TimeoutError") return { errorClass: "timeout" };
+  if (name === "AbortError") return { errorClass: "aborted" };
+  return { errorClass: /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "unknown" };
+};
+
 const extractHostedError = (data: unknown): { message: string | null; code: string | null; details: unknown } => {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return { message: null, code: null, details: undefined };

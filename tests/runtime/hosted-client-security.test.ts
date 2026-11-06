@@ -4,7 +4,7 @@ import { schnorr } from "@noble/curves/secp256k1";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { HostedOnlyBotsClient } from "../../src/runtime/hosted-client";
+import { describeHostedFailure, HostedOnlyBotsClient, HostedOnlyBotsRequestError } from "../../src/runtime/hosted-client";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -181,5 +181,16 @@ describe("hosted client security boundaries", () => {
       membership: { id: "membership-test", status: "active" },
     });
     expect(receivedBody).toEqual({ code: "obj_test", agent_id: "agent-test" });
+  });
+});
+
+describe("describeHostedFailure", () => {
+  it("distinguishes a recall timeout from an HTTP failure without copying messages", () => {
+    const timeout = new DOMException("The operation was aborted due to timeout https://secret.example/?token=x", "TimeoutError");
+    expect(describeHostedFailure(timeout)).toEqual({ errorClass: "timeout" });
+    const http = new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "secret detail" });
+    expect(describeHostedFailure(http)).toEqual({ errorClass: "http", status: 503, code: "recall_deadline_exceeded" });
+    expect(describeHostedFailure(new TypeError("fetch failed: secret.example"))).toEqual({ errorClass: "TypeError" });
+    expect(JSON.stringify(describeHostedFailure(Object.assign(new Error("x"), { name: "bad name with token=1" })))).not.toContain("token");
   });
 });
