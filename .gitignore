@@ -4,3 +4,5 @@ release/
 .native-host-test-logs/
 *.tgz
 .DS_Store
+
+.coding-host-test-logs/

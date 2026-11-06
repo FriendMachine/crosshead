@@ -1,0 +1,99 @@
+name: Production hot sync acceptance
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: production-hot-sync-acceptance
+  cancel-in-progress: false
+jobs:
+  linux-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with: {node-version: 22, cache: npm}
+      - run: npm ci && npm run build
+      - name: Capture online and after a real Docker network disconnect
+        env:
+          CROSSHEAD_HN_FIXTURE_NSEC: ${{ secrets.CROSSHEAD_HN_20261106_NSEC }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 fixture-state
+          fixture_container="crosshead-hn-${GITHUB_RUN_ID}-a"
+          cleanup() {
+            result=$?
+            trap - EXIT
+            if ! docker rm -f -v "$fixture_container" >/dev/null; then
+              echo 'Owned fixture container removal failed' >&2
+              exit 1
+            fi
+            if docker inspect "$fixture_container" >/dev/null 2>&1; then
+              echo 'Owned fixture container still exists' >&2
+              exit 1
+            fi
+            exit "$result"
+          }
+          trap cleanup EXIT
+          docker run -d --name "$fixture_container" --user "$(id -u):$(id -g)" --cpus 1 --memory 512m --memory-swap 512m --tmpfs /tmp:rw,size=64m --env CROSSHEAD_HN_FIXTURE_NSEC --mount "type=bind,src=$PWD,dst=/crosshead,readonly" --mount "type=bind,src=$PWD/fixture-state,dst=/fixture" node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d sleep infinity
+          docker exec "$fixture_container" node /crosshead/scripts/accept-hot-sync-production.mjs --phase a-online --home /fixture/state --run-id "$GITHUB_RUN_ID" --allow-production
+          docker network disconnect bridge "$fixture_container"
+          docker exec "$fixture_container" node /crosshead/scripts/accept-hot-sync-production.mjs --phase a-offline --home /fixture/state --run-id "$GITHUB_RUN_ID" --allow-production
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with: {name: synthetic-linux-state, path: fixture-state/, retention-days: 7}
+  macos-recovery:
+    needs: linux-offline
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with: {node-version: 22, cache: npm}
+      - run: npm ci && npm run build
+      - name: Recover, reconnect, isolate and reset through production
+        env:
+          CROSSHEAD_HN_FIXTURE_NSEC: ${{ secrets.CROSSHEAD_HN_20261106_NSEC }}
+        run: node scripts/accept-hot-sync-production.mjs --phase b-reconnect-reset --home fixture-macos --run-id "$GITHUB_RUN_ID" --allow-production
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with: {name: synthetic-macos-results, path: fixture-macos/result-*.json, retention-days: 7}
+  linux-reconnect:
+    needs: macos-recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with: {node-version: 22, cache: npm}
+      - run: npm ci && npm run build
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: {name: synthetic-linux-state, path: fixture-state}
+      - name: Reconnect stale offline state after the other machine reset
+        env:
+          CROSSHEAD_HN_FIXTURE_NSEC: ${{ secrets.CROSSHEAD_HN_20261106_NSEC }}
+        run: node scripts/accept-hot-sync-production.mjs --phase a-recover --home fixture-state/state --run-id "$GITHUB_RUN_ID" --allow-production
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with: {name: synthetic-linux-recovery-results, path: fixture-state/state/result-a-recover.json, retention-days: 7}
+  cleanup:
+    needs: [linux-offline, macos-recovery, linux-reconnect]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with: {node-version: 22, cache: npm}
+      - run: npm ci && npm run build
+      - name: Clear purpose-owned production memory and revoke this session
+        env:
+          CROSSHEAD_HN_FIXTURE_NSEC: ${{ secrets.CROSSHEAD_HN_20261106_NSEC }}
+        run: node scripts/accept-hot-sync-production.mjs --phase cleanup --home fixture-cleanup --run-id "$GITHUB_RUN_ID" --allow-production
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with: {name: synthetic-cleanup-result, path: fixture-cleanup/result-cleanup.json, retention-days: 7}

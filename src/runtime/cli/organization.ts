@@ -51,3 +51,12 @@ export const signChallengeFromCli = async (argv: string[]): Promise<string> => {
 	}
 	return [`Signed as ${result.npub} (profile ${result.profileName}). Paste this into the console:`, "", result.signature].join("\n");
 };
+
+/** Sign only the explicit irreversible private-memory erasure action. */
+export const signDeletionChallengeFromCli = async (argv: string[]): Promise<string> => {
+	const {positionals,flags} = parseArgs(argv);
+	for (const flag of Object.keys(flags)) if (!["home","profile","json","confirm"].includes(flag)) throw new Error(`Unknown deletion-signing option: --${flag}`);
+	if (!positionals[0]) throw new Error('Usage: crosshead sign-deletion-challenge "<challenge>" --confirm erase-private-memory [--profile name] [--home path] [--json]');
+	const daemon = new OnlyBotsLocalRuntimeDaemon(typeof flags.home === "string" ? flags.home : undefined);
+	return JSON.stringify(daemon.signDeletionChallenge(positionals[0], {profileName:typeof flags.profile === "string" ? flags.profile : undefined,confirmation:typeof flags.confirm === "string" ? flags.confirm : undefined}),null,2);
+};
