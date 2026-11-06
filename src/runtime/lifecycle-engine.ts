@@ -1262,7 +1262,7 @@ const buildLocalOnlyContextPack = (event: RuntimeLifecycleEvent, packRequest: Re
   const contextText = hotContextText;
   const injected = contextText.length > 0 ? 1 : 0;
   return {
-    packId: `local-hot-${event.eventId}`,
+    packId: null, // Local context is not a billable hosted context pack.
     contextText,
     fragments: injected > 0 ? [{ id: "local-hot-memory", kind: "hot_memory", content: contextText }] : [],
     manifest: {
@@ -1535,6 +1535,8 @@ export class RuntimeLifecycleManager {
   private timer: NodeJS.Timeout | null = null;
   private backgroundOperation: Promise<void> | null = null;
   private mutation: Promise<void> = Promise.resolve();
+  private detachedFlush: Promise<void> | null = null;
+  private readonly claimedQueueItems = new Set<string>();
 
   constructor(private readonly deps: RuntimeLifecycleDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -1550,6 +1552,15 @@ export class RuntimeLifecycleManager {
       return;
     }
     this.timer = setInterval(() => {
+      if (hotSyncEnabled()) {
+				// Archive transport may be slow; it must not starve hot-memory sync.
+				void this.withLock(async () => {
+					if (this.deps.loadContinuityGovernorState().paused) return;
+					const state = this.loadQueueState();
+					this.importQueuedHotMemory(state);
+					tickHotSyncManagers(this.deps.paths.state);
+				}).catch(error => this.markFailure(error instanceof Error ? error.message : String(error)));
+      }
       if (this.backgroundOperation) return;
       const operation = this.flushDueItems(false).catch((error) => {
         this.markFailure(error instanceof Error ? error.message : String(error));
@@ -1572,6 +1583,7 @@ export class RuntimeLifecycleManager {
     try { await operation; }
     finally {
       if (this.backgroundOperation === operation) this.backgroundOperation = null;
+      await this.detachedFlush;
       await this.mutation;
     }
   }
@@ -1620,6 +1632,7 @@ export class RuntimeLifecycleManager {
       const event = this.hydrateEventFromPriorTurnStart(this.normalizeEvent(request, profileName));
       if(hotSyncEnabled() && !localOnlyProfile && event.workspaceId)getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).activate(event.runtime,event.workspaceId);
       const continuity = this.deps.loadContinuityGovernorState();
+      if (hotSyncEnabled() && !continuity.paused) this.importQueuedHotMemory(state);
       // Apply capture policy before the event log as well as before hot storage.
       // This also covers a mode/pause change racing a native hook's status read.
       if (profile.memoryMode === "off" || profile.memoryMode === "manual" || continuity.paused) {
@@ -1656,7 +1669,7 @@ export class RuntimeLifecycleManager {
 
       this.recordEvent(event);
 
-      if ((event.type === "session.started" || event.type === "turn.started") && !localOnlyProfile) {
+      if ((event.type === "session.started" || event.type === "turn.started") && !localOnlyProfile && !hotSyncEnabled()) {
 		const inboxRefresh = await this.refreshInboxHud(profileName, profile, secret, event);
 		inbox = inboxRefresh.state;
 		if (inboxRefresh.action) {
@@ -1725,7 +1738,7 @@ export class RuntimeLifecycleManager {
               })
             );
           } else {
-						if (localOnlyProfile || (hotSyncEnabled() && packRequest.recallPolicy !== "bounded")) {
+						if (localOnlyProfile || hotSyncEnabled()) {
 							if (!hasHotMemoryOverride(packRequest)) {
 								packRequest.hotMemorySnapshot = localOnlyProfile ? readLocalHotMemory(this.deps.paths.state, HOT_SCOPE_ALL) : getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).read();
 							}
@@ -1847,7 +1860,7 @@ export class RuntimeLifecycleManager {
               },
             })
           );
-				} else if ((profile.memoryMode === "assist" || profile.memoryMode === "auto") && !localOnlyProfile) {
+				} else if ((profile.memoryMode === "assist" || profile.memoryMode === "auto") && !localOnlyProfile && !hotSyncEnabled()) {
           const reflectionRequest = buildReflectionRequest(event);
           if (reflectionRequest) {
             const client = this.buildClient(profile, secret);
@@ -2214,7 +2227,7 @@ export class RuntimeLifecycleManager {
 
       state.processedEventIds = [...state.processedEventIds, event.eventId].slice(-MAX_TRACKED_EVENT_IDS);
       this.saveQueueState(state);
-      const processedState = await this.processDueItems(state, false);
+      const processedState = hotSyncEnabled() ? state : await this.processDueItems(state, false);
 
       if (processedState.items.length > this.maxQueueDepth) {
         warnings.push("Local runtime queue is under backpressure");
@@ -2225,10 +2238,87 @@ export class RuntimeLifecycleManager {
   }
 
   async flushDueItems(force: boolean = true): Promise<void> {
-    await this.withLock(async () => {
+    if (!hotSyncEnabled()) {
+      await this.withLock(async () => {
+				const state = this.loadQueueState();
+				await this.processDueItems(state, force);
+      });
+      return;
+    }
+    if (this.detachedFlush) return this.detachedFlush;
+    const operation = this.flushDetachedQueue(force);
+    this.detachedFlush = operation;
+    try { await operation; }
+    finally { if (this.detachedFlush === operation) this.detachedFlush = null; }
+  }
+
+  private async flushDetachedQueue(force: boolean): Promise<void> {
+    const claimed = await this.withLock(async () => {
+      if (this.deps.loadContinuityGovernorState().paused) return null;
       const state = this.loadQueueState();
-      await this.processDueItems(state, force);
+      this.importQueuedHotMemory(state);
+      const now = this.now().getTime();
+      const items = state.items.filter(item => {
+				// Retained hosted snapshots are recovery data, never late legacy uploads.
+				if (item.kind === "hot_write") {
+					const profile = this.deps.loadProfile(item.profileName);
+					if (!profile || !isLocalOnlyRuntimeProfile(profile)) return false;
+				}
+				return !this.claimedQueueItems.has(item.id) && (force || Date.parse(item.availableAt) <= now);
+      });
+      for (const item of items) this.claimedQueueItems.add(item.id);
+      return structuredClone({ items, processedEventIds: [] }) as RuntimeQueueState;
     });
+    if (!claimed) return;
+    const claimedItems = [...claimed.items];
+    const original = new Map(claimedItems.map(item => [item.id, JSON.stringify(item)]));
+    try {
+      // These awaits never own the local lifecycle mutation lock. Claimed items
+      // remain durable, and new captures coalesce only into unclaimed items.
+      const processed = await this.processDueItems(claimed, true, false);
+      const remaining = new Map(processed.items.map(item => [item.id, item]));
+      await this.withLock(async () => {
+				const current = this.loadQueueState();
+				current.items = current.items.flatMap(item => {
+					const expected = original.get(item.id);
+					if (!expected || JSON.stringify(item) !== expected) return [item];
+					const retry = remaining.get(item.id);
+					return retry ? [retry] : [];
+				});
+				this.saveQueueState(current);
+      });
+    } finally {
+      await this.withLock(async () => { for (const item of claimedItems) this.claimedQueueItems.delete(item.id); });
+    }
+  }
+
+  private importQueuedHotMemory(state: RuntimeQueueState): void {
+    const imported = new Set<string>();
+    const errors = new Map<ReturnType<typeof getHotSyncManager>, string | null>();
+    for (const item of state.items) {
+      if (item.kind !== "hot_write" || this.claimedQueueItems.has(item.id)) continue;
+      try {
+				const { profile, secret } = this.resolveProfile(item.profileName);
+				if (isLocalOnlyRuntimeProfile(profile)) continue;
+				const manager = getHotSyncManager({ stateDir: this.deps.paths.state, origin: profile.apiBase, npub: profile.npub, nsec: secret.nsec, profileName: item.profileName });
+				if (!errors.has(manager)) errors.set(manager, null);
+				try {
+					manager.importQueuedLegacy(item.payload.hotState, item.payload.scope ?? "shared", item.workspaceId);
+					imported.add(item.id);
+				} catch (error) {
+					errors.set(manager, error instanceof Error ? error.message : "Legacy queue needs recovery");
+				}
+      } catch (error) {
+				// A removed/broken profile must not prevent unrelated local hooks.
+				this.deps.writeLog("hot_sync_legacy_queue_retained", { queueItemId: item.id, profileName: item.profileName });
+      }
+    }
+    for (const [manager, error] of errors) manager.setLegacyQueueError(error);
+    if (imported.size) {
+      // Each imported checkpoint is fsynced before its old queue entry is removed.
+      state.items = state.items.filter(item => !imported.has(item.id));
+      this.saveQueueState(state);
+    }
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -2824,7 +2914,7 @@ export class RuntimeLifecycleManager {
     const now = this.now();
     const dueAt = options.immediate ? now.toISOString() : new Date(now.getTime() + this.hotWriteDebounceMs).toISOString();
     const existing = state.items.find(
-      (item): item is Extract<RuntimeQueueItem, { kind: "hot_write" }> => item.kind === "hot_write" && item.key === key
+      (item): item is Extract<RuntimeQueueItem, { kind: "hot_write" }> => item.kind === "hot_write" && item.key === key && !this.claimedQueueItems.has(item.id)
     );
     if (existing) {
       existing.eventId = event.eventId;
@@ -2864,7 +2954,7 @@ export class RuntimeLifecycleManager {
     const now = this.now();
     const dueAt = new Date(now.getTime() + this.coldBatchWindowMs).toISOString();
     const existing = state.items.find(
-      (item): item is Extract<RuntimeQueueItem, { kind: "cold_batch" }> => item.kind === "cold_batch" && item.key === key
+      (item): item is Extract<RuntimeQueueItem, { kind: "cold_batch" }> => item.kind === "cold_batch" && item.key === key && !this.claimedQueueItems.has(item.id)
     );
     if (existing) {
       existing.eventId = event.eventId;
@@ -2917,10 +3007,10 @@ export class RuntimeLifecycleManager {
     return item;
   }
 
-  private async processDueItems(state: RuntimeQueueState, force: boolean): Promise<RuntimeQueueState> {
+  private async processDueItems(state: RuntimeQueueState, force: boolean, persistState = true): Promise<RuntimeQueueState> {
     const continuity = this.deps.loadContinuityGovernorState();
     if (continuity.paused) {
-      this.saveQueueState(state);
+      if (persistState) this.saveQueueState(state);
       return state;
     }
 
@@ -2931,6 +3021,7 @@ export class RuntimeLifecycleManager {
     const pending = state.items.filter((item) => !ready.includes(item));
 
     for (const item of ready) {
+      if (this.deps.loadContinuityGovernorState().paused) { remaining.push(item); continue; }
       try {
         const result = await this.processQueueItem(item);
         const warmDecision =
@@ -3065,7 +3156,7 @@ export class RuntimeLifecycleManager {
     }
 
     state.items = [...pending, ...remaining];
-    this.saveQueueState(state);
+    if (persistState) this.saveQueueState(state);
     return state;
   }
 

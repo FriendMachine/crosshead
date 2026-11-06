@@ -54,6 +54,70 @@ const entries = (m: HotSyncManager, inspect = false) => (m.read("all", inspect).
 	content: string;
 }>).flatMap(e => JSON.parse(e.content).continuityCheckpoints as HotSyncCheckpoint[]);
 describe("local-first hot-memory acceptance", () => {
+	it("bounds background capability, scope-discovery and legacy-read traffic during repeated captures", async () => {
+		const cloud = new Cloud(), id = identity(), client = cloud.client(id.npub);
+		const capabilities = vi.spyOn(client, "hotSyncCapabilities"), discovery = vi.spyOn(client, "listHotSync"), legacy = vi.spyOn(client, "readHotMemory");
+		const m = new HotSyncManager({ origin: "https://crosshead.sh", ...id, profileName: "default", stateDir: home() }, client);
+		for (const name of ["first", "second", "third"]) { m.capture("codex", checkpoint(name)); await m.flush(false); }
+		expect(capabilities).toHaveBeenCalledTimes(1);
+		expect(discovery).toHaveBeenCalledTimes(1);
+		expect(legacy).toHaveBeenCalledTimes(1);
+		expect(entries(m)).toHaveLength(3);
+		expect(m.status().pendingCount).toBe(0);
+		m.workspace("repo:/new-project"); await m.flush(false);
+		expect(legacy).toHaveBeenCalledTimes(2); // New workspaces must still migrate before upload.
+		await m.flush(); // Explicit operator refresh bypasses discovery caches.
+		expect(capabilities).toHaveBeenCalledTimes(2);
+		expect(discovery).toHaveBeenCalledTimes(2);
+		expect(legacy).toHaveBeenCalledTimes(3);
+	});
+
+	it("imports identical queued legacy findings on two devices without false conflicts", async () => {
+		const cloud = new Cloud(), id = identity();
+		const config = { origin: "https://crosshead.sh", ...id, profileName: "default" };
+		const a = new HotSyncManager({ ...config, stateDir: home() }, cloud.client(id.npub));
+		const b = new HotSyncManager({ ...config, stateDir: home() }, cloud.client(id.npub));
+		const legacy = { runtime: "codex", workspaceId: "repo:/project", continuityCheckpoints: [{ goal: "Recover", summary: "One shared legacy finding", occurredAt: "2026-11-03T00:00:00Z" }] };
+		a.importQueuedLegacy(legacy, "codex", null);
+		b.importQueuedLegacy(legacy, "codex", null);
+		await a.flush(); await b.flush(); await a.flush();
+		expect(entries(a)).toHaveLength(1);
+		expect(entries(b)).toHaveLength(1);
+		expect(entries(a)[0]?.summary).toBe("One shared legacy finding");
+		expect(entries(a, true).some(c => c.conflictOf)).toBe(false);
+	});
+	it("keeps a durable recovery copy when first discovery reveals a remote reset", async () => {
+		const cloud = new Cloud(), id = identity();
+		const config = { origin: "https://crosshead.sh", ...id, profileName: "default" };
+		const a = new HotSyncManager({ ...config, stateDir: home() }, cloud.client(id.npub));
+		a.capture("codex", checkpoint("old"));
+		const scope = (a.status().scopes as Array<{scope:string}>)[0]!.scope;
+		a.reset(scope); await a.flush();
+		const stateDir = home(), b = new HotSyncManager({ ...config, stateDir }, cloud.client(id.npub));
+		const legacy = { runtime: "codex", workspaceId: "repo:/project", continuityCheckpoints: [{ goal: "Recover", summary: "Ambiguous work survives reset discovery", occurredAt: "2026-11-03T00:00:00Z" }] };
+		b.importQueuedLegacy(legacy, "codex", null);
+		await b.flush();
+		expect(entries(b)).toHaveLength(0); // Never resurrect stale memory automatically.
+		const files = b.status().legacyRecoverySnapshots as string[];
+		expect(files).toHaveLength(1);
+		expect(JSON.parse(readFileSync(path.join(hotSyncTenantDirectory(stateDir, config.origin, id.npub), files[0]!), "utf8"))).toEqual(legacy);
+		expect(b.status().state).toBe("needs_attention");
+	});
+
+	it("preserves unsupported or reset-ambiguous queued snapshots for explicit recovery", async () => {
+		const cloud = new Cloud(), id = identity();
+		const m = new HotSyncManager({ origin: "https://crosshead.sh", ...id, profileName: "default", stateDir: home() }, cloud.client(id.npub));
+		expect(() => m.importQueuedLegacy({ currentTask: "Unsent task" }, "codex", "repo:/project")).toThrow("no checkpoints");
+		const legacy = { runtime: "codex", workspaceId: "repo:/project", continuityCheckpoints: [{ goal: "Recover", summary: "Retain after reset", occurredAt: "2026-11-03T00:00:00Z" }] };
+		m.importQueuedLegacy(legacy, "codex", null);
+		const scope = (m.status().scopes as Array<{scope: string}>)[0]!.scope;
+		m.reset(scope);
+		expect(() => m.importQueuedLegacy(legacy, "codex", null)).toThrow("needs review after a reset");
+		await m.flush();
+		expect(() => m.importQueuedLegacy(legacy, "codex", null)).toThrow("needs review after a reset");
+		expect(entries(m)).toHaveLength(0);
+	});
+
 	it("maps sanitized remotes and explicit links across paths, while isolating profiles and identities", async () => {
 		expect(canonicalGitRemote("git@github.com:FriendMachine/crosshead.git")).toBe("github.com/FriendMachine/crosshead");
 		expect(canonicalGitRemote("https://user:secret@github.com/FriendMachine/crosshead.git?token=secret")).toBe("github.com/FriendMachine/crosshead");
