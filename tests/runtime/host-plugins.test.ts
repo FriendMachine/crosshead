@@ -11,6 +11,7 @@ import { installCodexAdapter, loadCodexAdapterConfig } from "../../src/runtime/c
 import { runOnlyBotsCodexHookCli } from "../../src/runtime/codex-hook";
 import { evaluateHostHookInspection, inspectHostHookRegistrations } from "../../src/runtime/host-hook-doctor";
 import * as spec from "../../src/runtime/host-hook-spec";
+import { evaluateAdapterAutomation } from "../../src/runtime/runtime-status";
 import { decideHookDispatch, detectClaudeCodePlugin, readCodexPluginEnabled } from "../../src/runtime/host-plugin-mode";
 // @ts-expect-error -- plain ESM generator script without type declarations
 import { renderHostPluginFiles } from "../../scripts/host-plugins.mjs";
@@ -341,9 +342,12 @@ describe("doctor hook checks", () => {
 		const [check] = inspectHostHookRegistrations(f.home, f.workspace);
 		expect(check).toMatchObject({ id: "claude_code_hooks", ok: false });
 		expect(check!.message).toContain("Duplicate registration");
-		await installClaudeCodeAdapter({ home: f.home, hostHome: f.claudeHome, workspaceRoot: f.workspace, claudeBinary: process.execPath, ...scripts });
+		const pluginInstall = await installClaudeCodeAdapter({ home: f.home, hostHome: f.claudeHome, workspaceRoot: f.workspace, claudeBinary: process.execPath, ...scripts });
 		expect(inspectHostHookRegistrations(f.home, f.workspace)[0]).toMatchObject({ ok: true });
+		expect(evaluateAdapterAutomation(pluginInstall.adapter)).toMatchObject({ id: "adapter_claude_code_automation", ok: true });
+		const codexInstall = await installCodexAdapter({ home: f.home, hostHome: f.codexHome, codexBinary: process.execPath, hookMode: "plugin", ...scripts });
+		expect(evaluateAdapterAutomation(codexInstall.adapter)).toMatchObject({ id: "adapter_codex_automation", ok: true });
 		await uninstallClaudeCodeAdapter({ home: f.home, hostHome: f.claudeHome });
-		expect(inspectHostHookRegistrations(f.home, f.workspace)).toEqual([]);
+		expect(inspectHostHookRegistrations(f.home, f.workspace).map((entry) => entry.id)).toEqual(["codex_hooks"]);
 	});
 });

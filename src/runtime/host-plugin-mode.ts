@@ -120,6 +120,17 @@ export const describeHookMode = (mode: HostHookMode, detection: PluginDetection 
 
 export const normalizeHostHookMode = (value: unknown): HostHookMode => (value === "plugin" ? "plugin" : "settings");
 
+/** Hook mode recorded in a Claude Code or Codex adapter config file (marker line, then JSON). */
+export const readAdapterConfigHookMode = (configFile: string): HostHookMode => {
+	try {
+		const content = readFileSync(configFile, "utf8");
+		const parsed = JSON.parse(content.slice(content.indexOf("{"))) as { hookMode?: unknown };
+		return normalizeHostHookMode(parsed.hookMode);
+	} catch {
+		return "settings";
+	}
+};
+
 export const isPluginHookInvocation = (flags: Record<string, string | boolean>): boolean =>
 	flags[PLUGIN_HOOK_VIA_FLAG[0].slice(2)] === PLUGIN_HOOK_VIA_FLAG[1];
 

@@ -304,7 +304,9 @@ try {
 	assert.equal(crossheadHookLines(claudeA).length, 3);
 	const codexA = await measuredSession(a.home, "codex", "after setup", () => codexSession("setup-done", a.home, a.project));
 	assert.equal(codexA.hookRuns.length, 3);
-	for (const id of ["claude_code_hooks", "codex_hooks"]) assert.match(doctorCheck(await doctor(a.home, a.project), id).message, /^mode=plugin; plugin enabled/);
+	const setupDoctor = await doctor(a.home, a.project);
+	for (const id of ["claude_code_hooks", "codex_hooks"]) assert.match(doctorCheck(setupDoctor, id).message, /^mode=plugin; plugin enabled/);
+	for (const id of ["adapter_claude_code_automation", "adapter_codex_automation"]) assert.equal(doctorCheck(setupDoctor, id).ok, true, doctorCheck(setupDoctor, id).message);
 	check("setup (installer + quickstart --hook-mode plugin) writes no host hooks; one capture per event in both hosts; doctor reports plugin mode");
 
 	// ---- B2: plugins added to the legacy install, then migration -------------
