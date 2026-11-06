@@ -19,7 +19,16 @@ const npub=nip19.npubEncode(getPublicKey(decoded.data));
 mkdirSync(home,{recursive:true,mode:0o700});
 const privatize=dir=>{chmodSync(dir,0o700);for(const e of readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);assert(!e.isSymbolicLink(),'Fixture artifacts must not contain symlinks');if(e.isDirectory())privatize(p);else chmodSync(p,0o600);}};privatize(home);
 const originalFetch=globalThis.fetch;let offline=false;
-globalThis.fetch=(...args)=>offline?Promise.reject(new Error('fixture offline transport')):originalFetch(...args);
+globalThis.fetch=async(...args)=>{
+ if(offline)throw new Error('fixture offline transport');
+ const response=await originalFetch(...args);
+ if(new URL(String(args[0])).pathname==='/v1/auth/challenge'&&response.ok){
+  try{const body=await response.clone().json(),challenge=JSON.parse(Buffer.from(body.challenge,'base64url').toString('utf8'));
+   if(diagnostics.length<20)diagnostics.push({phase,kind:'challenge-clock',issuedAheadMs:Date.parse(challenge.issued_at)-Date.now(),lifetimeMs:Date.parse(challenge.expires_at)-Date.parse(challenge.issued_at)});
+  }catch{}
+ }
+ return response;
+};
 const clients=[],managers=[],checks=[],diagnostics=[];
 const make=(stateDir=home,key=nsec,name=profileName)=>{
  const d=nip19.decode(key),pub=nip19.npubEncode(getPublicKey(d.data)),client=new HostedOnlyBotsClient({apiBase:origin,npub:pub,nsec:key});
