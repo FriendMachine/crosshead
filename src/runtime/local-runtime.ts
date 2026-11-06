@@ -278,7 +278,7 @@ export type RuntimeConfig = {
 	updatedAt: string;
 };
 
-export type RuntimeAdapterName = "codex" | "claude-code" | "pi";
+export type RuntimeAdapterName = "codex" | "claude-code" | "pi" | "hermes" | "opencode";
 
 export type OnlyBotsRuntimeManifest = {
 	channel?: RuntimeChannel;
@@ -463,6 +463,7 @@ type GeneratedRuntimeIdentity = {
 };
 
 type ManagedAdapterReinstallSpec =
+	| { name: "hermes" | "opencode"; profileName: string; hostHome: string | null; hostBinary: string }
 	| {
 			name: "codex";
 			profileName: string;
@@ -728,6 +729,8 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 			codex: "0.3.0",
 			"claude-code": "0.3.0",
 			pi: "0.3.0",
+			hermes: "0.1.0",
+			opencode: "0.1.0",
 		},
 		migrationNotes: ["Stable channel prioritizes reproducibility over the newest host shims."],
 	},
@@ -737,6 +740,8 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 			codex: "0.3.1-beta.1",
 			"claude-code": "0.3.1-beta.1",
 			pi: "0.3.1-beta.1",
+			hermes: "0.1.0",
+			opencode: "0.1.0",
 		},
 		migrationNotes: ["Beta channel includes newer adapter shims and manifest handling improvements."],
 	},
@@ -746,6 +751,8 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 			codex: "0.3.2-canary.1",
 			"claude-code": "0.3.2-canary.1",
 			pi: "0.3.2-canary.1",
+			hermes: "0.1.0",
+			opencode: "0.1.0",
 		},
 		migrationNotes: ["Canary channel is intended for early validation before promoting a release downstream."],
 	},
@@ -1362,6 +1369,13 @@ const installManagedAdapter = async (
 		hostHome?: string | null;
 	}
 ): Promise<string> => {
+	if (adapterName === "hermes" || adapterName === "opencode") {
+		const { installNativeHostAdapter, loadNativeHostConfig } = await import("./native-host-adapter");
+		const config = loadNativeHostConfig(adapterName, options.home);
+		const result = await installNativeHostAdapter(adapterName, { home: options.home, hostHome: options.hostHome ?? config.hostHome,
+			profileName: options.profileName ?? config.profileName, adapterVersion: options.version, hostBinary: config.hostBinary });
+		return `Updated ${adapterName} to ${result.adapter.version}`;
+	}
 	if (adapterName === "codex") {
 		const { installCodexAdapter, loadCodexAdapterConfig } = await import("./codex-adapter");
 		let installedConfig: { codexBinary: string } | null = null;
@@ -1467,6 +1481,12 @@ const collectManagedAdapterReinstallSpecs = async (paths: RuntimePaths): Promise
 	const records = listAdapterRecords(paths).filter((adapter) => RUNTIME_ADAPTER_NAMES.includes(adapter.name as RuntimeAdapterName));
 	for (const adapter of records) {
 		const profileName = adapter.profileName ?? loadRuntimeConfig(paths).defaultProfile ?? "default";
+		if (adapter.name === "hermes" || adapter.name === "opencode") {
+			const { loadNativeHostConfig } = await import("./native-host-adapter");
+			const config = loadNativeHostConfig(adapter.name, paths.home);
+			specs.push({ name: adapter.name, profileName, hostHome: config.hostHome, hostBinary: config.hostBinary });
+			continue;
+		}
 		if (adapter.name === "codex") {
 			const { loadCodexAdapterConfig } = await import("./codex-adapter");
 			let codexBinary: string | null = null;
@@ -1624,6 +1644,9 @@ const reapplyManagedRuntimeRelease = async (
 	coreVersion: string;
 	adapters: Array<{ name: RuntimeAdapterName; version: string }>;
 }> => {
+	if (specs.some(spec => spec.name === "hermes" || spec.name === "opencode") && !existsSync(path.join(release.releaseRoot, "dist", "runtime", "native-host-adapter.js"))) {
+		throw new Error("Target release does not support installed Hermes/OpenCode plugins; uninstall those adapters before downgrading");
+	}
 	const config = loadRuntimeConfig(paths);
 	const nextRuntime = require(release.localRuntimeModulePath) as {
 		installRuntimeCore: typeof installRuntimeCore;
@@ -1639,6 +1662,13 @@ const reapplyManagedRuntimeRelease = async (
 
 	const adapters: Array<{ name: RuntimeAdapterName; version: string }> = [];
 	for (const spec of specs) {
+		if (spec.name === "hermes" || spec.name === "opencode") {
+			const nextNative = require(path.join(release.releaseRoot, "dist", "runtime", "native-host-adapter.js")) as typeof import("./native-host-adapter");
+			const result = await nextNative.installNativeHostAdapter(spec.name, { home: paths.home, hostHome: spec.hostHome ?? undefined,
+				profileName: spec.profileName, hostBinary: spec.hostBinary });
+			adapters.push({ name: spec.name, version: result.adapter.version });
+			continue;
+		}
 		if (spec.name === "codex") {
 			const nextCodex = require(release.codexAdapterModulePath) as {
 				installCodexAdapter: (options: Record<string, unknown>) => Promise<{ adapter: RuntimeAdapterRecord }>;

@@ -3,6 +3,7 @@ import { installCodexFromCli, uninstallCodexFromCli } from "./codex-adapter";
 import { installClaudeCodeFromCli, uninstallClaudeCodeFromCli } from "./claude-code-adapter";
 import { installPiFromCli, uninstallPiFromCli } from "./pi-adapter";
 import { installOmpFromCli, uninstallOmpFromCli } from "./omp-adapter";
+import { nativeHostFromCli } from "./native-host-adapter";
 import path from "path";
 import { negotiationFromCli, organizationFromCli } from "./economic-governance-cli";
 import { bundleFromCli } from "./resource-bundle-cli";
@@ -94,6 +95,11 @@ export const runOnlyBotsCtlCli = async (
 	let output: string;
 	switch (command) {
 		case "install":
+			if (rest[0] === "hermes" || rest[0] === "opencode") {
+				await installCoreFromCli(rest.slice(1), cliScriptPath, daemonScriptPath);
+				output = await nativeHostFromCli(rest[0], rest.slice(1));
+				break;
+			}
 			if (rest[0] === "codex") {
 				await installCoreFromCli(rest.slice(1), cliScriptPath, daemonScriptPath);
 				output = await installCodexFromCli(rest.slice(1), codexBridgeScriptPath, codexHookScriptPath);
@@ -215,6 +221,10 @@ export const runOnlyBotsCtlCli = async (
 			output = await stopFromCli(rest);
 			break;
 		case "uninstall":
+			if (rest[0] === "hermes" || rest[0] === "opencode") {
+				output = await nativeHostFromCli(rest[0], rest.slice(1), true);
+				break;
+			}
 			if (rest[0] === "codex") {
 				output = await uninstallCodexFromCli(rest.slice(1));
 				break;
@@ -240,11 +250,13 @@ export const runOnlyBotsCtlCli = async (
 			output = [
 				"Crosshead CLI (crosshead; aliases: xhd, onlybotsctl)",
 				"crosshead install [--home <path>] [--channel stable|beta|canary]",
+				"crosshead install hermes [--home <path>] [--hermes-home <path>] [--hermes-bin <path>] [--profile <name>]",
+				"crosshead install opencode [--home <path>] [--opencode-home <path>] [--profile <name>]",
 				"crosshead install codex [--home <path>] [--codex-home <path>] [--codex-bin <path>] [--profile <name>] [--version <version>]",
 				"crosshead install claude-code [--home <path>] [--claude-home <path>] [--workspace-root <path>] [--profile <name>] [--version <version>] [--claude-bin <path>]",
 				"crosshead install pi [--home <path>] [--profile <name>] [--version <version>]  # embedded hosts without shell wiring",
 				"crosshead install omp [--home <path>] [--profile <name>] [--workspace-root <path>] [--omp-bin <path>] [--no-envrc]  # Pi-compatible OMP project wiring",
-				"crosshead quickstart --api-base <url> [--home <path>] [--profile <name>] [--adapter codex|claude-code|pi|omp|none] [--workspace-root <path>] [--omp-bin <path>] [--create-checkout] [--json]",
+				"crosshead quickstart --api-base <url> [--home <path>] [--profile <name>] [--adapter codex|claude-code|pi|omp|hermes|opencode|none] [--workspace-root <path>] [--omp-bin <path>] [--create-checkout] [--json]",
 				capabilityHelpLine,
 		"crosshead keygen [--json]",
 		"crosshead keygen --setup --profile <name> --api-base <url> [--home <path>] [--memory-mode assist] [--workspace-scope repo|workspace|global] [--json]",
@@ -342,6 +354,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead handoff explain --file <capsule.json> [--home <path>] [--profile <name>] [--json]",
 				"crosshead handoff explain --id <handoff_id> [--home <path>] [--profile <name>] [--json]",
 				"crosshead uninstall [--home <path>]",
+				"crosshead uninstall hermes|opencode [--home <path>]",
 				"crosshead uninstall codex [--home <path>] [--codex-home <path>]",
 				"crosshead uninstall claude-code [--home <path>] [--claude-home <path>]",
 				"crosshead uninstall pi [--home <path>]",

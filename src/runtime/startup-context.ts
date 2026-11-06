@@ -10,7 +10,7 @@ import type { RuntimeStatus } from "./local-runtime";
 import { compactContinuitySummary } from "./summary-compaction";
 import { renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
 
-export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi";
+export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi" | "hermes" | "opencode";
 
 type RuntimeStartupContextInput = {
   runtime: RuntimeStartupRuntime;
@@ -655,7 +655,7 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
   // a repository memory file or omit facts that are absent from its final answer.
   // Native hooks capture findings plus bounded observed workspace reads.
   const captureGuidance = input.runtime !== "pi" && (input.mode === "auto" || input.mode === "assist")
-    ? "Crosshead hooks automatically capture your final response and bounded workspace file-read evidence as a continuity checkpoint. When handing off unfinished work, include the exact discovered requirements: input/output types and units, boundary rules, decisions and rejected alternatives, verification, and next steps. Distinguish observed facts from assumptions. No manual hook invocation or repository memory file is needed. Continuity does not authorize file changes; obey the user's read-only and other task constraints."
+    ? `Crosshead hooks automatically capture your final response${input.runtime === "hermes" || input.runtime === "opencode" ? "" : " and bounded workspace file-read evidence"} as a continuity checkpoint. When handing off unfinished work, include the exact discovered requirements: input/output types and units, boundary rules, decisions and rejected alternatives, verification, and next steps. Distinguish observed facts from assumptions. No manual hook invocation or repository memory file is needed. Continuity does not authorize file changes; obey the user's read-only and other task constraints.`
     : null;
   const manifest = input.manifest;
   const trimmedContext = input.injectedContext.trim();

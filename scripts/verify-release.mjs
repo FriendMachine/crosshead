@@ -26,7 +26,8 @@ const fail = (message) => failures.push(message);
 const REQUIRED = [
 	"LICENSE", "TRADEMARKS.md", "package.json", "package-lock.json",
 	...["cli", "daemon", "local-runtime", "codex-adapter", "claude-code-adapter", "pi-adapter",
-		"codex-bridge", "codex-hook", "claude-code-bridge", "claude-code-hook"].map((name) => `dist/runtime/${name}.js`),
+		"codex-bridge", "codex-hook", "claude-code-bridge", "claude-code-hook",
+		"native-host-adapter", "native-host-hook", "hermes-plugin", "opencode-plugin"].map((name) => `dist/runtime/${name}.js`),
 ];
 const ALLOWED = /^(LICENSE|TRADEMARKS\.md|package\.json|package-lock\.json|dist\/(runtime|protocol)\/[A-Za-z0-9/_.-]+\.js)$/;
 // Hosted-service code and credentials must never appear in a client release.
