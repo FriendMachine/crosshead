@@ -250,12 +250,32 @@ export class HostedOnlyBotsRequestError extends Error {
  * Classify a failed hosted request for local diagnostics without copying its
  * message, URL, headers or body: a timeout, an HTTP status/code, or an error name.
  */
+const SAFE_FAILURE_LABEL = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const safeFailureLabel = (value: string | null): string | null => (value !== null && SAFE_FAILURE_LABEL.test(value) ? value : null);
+
 export const describeHostedFailure = (error: unknown): Record<string, string | number | null> => {
-  if (error instanceof HostedOnlyBotsRequestError) return { errorClass: "http", status: error.status, code: error.code };
+  // The server chooses `code`; validate it like an error name so it cannot carry message text.
+  if (error instanceof HostedOnlyBotsRequestError) return { errorClass: "http", status: error.status, code: safeFailureLabel(error.code) };
   const name = error instanceof Error ? error.name : typeof error;
   if (name === "TimeoutError") return { errorClass: "timeout" };
   if (name === "AbortError") return { errorClass: "aborted" };
-  return { errorClass: /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "unknown" };
+  return { errorClass: safeFailureLabel(name) ?? "unknown" };
+};
+
+/**
+ * Warning for a bounded recall that fell back to free hot memory. Only a timeout, abort,
+ * network failure or unconfirmed server error leaves open whether the paid request settled.
+ */
+export const describeBoundedRecallFallback = (error: unknown): string => {
+  const prefix = "Saved-context retrieval unavailable; continuing with free hot memory.";
+  if (error instanceof HostedOnlyBotsRequestError) {
+    const details = error.details && typeof error.details === "object" ? (error.details as Record<string, unknown>) : null;
+    if (error.code === "recall_deadline_exceeded" || details?.charged_sats === 0) {
+      return `${prefix} The server missed its response budget (HTTP ${error.status}) and charged nothing; a retry is safe.`;
+    }
+    if (error.status < 500) return `${prefix} The server rejected the request (HTTP ${error.status}).`;
+  }
+  return `${prefix} A timed-out or failed paid request may still settle; inspect billing before retrying.`;
 };
 
 const extractHostedError = (data: unknown): { message: string | null; code: string | null; details: unknown } => {
