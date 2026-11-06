@@ -34,8 +34,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run release:build
-      - name: Install pinned real coding hosts
-        run: npm install --prefix "$RUNNER_TEMP/coding-hosts" --ignore-scripts --no-audit --no-fund @openai/codex@0.164.0 @anthropic-ai/claude-code@2.1.319
+      - name: Install pinned real coding hosts with required native installers
+        run: npm install --prefix "$RUNNER_TEMP/coding-hosts" --no-audit --no-fund @openai/codex@0.164.0 @anthropic-ai/claude-code@2.1.319
       - name: Exercise clean candidate install and real host hooks
         env:
           CROSSHEAD_TEST_CLAUDE_BIN: ${{ runner.temp }}/coding-hosts/node_modules/.bin/claude
