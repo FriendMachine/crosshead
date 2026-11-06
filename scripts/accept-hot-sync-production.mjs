@@ -20,7 +20,7 @@ mkdirSync(home,{recursive:true,mode:0o700});
 const privatize=dir=>{chmodSync(dir,0o700);for(const e of readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);assert(!e.isSymbolicLink(),'Fixture artifacts must not contain symlinks');if(e.isDirectory())privatize(p);else chmodSync(p,0o600);}};privatize(home);
 const originalFetch=globalThis.fetch;let offline=false;
 globalThis.fetch=(...args)=>offline?Promise.reject(new Error('fixture offline transport')):originalFetch(...args);
-const clients=[],managers=[],checks=[];
+const clients=[],managers=[],checks=[],diagnostics=[];
 const make=(stateDir=home,key=nsec,name=profileName)=>{
  const d=nip19.decode(key),pub=nip19.npubEncode(getPublicKey(d.data)),client=new HostedOnlyBotsClient({apiBase:origin,npub:pub,nsec:key});
  const m=new HotSyncManager({stateDir,origin,npub:pub,nsec:key,profileName:name},client);m.link('/synthetic-crosshead-project',`hn-fixture-${run}`);clients.push(client);managers.push(m);return m;
@@ -28,7 +28,21 @@ const make=(stateDir=home,key=nsec,name=profileName)=>{
 const findings=m=>[...new Map(m.read().scopes.flatMap(s=>JSON.parse(s.content).continuityCheckpoints).map(c=>[c.id,c])).values()];
 const capture=(m,id)=>{const begin=performance.now();m.capture('codex',{id:`${run}:${id}`,runtime:'codex',workspaceId:workspace,occurredAt:new Date().toISOString(),goal:'Synthetic cross-machine launch acceptance',summary:`Synthetic ${id}; canonical duration zero is valid, negatives rejected.`});return performance.now()-begin;};
 const has=(m,id)=>findings(m).some(c=>c.id===`${run}:${id}`);
-const sync=async(m,predicate)=>{const deadline=Date.now()+90000;let last;do{try{await m.flush(false);if(predicate())return;}catch(error){last=error;}await new Promise(r=>setTimeout(r,1500));}while(Date.now()<deadline);throw last??new Error('Production convergence deadline exceeded');};
+const sync=async(m,predicate)=>{
+ const deadline=performance.now()+90000;let last,attempt=0;
+ do{
+  let wait=1500;
+  try{await m.flush(false);if(predicate())return;}
+  catch(error){
+   last=error;wait=Math.max(wait,Number(error.retryAfterMs)||0);
+   if(diagnostics.length<20)diagnostics.push({phase,attempt,status:error.status??null,code:error.code??null,message:String(error.message).slice(0,180),retryAfterMs:wait,clientTime:new Date().toISOString(),node:process.version});
+   if(String(error.message).startsWith('Hosted auth challenge'))throw error;
+  }
+  attempt++;const remaining=deadline-performance.now();if(wait>=remaining)break;
+  await new Promise(r=>setTimeout(r,wait));
+ }while(performance.now()<deadline);
+ throw last??new Error('Production convergence deadline exceeded');
+};
 const scope=m=>m.status().scopes.find(s=>s.scope.startsWith('ws-codex-'))?.scope;
 let m, primaryFailure=null;
 try{
@@ -59,7 +73,7 @@ try{
  const result={phase,platform:process.platform,run,npub,checks,pending:m.status().pendingCount,scopes:m.status().scopes.map(s=>({scope:s.scope,epoch:s.epoch,revision:s.remoteRevision,discarded:s.discardedByReset}))};
  writeFileSync(path.join(home,`result-${phase}.json`),JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify(result));
 }catch(error){primaryFailure=error;throw error;}finally{
- const failures=[];offline=false;
+ const failures=[];offline=false;writeFileSync(path.join(home,`diagnostics-${phase}.json`),JSON.stringify({phase,diagnostics},null,2)+'\n');if(diagnostics.length)console.error(JSON.stringify({phase,diagnostics}));
  const stopped=await Promise.allSettled(managers.map(m=>m.stop()));for(const result of stopped)if(result.status==='rejected')failures.push('manager stop failed');
  for(const [index,client] of clients.entries()){
   const session=client.session();if(!session)continue;
