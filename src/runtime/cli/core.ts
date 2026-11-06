@@ -202,7 +202,10 @@ export const doctorFromCli = async (argv: string[]): Promise<string> => {
 	const { flags } = parseArgs(argv);
 	const home = typeof flags.home === "string" ? flags.home : undefined;
 	const daemonReport = await buildRuntimeDoctorDirect(home, typeof flags.profile === "string" ? flags.profile : undefined);
-	const hookChecks = inspectHostHookRegistrations(home, typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.cwd());
+	// Inside a Claude Code session, CLAUDE_PROJECT_DIR is the project whose settings it loaded.
+	const workspaceRoot =
+		typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.env.CLAUDE_PROJECT_DIR || process.cwd();
+	const hookChecks = inspectHostHookRegistrations(home, workspaceRoot);
 	const checks = [...daemonReport.checks, ...hookChecks];
 	const report = { ...daemonReport, ok: checks.every((check) => check.ok), checks };
 	return flags.json ? JSON.stringify(report, null, 2) : formatRuntimeDoctor(report);

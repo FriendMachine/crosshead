@@ -285,12 +285,16 @@ try {
 	const claudeFresh = await claudeSession("no-runtime", a.home, a.project);
 	assert.equal(crossheadHookLines(claudeFresh).length, 3, claudeFresh.hookRuns.join("\n"));
 	assert(claudeFresh.hookRuns.every((line) => line.includes("status 0")));
-	assert(requests.some((request) => request.url.startsWith("/v1/messages") && request.body.includes(spec.pluginSetupHint("claude-code"))), "Claude setup hint did not reach model context");
+	// The notice is for the user only (systemMessage): it must not reach the model.
+	const inModel = (prefix, text) => requests.some((request) => request.url.startsWith(prefix) && request.body.includes(text));
+	assert(!inModel("/v1/messages", "isn't set up. To set it up"), "Claude setup hint reached model context");
 	const codexFresh = await codexSession("no-runtime", a.home, a.project);
-	assert(requests.some((request) => request.url.startsWith("/v1/responses") && request.body.includes(JSON.stringify(spec.pluginSetupHint("codex")).slice(1, -1))), "Codex setup hint did not reach model context");
+	assert(!inModel("/v1/responses", "isn't set up. To set it up"), "Codex setup hint reached model context");
+	// Recorded, not asserted: whether either host lists the user-only setup skill to the model.
+	results.setupSkillListedToModel = { claude: inModel("/v1/messages", "crosshead:setup"), codex: inModel("/v1/responses", "crosshead:setup") };
 	assert.deepEqual(codexFresh.hookRuns.map((line) => line.trim()), ["hook: SessionStart Completed", "hook: UserPromptSubmit Completed", "hook: Stop Completed"]);
 	assert(!existsSync(path.join(a.home, ".crosshead")), "a plugin hook created runtime state");
-	check("without a runtime, SessionStart prints one setup line, every hook exits 0, real sessions complete and nothing is installed");
+	check("without a runtime, SessionStart prints one user-only setup line (not in model context), every hook exits 0, real sessions complete and nothing is installed");
 
 	// The setup skill's commands, after consent: digest-checked installer, then quickstart in plugin mode.
 	await installRuntime(a.home);

@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Install or update the Crosshead runtime and connect it to Codex. Use when a Crosshead notice says it isn't set up or predates the plugin, or when the user asks to set up Crosshead memory.
+description: Install or update the Crosshead runtime and connect it to Codex. Run only when the user invokes it.
 ---
 
 # Set up Crosshead for Codex
@@ -42,11 +42,14 @@ for `crosshead` if it is not on PATH.
    ```
 
    `--hook-mode plugin` keeps quickstart from writing its own Codex hooks
-   (this plugin provides them) and removes Crosshead hooks an earlier install
-   wrote, so no event is captured twice.
-5. Verify with `crosshead doctor`. Expect `ok codex_hooks: mode=plugin`.
-   Report any failed check to the user verbatim; do not work around it.
-6. Codex runs plugin hooks only after you trust them. Ask the user to open `/hooks`, review the Crosshead hooks and trust them. A changed plugin version needs a new review.
+   (this plugin provides them). When the plugin is enabled for the user (the
+   default for a plugin install) it also removes Crosshead hooks an earlier
+   install wrote. Either way each event is captured once.
+5. Verify with `crosshead doctor`. Expect `codex_hooks` to report `mode=plugin`.
+   Until Codex has run the plugin hooks, that check warns that no plugin hook
+   invocation has been seen; the next step resolves it.
+   Report any other failed check to the user verbatim; do not work around it.
+6. Codex runs plugin hooks only after you trust them. Ask the user to open `/hooks`, review the Crosshead hooks and trust them. A changed plugin version needs a new review. Until Codex has run them, quickstart keeps any Crosshead hooks an earlier install wrote; rerun `crosshead install codex` after the first session to remove those.
 7. Start a new Codex session so the hooks load with the runtime in place.
 
 Other hosts and scripts keep using `curl -fsSL https://crosshead.sh/install | bash`

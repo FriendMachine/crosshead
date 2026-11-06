@@ -29,7 +29,6 @@ const HOSTS = {
 	"claude-code": {
 		dir: "plugins/claude-code",
 		label: "Claude Code",
-		configFile: '${CLAUDE_CONFIG_DIR:-${CLAUDE_CODE_HOME:-$HOME/.claude}}/onlybots/claude-code-adapter.json',
 		hookWrapper: "crosshead-claude-code-hook",
 		doctorCheck: "claude_code_hooks",
 		activate: "Start a new Claude Code session (or run /reload-plugins) so the hooks load with the runtime in place.",
@@ -38,26 +37,24 @@ const HOSTS = {
 	codex: {
 		dir: "plugins/codex",
 		label: "Codex",
-		configFile: '${CODEX_HOME:-$HOME/.codex}/onlybots/codex-adapter.json',
 		hookWrapper: "crosshead-codex-hook",
 		doctorCheck: "codex_hooks",
 		activate: "Start a new Codex session so the hooks load with the runtime in place.",
 		trust:
-			"Codex runs plugin hooks only after you trust them. Ask the user to open `/hooks`, review the Crosshead hooks and trust them. A changed plugin version needs a new review.",
+			"Codex runs plugin hooks only after you trust them. Ask the user to open `/hooks`, review the Crosshead hooks and trust them. A changed plugin version needs a new review. Until Codex has run them, quickstart keeps any Crosshead hooks an earlier install wrote; rerun `crosshead install codex` after the first session to remove those.",
 	},
 };
 
 const shQuote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
-const noticeJson = (message) =>
-	JSON.stringify({ systemMessage: message, hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: message } });
+// User-visible only: no additionalContext, so the model is not invited to run setup.
+const noticeJson = (message) => JSON.stringify({ systemMessage: message });
 
 const renderLauncher = (spec) => {
 	const cases = Object.entries(HOSTS)
 		.map(
 			([host, info]) => `  ${host})
     hook=${info.hookWrapper}
-    config="${info.configFile}"
     setup_notice=${shQuote(noticeJson(spec.pluginSetupHint(host)))}
     update_notice=${shQuote(noticeJson(spec.pluginUpdateHint(host)))}
     ;;`
@@ -69,31 +66,41 @@ const renderLauncher = (spec) => {
 #
 # Runs the hook entrypoint of the Crosshead runtime installed by
 # \`curl -fsSL https://crosshead.sh/install | bash\`. It never downloads or
-# installs code. Without a configured runtime it prints a setup notice on
-# SessionStart and exits 0 so the session is never blocked.
+# installs code. It only locates the runtime home (as the installer does); the
+# runtime finds its own host configuration, including --claude-home and
+# --codex-home installs. Without a usable runtime it prints a notice on
+# SessionStart and exits 0 so the session is never blocked. POSIX sh only;
+# Windows is not supported.
 host="$1"
 event="$2"
 case "$host" in
 ${cases}
   *) exit 0 ;;
 esac
+conflict_notice=${shQuote(noticeJson(spec.PLUGIN_HOME_CONFLICT_HINT))}
+notice() {
+  cat > /dev/null 2>&1 || true
+  if [ "$event" = SessionStart ]; then printf '%s\\n' "$1"; fi
+  exit 0
+}
+# Empty variables count as unset, as in the installer and the runtime.
 home="\${CROSSHEAD_HOME:-\${CROSSHEAD_RUNTIME_HOME:-\${ONLYBOTS_HOME:-\${ONLYBOTS_RUNTIME_HOME:-}}}}"
 if [ -z "$home" ]; then
-  if [ ! -e "$HOME/.crosshead" ] && [ -d "$HOME/.onlybots" ]; then home="$HOME/.onlybots"; else home="$HOME/.crosshead"; fi
+  if [ -e "$HOME/.crosshead" ] && [ -e "$HOME/.onlybots" ] && ! [ "$HOME/.crosshead" -ef "$HOME/.onlybots" ]; then
+    notice "$conflict_notice"
+  fi
+  if [ ! -e "$HOME/.crosshead" ] && [ -e "$HOME/.onlybots" ]; then home="$HOME/.onlybots"; else home="$HOME/.crosshead"; fi
 fi
 wrapper="$home/bin/$hook"
-if [ -x "$wrapper" ] && [ -f "$config" ] && grep -q '"hookMode"' "$config" 2>/dev/null; then
-  exec "$wrapper" "$event" --home "$home" ${spec.PLUGIN_HOOK_VIA_FLAG.join(" ")}
+[ -x "$wrapper" ] || notice "$setup_notice"
+# A runtime that predates plugin dispatch would treat this call as an installer hook.
+grep -q '${spec.PLUGIN_DISPATCH_CAPABILITY}' "$wrapper" 2> /dev/null || notice "$update_notice"
+# The Codex hook wrapper sets CODEX_HOME to the configured home; keep the one Codex ran with.
+if [ "$host" = codex ]; then
+  CROSSHEAD_HOST_CODEX_HOME="\${CODEX_HOME:-$HOME/.codex}"
+  export CROSSHEAD_HOST_CODEX_HOME
 fi
-cat > /dev/null 2>&1 || true
-if [ "$event" = SessionStart ]; then
-  if [ -x "$wrapper" ] && [ -f "$config" ]; then
-    printf '%s\\n' "$update_notice"
-  else
-    printf '%s\\n' "$setup_notice"
-  fi
-fi
-exit 0
+exec "$wrapper" "$event" --home "$home" ${spec.PLUGIN_HOOK_VIA_FLAG.join(" ")} ${spec.PLUGIN_VERSION_FLAG} ${spec.CROSSHEAD_HOST_PLUGIN_VERSION}
 `;
 };
 
@@ -101,8 +108,8 @@ const renderSetupSkill = (host) => {
 	const info = HOSTS[host];
 	return `---
 name: setup
-description: Install or update the Crosshead runtime and connect it to ${info.label}. Use when a Crosshead notice says it isn't set up or predates the plugin, or when the user asks to set up Crosshead memory.
----
+description: Install or update the Crosshead runtime and connect it to ${info.label}. Run only when the user invokes it.
+${host === "claude-code" ? "disable-model-invocation: true\n" : ""}---
 
 # Set up Crosshead for ${info.label}
 
@@ -143,10 +150,17 @@ for \`crosshead\` if it is not on PATH.
    \`\`\`
 
    \`--hook-mode plugin\` keeps quickstart from writing its own ${info.label} hooks
-   (this plugin provides them) and removes Crosshead hooks an earlier install
-   wrote, so no event is captured twice.
-5. Verify with \`crosshead doctor\`. Expect \`ok ${info.doctorCheck}: mode=plugin\`.
-   Report any failed check to the user verbatim; do not work around it.
+   (this plugin provides them). When the plugin is enabled for the user (the
+   default for a plugin install) it also removes Crosshead hooks an earlier
+   install wrote. Either way each event is captured once.
+5. Verify with \`crosshead doctor\`. Expect \`${info.doctorCheck}\` to report \`mode=plugin\`.${
+		info.trust
+			? `
+   Until Codex has run the plugin hooks, that check warns that no plugin hook
+   invocation has been seen; the next step resolves it.`
+			: ""
+	}
+   Report any other failed check to the user verbatim; do not work around it.
 ${info.trust ? `6. ${info.trust}\n7. ${info.activate}` : `6. ${info.activate}`}
 
 Other hosts and scripts keep using \`curl -fsSL https://crosshead.sh/install | bash\`
@@ -174,6 +188,8 @@ export const renderHostPluginFiles = (spec) => {
 				{
 					name,
 					source: { source: "local", path: `./${HOSTS.codex.dir}` },
+					// Codex requires both policy fields on every entry; ON_INSTALL is the only
+					// documented authentication value. The plugin itself asks for no credentials.
 					policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
 					category: "Productivity",
 				},
@@ -217,6 +233,9 @@ export const renderHostPluginFiles = (spec) => {
 		files[`${dir}/${spec.PLUGIN_HOOK_LAUNCHER}`] = launcher;
 		files[`${dir}/skills/setup/SKILL.md`] = renderSetupSkill(host);
 	}
+	// Codex has no SKILL.md field for this; agents/openai.yaml keeps the setup
+	// skill out of implicit (model-chosen) invocation. `$crosshead:setup` still works.
+	files[`${HOSTS.codex.dir}/skills/setup/agents/openai.yaml`] = "policy:\n  allow_implicit_invocation: false\n";
 	return files;
 };
 

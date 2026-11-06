@@ -1,6 +1,7 @@
 ---
 name: setup
-description: Install or update the Crosshead runtime and connect it to Claude Code. Use when a Crosshead notice says it isn't set up or predates the plugin, or when the user asks to set up Crosshead memory.
+description: Install or update the Crosshead runtime and connect it to Claude Code. Run only when the user invokes it.
+disable-model-invocation: true
 ---
 
 # Set up Crosshead for Claude Code
@@ -42,10 +43,11 @@ for `crosshead` if it is not on PATH.
    ```
 
    `--hook-mode plugin` keeps quickstart from writing its own Claude Code hooks
-   (this plugin provides them) and removes Crosshead hooks an earlier install
-   wrote, so no event is captured twice.
-5. Verify with `crosshead doctor`. Expect `ok claude_code_hooks: mode=plugin`.
-   Report any failed check to the user verbatim; do not work around it.
+   (this plugin provides them). When the plugin is enabled for the user (the
+   default for a plugin install) it also removes Crosshead hooks an earlier
+   install wrote. Either way each event is captured once.
+5. Verify with `crosshead doctor`. Expect `claude_code_hooks` to report `mode=plugin`.
+   Report any other failed check to the user verbatim; do not work around it.
 6. Start a new Claude Code session (or run /reload-plugins) so the hooks load with the runtime in place.
 
 Other hosts and scripts keep using `curl -fsSL https://crosshead.sh/install | bash`

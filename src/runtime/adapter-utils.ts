@@ -181,8 +181,8 @@ export type WrapperEnvExports = {
   runtimeHome: string;
 };
 
-export const buildWrapperScript = (scriptPath: string, env?: WrapperEnvExports): string => `#!/usr/bin/env bash
-set -euo pipefail
+export const buildWrapperScript = (scriptPath: string, env?: WrapperEnvExports, marker?: string): string => `#!/usr/bin/env bash
+${marker ? `# ${marker}\n` : ""}set -euo pipefail
 unset NODE_OPTIONS NODE_PATH
 ${
   env

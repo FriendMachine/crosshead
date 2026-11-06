@@ -15,14 +15,18 @@ export const resolveDefaultRuntimeHome = (userHome: string): string => {
   return existsSync(current) ? current : existsSync(legacy) ? legacy : current;
 };
 
+// An empty environment variable counts as unset, as it does for the installer
+// and the plugin launcher (`${CROSSHEAD_HOME:-...}`).
+const envValue = (name: string): string | undefined => process.env[name] || undefined;
+
 export const resolveCrossheadHome = (home?: string): string =>
-  path.resolve(home ?? process.env.CROSSHEAD_HOME ?? process.env.CROSSHEAD_RUNTIME_HOME ?? process.env.ONLYBOTS_HOME ?? process.env.ONLYBOTS_RUNTIME_HOME ?? resolveDefaultRuntimeHome(os.homedir()));
+  path.resolve(home ?? envValue("CROSSHEAD_HOME") ?? envValue("CROSSHEAD_RUNTIME_HOME") ?? envValue("ONLYBOTS_HOME") ?? envValue("ONLYBOTS_RUNTIME_HOME") ?? resolveDefaultRuntimeHome(os.homedir()));
 
 export const resolveCodexHostHome = (hostHome?: string): string =>
-  path.resolve(hostHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
+  path.resolve(hostHome ?? envValue("CODEX_HOME") ?? path.join(os.homedir(), ".codex"));
 
 export const resolveClaudeCodeHostHome = (hostHome?: string): string =>
-  path.resolve(hostHome ?? (process.env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CODE_HOME) ?? path.join(os.homedir(), ".claude"));
+  path.resolve(hostHome ?? envValue("CLAUDE_CONFIG_DIR") ?? envValue("CLAUDE_CODE_HOME") ?? path.join(os.homedir(), ".claude"));
 
 export const resolveClaudeCodeBinaryPath = (binary?: string): string =>
   binary ?? process.env.CLAUDE_CODE_BIN ?? "claude";

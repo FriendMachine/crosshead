@@ -29,7 +29,7 @@ type HostHookEventSpec = {
 };
 
 export const HOST_HOOK_EVENTS: readonly HostHookEventSpec[] = [
-	{ event: "SessionStart", matcher: "startup|resume|compact", codexStatusMessage: "Crosshead session sync" },
+	{ event: "SessionStart", matcher: "startup|resume|clear|compact", codexStatusMessage: "Crosshead session sync" },
 	{ event: "PreCompact", matcher: "manual|auto", codexStatusMessage: "Crosshead pre-compact checkpoint", codexTimeout: 30 },
 	{ event: "PostCompact", matcher: "manual|auto", codexStatusMessage: "Crosshead post-compact sync", codexTimeout: 30 },
 	{ event: "UserPromptSubmit", codexStatusMessage: "Crosshead context", codexTimeout: 45 },
@@ -50,15 +50,27 @@ export const PLUGIN_HOOK_VIA_FLAG = ["--via", "plugin"] as const;
 
 export const pluginRootVariable = (host: HookHost): string => (host === "codex" ? "PLUGIN_ROOT" : "CLAUDE_PLUGIN_ROOT");
 
-export const pluginSetupHint = (host: HookHost): string =>
-	host === "codex"
-		? "Crosshead isn't set up: ask Codex to use the crosshead setup skill ($crosshead:setup)."
-		: "Crosshead isn't set up: run /crosshead:setup.";
+/**
+ * Marker in the runtime's Claude Code and Codex hook wrappers. A wrapper without
+ * it runs a runtime that predates plugin dispatch, which the launcher must not
+ * call (it would treat a plugin invocation as an installer hook).
+ */
+export const PLUGIN_DISPATCH_CAPABILITY = "crosshead-hook-capability: plugin-dispatch-v1";
+
+/** Flag the launcher adds so invocation receipts record which plugin version ran. */
+export const PLUGIN_VERSION_FLAG = "--plugin-version";
+
+const setupCommand = (host: HookHost): string => (host === "codex" ? "type $crosshead:setup" : "run /crosshead:setup");
+
+// SessionStart notices are shown to the user only (systemMessage); they are not
+// added to model context, so the model is never invited to run setup itself.
+export const pluginSetupHint = (host: HookHost): string => `Crosshead isn't set up. To set it up, ${setupCommand(host)}.`;
 
 export const pluginUpdateHint = (host: HookHost): string =>
-	host === "codex"
-		? "The installed Crosshead runtime predates the Codex plugin: ask Codex to use the crosshead setup skill ($crosshead:setup) to update it."
-		: "The installed Crosshead runtime predates the Claude Code plugin: run /crosshead:setup to update it.";
+	`The installed Crosshead runtime predates this plugin. To update it, ${setupCommand(host)}.`;
+
+export const PLUGIN_HOME_CONFLICT_HINT =
+	"Crosshead found separate ~/.crosshead and ~/.onlybots installations. Set CROSSHEAD_HOME to choose one; no state was moved.";
 
 /** Ordered `[event, matcher group]` pairs for one host, with the caller's command per event. */
 export const renderHostHookGroups = (

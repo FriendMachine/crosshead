@@ -4,7 +4,15 @@ import path from "path";
 
 import { CodexRuntimeAdapter, codexHooksFileHasLegacyHooks, codexLegacyHooksFile, loadCodexAdapterConfig, resolveCodexHome } from "./codex-adapter";
 import { pluginSetupHint } from "./host-hook-spec";
-import { decideHookDispatch, isPluginHookInvocation, normalizeHostHookMode, writePluginSetupNotice } from "./host-plugin-mode";
+import {
+  codexLoadedHome,
+  decideHookDispatch,
+  isPluginHookInvocation,
+  normalizeHostHookMode,
+  recordPluginInvocation,
+  resolvePluginHostHome,
+  writePluginSetupNotice,
+} from "./host-plugin-mode";
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
 import { compactContinuitySummary } from "./summary-compaction";
 import { captureHotFinding } from "./hot-continuity";
@@ -364,7 +372,9 @@ export const runOnlyBotsCodexHookCli = async (
   const eventName = positionals[0] ?? "help";
   const normalizedEventName = eventName.toLowerCase();
   const runtimeHome = resolveRuntimeHome(typeof flags.home === "string" ? flags.home : undefined);
-  const hostHome = typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined;
+  const viaPlugin = isPluginHookInvocation(flags);
+  const hostHome =
+    typeof flags["codex-home"] === "string" ? flags["codex-home"] : viaPlugin ? resolvePluginHostHome("codex", runtimeHome) : undefined;
   const payload = readStdinJson(stdinOverride);
   const workspaceRoot = resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = resolveHookWorkspaceId(payload, flags, workspaceRoot);
@@ -372,7 +382,6 @@ export const runOnlyBotsCodexHookCli = async (
     flags["allow-ephemeral-config"] === true ||
     flags["allow-ephemeral-config"] === "1" ||
     (process.env.CROSSHEAD_CODEX_ALLOW_EPHEMERAL_CONFIG ?? process.env.ONLYBOTS_CODEX_ALLOW_EPHEMERAL_CONFIG) === "1";
-  const viaPlugin = isPluginHookInvocation(flags);
   if (eventName !== "help") {
     let installedConfig: ReturnType<typeof loadCodexAdapterConfig> | null = null;
     try {
@@ -383,14 +392,27 @@ export const runOnlyBotsCodexHookCli = async (
     if (!installedConfig) {
       // Plugin installed before setup: tell the user how to finish, never fail the session.
       if (normalizedEventName === "sessionstart" || normalizedEventName === "session_start") {
-        writePluginSetupNotice("SessionStart", pluginSetupHint("codex"));
+        writePluginSetupNotice(pluginSetupHint("codex"));
       }
       return;
     }
+    if (viaPlugin) {
+      // Proof that Codex runs (so the user trusted) the plugin hooks; migration waits for it.
+      try {
+        recordPluginInvocation(runtimeHome, "codex", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null);
+      } catch {
+        // A receipt is diagnostic only; never fail the hook over it.
+      }
+    }
+    // The hooks.json Codex loaded: an installer hook names it with --codex-home;
+    // the plugin launcher passes the CODEX_HOME Codex ran with.
+    const loadedHooksFile = codexLegacyHooksFile(
+      viaPlugin ? codexLoadedHome(resolveCodexHome(hostHome)) : resolveCodexHome(hostHome)
+    );
     const decision = decideHookDispatch({
       viaPlugin,
       mode: normalizeHostHookMode(installedConfig.hookMode),
-      legacyHooksPresent: () => codexHooksFileHasLegacyHooks(codexLegacyHooksFile(resolveCodexHome(hostHome)), runtimeHome),
+      legacyHooksPresent: () => codexHooksFileHasLegacyHooks(loadedHooksFile, runtimeHome),
     });
     if (decision === "skip-duplicate") return;
   }

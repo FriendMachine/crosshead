@@ -53,7 +53,7 @@ import type {
 	RuntimeDoctorReport,
 	RuntimeStatus,
 } from "./local-runtime";
-import { readAdapterConfigHookMode } from "./host-plugin-mode";
+import { adapterConfigUsesPluginHooks } from "./host-plugin-mode";
 
 const isSessionFresh = (session: HostedSession | null): boolean => {
 	if (!session) {
@@ -117,7 +117,7 @@ export const evaluateAdapterAutomation = (adapter: RuntimeAdapterRecord): Runtim
 	const basename = (name: string) => (filePath: string): boolean => path.basename(filePath) === name;
 	// In plugin mode the host plugin supplies the hooks; the <host>_hooks doctor check verifies it.
 	const pluginMode = (configName: string): boolean =>
-		[...managedFiles].some((filePath) => path.basename(filePath) === configName && readAdapterConfigHookMode(filePath) === "plugin");
+		[...managedFiles].some((filePath) => path.basename(filePath) === configName && adapterConfigUsesPluginHooks(filePath));
 
 	if (adapter.name === "codex") {
 		const requirements = [

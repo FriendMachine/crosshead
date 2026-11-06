@@ -23,13 +23,14 @@ codex plugin marketplace add FriendMachine/crosshead
 codex plugin add crosshead@crosshead
 ```
 
-Then start a session and run `/crosshead:setup` in Claude Code, or ask Codex
-to use the `crosshead:setup` skill. Until setup has run, each session starts
-with one line saying Crosshead isn't set up; nothing else happens and the
-session is never blocked. Setup asks for your consent, runs the installer
-below, and connects the host with
-`crosshead quickstart --adapter claude-code|codex --hook-mode plugin`.
-Codex runs plugin hooks only after you trust them in `/hooks`.
+Then start a session and run `/crosshead:setup` in Claude Code, or type
+`$crosshead:setup` in Codex. Only you can start setup; the model does not run
+it on its own. Until setup has run, each session starts with one line saying
+Crosshead isn't set up; nothing else happens and the session is never blocked.
+Setup asks for your consent, runs the installer below, and connects the host
+with `crosshead quickstart --adapter claude-code|codex --hook-mode plugin`.
+Codex runs plugin hooks only after you trust them in `/hooks`. The plugin
+launcher needs a POSIX shell; Windows is not supported.
 
 The plugins are thin. They contain the lifecycle hooks, the setup skill and a
 small launcher that runs the installed runtime's hook entrypoints. They do not
