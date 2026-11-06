@@ -4,6 +4,7 @@ import { RUNTIME_ADAPTER_NAMES, ensureRuntimeHomeLayout, loadAdapterRecord, load
 import { billingFromCli } from "./billing";
 import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy } from "../runtime-auto-update";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
+import { inspectHostHookRegistrations } from "../host-hook-doctor";
 
 export const installCoreFromCli = async (argv: string[], cliScriptPath: string, daemonScriptPath: string): Promise<string> => {
 	const { flags } = parseArgs(argv);
@@ -199,10 +200,11 @@ export const statusFromCli = async (argv: string[]): Promise<string> => {
 
 export const doctorFromCli = async (argv: string[]): Promise<string> => {
 	const { flags } = parseArgs(argv);
-	const report = await buildRuntimeDoctorDirect(
-		typeof flags.home === "string" ? flags.home : undefined,
-		typeof flags.profile === "string" ? flags.profile : undefined
-	);
+	const home = typeof flags.home === "string" ? flags.home : undefined;
+	const daemonReport = await buildRuntimeDoctorDirect(home, typeof flags.profile === "string" ? flags.profile : undefined);
+	const hookChecks = inspectHostHookRegistrations(home, typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.cwd());
+	const checks = [...daemonReport.checks, ...hookChecks];
+	const report = { ...daemonReport, ok: checks.every((check) => check.ok), checks };
 	return flags.json ? JSON.stringify(report, null, 2) : formatRuntimeDoctor(report);
 };
 

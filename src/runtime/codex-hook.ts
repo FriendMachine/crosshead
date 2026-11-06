@@ -2,7 +2,9 @@ import { ensureHookRuntime, reportHookFailure } from "./hook-runtime";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 
-import { CodexRuntimeAdapter } from "./codex-adapter";
+import { CodexRuntimeAdapter, codexHooksFileHasLegacyHooks, codexLegacyHooksFile, loadCodexAdapterConfig, resolveCodexHome } from "./codex-adapter";
+import { pluginSetupHint } from "./host-hook-spec";
+import { decideHookDispatch, isPluginHookInvocation, normalizeHostHookMode, writePluginSetupNotice } from "./host-plugin-mode";
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
 import { compactContinuitySummary } from "./summary-compaction";
 import { captureHotFinding } from "./hot-continuity";
@@ -370,6 +372,28 @@ export const runOnlyBotsCodexHookCli = async (
     flags["allow-ephemeral-config"] === true ||
     flags["allow-ephemeral-config"] === "1" ||
     (process.env.CROSSHEAD_CODEX_ALLOW_EPHEMERAL_CONFIG ?? process.env.ONLYBOTS_CODEX_ALLOW_EPHEMERAL_CONFIG) === "1";
+  const viaPlugin = isPluginHookInvocation(flags);
+  if (eventName !== "help") {
+    let installedConfig: ReturnType<typeof loadCodexAdapterConfig> | null = null;
+    try {
+      installedConfig = loadCodexAdapterConfig(runtimeHome, hostHome, { allowEphemeralConfig });
+    } catch (error) {
+      if (!viaPlugin) throw error;
+    }
+    if (!installedConfig) {
+      // Plugin installed before setup: tell the user how to finish, never fail the session.
+      if (normalizedEventName === "sessionstart" || normalizedEventName === "session_start") {
+        writePluginSetupNotice("SessionStart", pluginSetupHint("codex"));
+      }
+      return;
+    }
+    const decision = decideHookDispatch({
+      viaPlugin,
+      mode: normalizeHostHookMode(installedConfig.hookMode),
+      legacyHooksPresent: () => codexHooksFileHasLegacyHooks(codexLegacyHooksFile(resolveCodexHome(hostHome)), runtimeHome),
+    });
+    if (decision === "skip-duplicate") return;
+  }
   const adapter = CodexRuntimeAdapter.fromInstalled({
     home: runtimeHome,
     hostHome,

@@ -5,7 +5,9 @@ import path from "path";
 import { captureHotFinding } from "./hot-continuity";
 import { readLastAssistantMessage } from "./hook-transcript";
 
-import { ClaudeCodeRuntimeAdapter } from "./claude-code-adapter";
+import { ClaudeCodeRuntimeAdapter, findLegacyClaudeHookFiles, loadClaudeCodeAdapterConfig } from "./claude-code-adapter";
+import { pluginSetupHint } from "./host-hook-spec";
+import { decideHookDispatch, isPluginHookInvocation, normalizeHostHookMode, writePluginSetupNotice } from "./host-plugin-mode";
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
 import { writeJsonFile } from "./runtime-persistence";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -364,6 +366,28 @@ export const runOnlyBotsClaudeCodeHookCli = async (
   const payload = readStdinJson(stdinOverride);
   const workspaceRoot = resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = resolveHookWorkspaceId(payload, flags, workspaceRoot);
+  const viaPlugin = isPluginHookInvocation(flags);
+  if (eventName !== "help") {
+    let installedConfig: ReturnType<typeof loadClaudeCodeAdapterConfig> | null = null;
+    try {
+      installedConfig = loadClaudeCodeAdapterConfig(runtimeHome, hostHome);
+    } catch (error) {
+      if (!viaPlugin) throw error;
+    }
+    if (!installedConfig) {
+      // Plugin installed before setup: tell the user how to finish, never fail the session.
+      if (normalizedEventName === "sessionstart" || normalizedEventName === "session_start") {
+        writePluginSetupNotice("SessionStart", pluginSetupHint("claude-code"));
+      }
+      return;
+    }
+    const decision = decideHookDispatch({
+      viaPlugin,
+      mode: normalizeHostHookMode(installedConfig.hookMode),
+      legacyHooksPresent: () => findLegacyClaudeHookFiles(workspaceRoot, runtimeHome).length > 0,
+    });
+    if (decision === "skip-duplicate") return;
+  }
   const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
     home: runtimeHome,
     hostHome,

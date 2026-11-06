@@ -57,6 +57,16 @@ import {
   type HostAdapterTurnPrepareResult,
 } from "./host-adapter-base";
 import { resolveCodexHostHome } from "./runtime-env";
+import { renderHostHookGroups, type HostHookEvent } from "./host-hook-spec";
+import {
+  describeHookMode,
+  detectCodexPlugin,
+  normalizeHostHookMode,
+  parseHookModeFlag,
+  resolveHostHookMode,
+  type HostHookMode,
+  type PluginDetection,
+} from "./host-plugin-mode";
 import { loadRuntimeConfig } from "./runtime-persistence";
 import type {
   HandoffCapsule,
@@ -80,6 +90,8 @@ export type CodexAdapterConfig = {
   codexBinary: string;
   profileName: string;
   skillName: string;
+  /** Absent in configs written before host plugins; treated as "settings". */
+  hookMode?: HostHookMode;
   installedAt: string;
   updatedAt: string;
 };
@@ -109,6 +121,10 @@ export type CodexAdapterInstallOptions = {
   adapterVersion?: string;
   bridgeScriptPath: string;
   hookScriptPath: string;
+  /** "auto" (default) selects "plugin" when the Crosshead Codex plugin is enabled. */
+  hookMode?: HostHookMode | "auto";
+  /** Project directory used to find a project-level `.codex/config.toml` during plugin detection. */
+  workspaceRoot?: string;
 };
 
 export type CodexAdapterInstallResult = {
@@ -116,6 +132,9 @@ export type CodexAdapterInstallResult = {
   config: CodexAdapterConfig;
   managedFiles: string[];
   preservedFiles: string[];
+  pluginDetection: PluginDetection | null;
+  /** Hook files whose legacy Crosshead hooks were removed because the plugin supplies them. */
+  migratedFiles: string[];
 };
 
 export type CodexAdapterUninstallOptions = {
@@ -301,7 +320,7 @@ export const resolveCodexAdapterPaths = (runtimeHomeInput?: string, hostHomeInpu
 
 const buildHookCommand = (
   hookWrapperFile: string,
-  eventName: "SessionStart" | "PreCompact" | "PostCompact" | "UserPromptSubmit" | "Stop",
+  eventName: HostHookEvent,
   config: CodexAdapterConfig
 ): string =>
   [
@@ -378,77 +397,9 @@ const filterManagedHooks = (existing: CodexHooksConfig, hookWrapperPath: string)
 
 const renderHooksConfig = (existing: CodexHooksConfig, adapterPaths: CodexAdapterPaths, config: CodexAdapterConfig): string => {
 	const next = filterManagedHooks(existing, adapterPaths.hookWrapperFile);
-	const managedHooks: Array<
-		readonly ["SessionStart" | "PreCompact" | "PostCompact" | "UserPromptSubmit" | "Stop", CodexHookMatcherGroup]
-	> = [
-		[
-			"SessionStart",
-			{
-				matcher: "startup|resume|compact",
-				hooks: [
-					{
-						type: "command",
-						command: buildHookCommand(adapterPaths.hookWrapperFile, "SessionStart", config),
-						statusMessage: "Crosshead session sync",
-					},
-				],
-			},
-		],
-		[
-			"PreCompact",
-			{
-				matcher: "manual|auto",
-				hooks: [
-					{
-						type: "command",
-						command: buildHookCommand(adapterPaths.hookWrapperFile, "PreCompact", config),
-						statusMessage: "Crosshead pre-compact checkpoint",
-						timeout: 30,
-					},
-				],
-			},
-		],
-		[
-			"PostCompact",
-			{
-				matcher: "manual|auto",
-				hooks: [
-					{
-						type: "command",
-						command: buildHookCommand(adapterPaths.hookWrapperFile, "PostCompact", config),
-						statusMessage: "Crosshead post-compact sync",
-						timeout: 30,
-					},
-				],
-			},
-		],
-		[
-			"UserPromptSubmit",
-			{
-				hooks: [
-          {
-            type: "command",
-            command: buildHookCommand(adapterPaths.hookWrapperFile, "UserPromptSubmit", config),
-            statusMessage: "Crosshead context",
-            timeout: 45,
-          },
-        ],
-      },
-    ],
-    [
-      "Stop",
-      {
-        hooks: [
-          {
-            type: "command",
-            command: buildHookCommand(adapterPaths.hookWrapperFile, "Stop", config),
-            statusMessage: "Crosshead memory sync",
-            timeout: 30,
-          },
-        ],
-      },
-    ],
-  ];
+	const managedHooks = renderHostHookGroups("codex", (eventName) =>
+		buildHookCommand(adapterPaths.hookWrapperFile, eventName, config)
+	);
   for (const [eventName, group] of managedHooks) {
     const existingGroups = next.hooks[eventName] ?? [];
     next.hooks[eventName] = [...existingGroups, group];
@@ -544,6 +495,7 @@ const buildCodexAdapterConfig = (options: {
   profileName: string;
   skillName: string;
   adapterVersion: string;
+  hookMode: HostHookMode;
 }): CodexAdapterConfig => ({
   marker: CODEX_MANAGED_CONFIG_MARKER,
   adapterName: "codex",
@@ -553,6 +505,7 @@ const buildCodexAdapterConfig = (options: {
   codexBinary: options.codexBinary,
   profileName: options.profileName,
   skillName: options.skillName,
+  hookMode: options.hookMode,
   installedAt: nowIso(),
   updatedAt: nowIso(),
 });
@@ -562,7 +515,7 @@ const managedCodexFiles = (config: CodexAdapterConfig): string[] => {
   return [
     path.join(config.hostHome, "skills", config.skillName, "SKILL.md"),
     configFile(config.hostHome),
-    hooksFile(config.hostHome),
+    ...(normalizeHostHookMode(config.hookMode) === "settings" ? [hooksFile(config.hostHome)] : []),
     path.join(config.runtimeHome, "bin", "crosshead-codex"),
     path.join(config.runtimeHome, "bin", "crosshead-codex-hook"),
     path.join(config.runtimeHome, "bin", "onlybots-codex"),
@@ -647,6 +600,26 @@ export const codexContinuityTranslationContract: ContinuityTranslationContract<C
   reportFidelity: (translation) => translation.fidelity,
 };
 
+const removeLegacyCodexHooks = (filePath: string, hostHome: string, runtimeHome: string): boolean => {
+  if (!codexHooksFileHasLegacyHooks(filePath, runtimeHome)) return false;
+  const filtered = filterManagedHooks(readHooksConfig(filePath), path.join(runtimeHome, "bin", "crosshead-codex-hook"));
+  if (Object.values(filtered.hooks).some((groups) => (groups ?? []).length > 0)) {
+    writeManagedFile(filePath, `${JSON.stringify(filtered, null, 2)}\n`, hostHome);
+  } else {
+    rmSync(filePath, { force: true });
+  }
+  return true;
+};
+
+/** True when a Codex hooks.json still registers Crosshead's legacy (settings-mode) hooks. */
+export const codexHooksFileHasLegacyHooks = (filePath: string, runtimeHome: string): boolean => {
+  if (!existsSync(filePath)) return false;
+  const existing = readHooksConfig(filePath);
+  return JSON.stringify(filterManagedHooks(existing, path.join(runtimeHome, "bin", "crosshead-codex-hook")).hooks) !== JSON.stringify(existing.hooks);
+};
+
+export const codexLegacyHooksFile = (hostHome: string): string => hooksFile(hostHome);
+
 export const installCodexAdapter = async (options: CodexAdapterInstallOptions): Promise<CodexAdapterInstallResult> => {
   const runtimeLayout = ensureRuntimeHomeLayout(options.home);
   const hostHome = resolveCodexHome(options.hostHome);
@@ -658,6 +631,9 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
   const profileName = options.profileName ?? "default";
   const adapterVersion = options.adapterVersion ?? ONLYBOTS_CODEX_ADAPTER_VERSION;
   const codexBinary = resolveCodexBinary(runtimeLayout.home, options.codexBinary);
+  const { mode: hookMode, detection: pluginDetection } = resolveHostHookMode(options.hookMode, () =>
+    detectCodexPlugin(hostHome, path.resolve(options.workspaceRoot ?? process.cwd()))
+  );
 
   const config = buildCodexAdapterConfig({
     runtimeHome: runtimeLayout.home,
@@ -666,6 +642,7 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     profileName,
     skillName: selectedSkill.skillName,
     adapterVersion,
+    hookMode,
   });
 
   writeManagedFile(
@@ -683,11 +660,17 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     `${CODEX_ADAPTER_MARKER}\n${JSON.stringify(config, null, 2)}\n`,
     hostHome
   );
-  writeManagedFile(
-    adapterPaths.hooksFile,
-    renderHooksConfig(readHooksConfig(adapterPaths.hooksFile), adapterPaths, config),
-    hostHome
-  );
+  const migratedFiles: string[] = [];
+  if (hookMode === "plugin") {
+    // The plugin supplies the hooks. Retire legacy entries so no event runs twice.
+    if (removeLegacyCodexHooks(adapterPaths.hooksFile, hostHome, runtimeLayout.home)) migratedFiles.push(adapterPaths.hooksFile);
+  } else {
+    writeManagedFile(
+      adapterPaths.hooksFile,
+      renderHooksConfig(readHooksConfig(adapterPaths.hooksFile), adapterPaths, config),
+      hostHome
+    );
+  }
   writeManagedExecutable(adapterPaths.wrapperFile, options.bridgeScriptPath, runtimeLayout.home, config);
   writeManagedExecutable(adapterPaths.hookWrapperFile, options.hookScriptPath, runtimeLayout.home, config);
   writeManagedExecutable(path.join(config.runtimeHome, "bin", "onlybots-codex"), options.bridgeScriptPath, runtimeLayout.home, config);
@@ -702,7 +685,7 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
   const managedFiles = [
     adapterPaths.skillFile,
     adapterPaths.configFile,
-    adapterPaths.hooksFile,
+    ...(hookMode === "settings" ? [adapterPaths.hooksFile] : []),
     adapterPaths.wrapperFile,
     adapterPaths.hookWrapperFile,
     path.join(config.runtimeHome, "bin", "onlybots-codex"),
@@ -727,6 +710,8 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     config,
     managedFiles,
     preservedFiles: selectedSkill.preservedFiles,
+    pluginDetection,
+    migratedFiles,
   };
 };
 
@@ -1261,6 +1246,8 @@ export const installCodexFromCli = async (
     adapterVersion: typeof flags.version === "string" ? flags.version : undefined,
     bridgeScriptPath,
     hookScriptPath,
+    hookMode: parseHookModeFlag(flags["hook-mode"]),
+    workspaceRoot: typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : undefined,
   });
   return [
     `Installed Codex adapter ${result.adapter.version}`,
@@ -1268,6 +1255,8 @@ export const installCodexFromCli = async (
     `runtime_home: ${result.config.runtimeHome}`,
     `codex_home: ${result.config.hostHome}`,
     `codex_bin: ${result.config.codexBinary}`,
+    `hook_mode: ${describeHookMode(result.config.hookMode ?? "settings", result.pluginDetection)}`,
+    ...result.migratedFiles.map((filePath) => `migrated_legacy_hooks: ${filePath}`),
     ...(result.preservedFiles.length === 0
       ? []
       : [`preserved: ${result.preservedFiles.join(", ")}`]),

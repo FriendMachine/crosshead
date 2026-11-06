@@ -1,0 +1,67 @@
+{
+  "description": "Crosshead persistent memory hooks. They run the locally installed Crosshead runtime.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/crosshead-hook\" codex SessionStart",
+            "statusMessage": "Crosshead session sync"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/crosshead-hook\" codex PreCompact",
+            "statusMessage": "Crosshead pre-compact checkpoint",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/crosshead-hook\" codex PostCompact",
+            "statusMessage": "Crosshead post-compact sync",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/crosshead-hook\" codex UserPromptSubmit",
+            "statusMessage": "Crosshead context",
+            "timeout": 45
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/crosshead-hook\" codex Stop",
+            "statusMessage": "Crosshead memory sync",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -8,6 +8,8 @@ import { ensureRuntimeHomeLayout, loadProfile, loadRuntimeConfig } from "../runt
 import { billingFromCli } from "./billing";
 import { installCoreFromCli, keygenFromCli, startFromCli, statusFromCli } from "./core";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
+import { probeRuntimeDaemonHealth, readDaemonOwnershipState } from "../daemon-ownership";
+import { resolveRuntimePaths } from "../runtime-persistence";
 
 export type QuickstartCliPaths = {
 	cliScriptPath: string;
@@ -113,6 +115,7 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 		...flagPair("--claude-home", typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 		...flagPair("--workspace-root", typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : undefined),
 		...flagPair("--claude-bin", typeof flags["claude-bin"] === "string" ? flags["claude-bin"] : undefined),
+		...flagPair("--hook-mode", typeof flags["hook-mode"] === "string" ? flags["hook-mode"] : undefined),
 		...flagPair("--omp-bin", typeof flags["omp-bin"] === "string" ? flags["omp-bin"] : undefined),
 		...(boolFlagDisabled(flags, "no-envrc") ? ["--no-envrc"] : []),
 	];
@@ -150,7 +153,11 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 		detail: adapter === "omp" ? `${adapterOutput}; OMP uses the Pi embedded adapter path` : adapterOutput,
 	});
 
-	if (!boolFlagDisabled(flags, "no-start")) {
+	const runningDaemon = readDaemonOwnershipState(resolveRuntimePaths(home));
+	if (!boolFlagDisabled(flags, "no-start") && runningDaemon && (await probeRuntimeDaemonHealth(runningDaemon))) {
+		// Quickstart for a second host shares the daemon the first one started.
+		steps.push({ id: "daemon", ok: true, detail: `onlybotsd already running on port ${runningDaemon.port}` });
+	} else if (!boolFlagDisabled(flags, "no-start")) {
 		const startOutput = await startFromCli([...flagPair("--home", home), ...flagPair("--port", typeof flags.port === "string" ? flags.port : undefined)]);
 		steps.push({ id: "daemon", ok: true, detail: startOutput });
 	} else {
