@@ -55,6 +55,7 @@ export class HotSyncManager {
 	private nextCapabilities = 0;
 	private nextDiscovery = 0;
 	private nextLegacyCheck = 0;
+	private workspaceGeneration = 0;
 	private active = new Set<string>();
 	constructor(private readonly config: Config, client?: HostedOnlyBotsClient) {
 		this.namespace = createHmac("sha256", config.nsec).update(`crosshead-profile-v1\n${config.profileName.normalize("NFC")}`).digest("hex");
@@ -88,6 +89,7 @@ export class HotSyncManager {
 		const id = this.digest(remote ? `git:${remote}` : `local:${raw}`);
 		this.metadata.workspaces[raw] = id;
 		this.nextLegacyCheck = 0;
+		this.workspaceGeneration++;
 		this.persist();
 		return id;
 	}
@@ -100,6 +102,8 @@ export class HotSyncManager {
 			throw new Error("Workspace already contains hot memory; reset its scopes before relinking");
 		this.metadata.workspaces[raw] = id;
 		this.metadata.linked[raw] = label;
+		this.nextLegacyCheck = 0;
+		this.workspaceGeneration++;
 		this.persist();
 		return { workspaceId: id, workspaceRoot: path.resolve(root) };
 	}
@@ -248,8 +252,9 @@ export class HotSyncManager {
 			if (this.legacyQueueError) syncError ??= new Error(this.legacyQueueError);
 			else try {
 				if (forceDiscovery || Date.now() >= this.nextLegacyCheck) {
+					const generation = this.workspaceGeneration;
 					await this.migrateLegacy();
-					this.nextLegacyCheck = Date.now() + 60000;
+					this.nextLegacyCheck = generation === this.workspaceGeneration ? Date.now() + 60000 : 0;
 				}
 				migrated = true;
 			} catch(error) { syncError ??= error; }

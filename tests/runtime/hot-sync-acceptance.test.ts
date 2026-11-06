@@ -72,6 +72,27 @@ describe("local-first hot-memory acceptance", () => {
 		expect(legacy).toHaveBeenCalledTimes(3);
 	});
 
+	it("rechecks migration if a new workspace appears during a background legacy read", async () => {
+		const cloud = new Cloud(), id = identity(), client = cloud.client(id.npub);
+		const state = (workspaceId: string, summary: string) => ({ runtime: "codex", workspaceId, continuityCheckpoints: [{ goal: "Recover", summary, occurredAt: "2026-11-03T00:00:00Z" }] });
+		cloud.legacy = { scopes: [
+			{ scope: "new", integrity: "verified", content: JSON.stringify(state("repo:/new", "Legacy new workspace")) },
+			{ scope: "known", integrity: "verified", content: JSON.stringify(state("repo:/known", "Legacy known workspace")) },
+		] };
+		const m = new HotSyncManager({ origin: "https://crosshead.sh", ...id, profileName: "default", stateDir: home() }, client);
+		m.workspace("repo:/known");
+		const original = client.readHotSync.bind(client); let release!: () => void;
+		const read = vi.spyOn(client, "readHotSync").mockImplementationOnce((...args) => new Promise(resolve => { release = () => resolve(original(...args)); }));
+		const flushing = m.flush(false);
+		try {
+			await vi.waitFor(() => expect(read).toHaveBeenCalled());
+			m.capture("codex", { ...checkpoint("new-capture"), workspaceId: "repo:/new" });
+			release(); await flushing; await m.flush(false);
+			expect(entries(m).some(c => c.summary === "Legacy new workspace")).toBe(true);
+			expect(entries(m).some(c => c.id === "new-capture")).toBe(true);
+		} finally { release?.(); await flushing; }
+	});
+
 	it("imports identical queued legacy findings on two devices without false conflicts", async () => {
 		const cloud = new Cloud(), id = identity();
 		const config = { origin: "https://crosshead.sh", ...id, profileName: "default" };
