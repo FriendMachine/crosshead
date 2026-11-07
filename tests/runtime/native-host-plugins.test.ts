@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import * as adapterUtils from "../../src/runtime/adapter-utils";
 import { execFileSync } from "child_process";
 import os from "os";
 import path from "path";
@@ -104,13 +105,21 @@ describe("native host installation", () => {
   });
   it("rolls back host files if writing runtime configuration fails", async () => {
     const dir = temporary(), home = path.join(dir, "runtime"), hostHome = path.join(dir, "host");
-    const configDir = path.join(home, "config", "native-hosts");
-    mkdirSync(configDir, { recursive: true }); chmodSync(configDir, 0o500);
-    try {
-      await expect(installNativeHostAdapter("opencode", { home, hostHome })).rejects.toThrow();
-      expect(existsSync(path.join(hostHome, "plugins", "crosshead.js"))).toBe(false);
-      expect(listAdapterRecords(resolveRuntimePaths(home))).toEqual([]);
-    } finally { chmodSync(configDir, 0o700); }
+    const configFile = path.join(home, "config", "native-hosts", "opencode.json");
+    const pluginFile = path.join(hostHome, "plugins", "crosshead.js");
+    const writeManagedFile = adapterUtils.writeManagedFile;
+    // Inject a real write boundary failure: chmod cannot deny writes to root.
+    vi.spyOn(adapterUtils, "writeManagedFile").mockImplementation((file, ...args) => {
+      if (file === configFile) {
+	expect(readFileSync(pluginFile, "utf8")).toContain("crosshead-native-host-v1");
+	throw Object.assign(new Error("EACCES: runtime configuration write denied"), { code: "EACCES" });
+      }
+      return writeManagedFile(file, ...args);
+    });
+    await expect(installNativeHostAdapter("opencode", { home, hostHome })).rejects.toThrow("EACCES");
+    expect(existsSync(pluginFile)).toBe(false);
+    expect(existsSync(configFile)).toBe(false);
+    expect(listAdapterRecords(resolveRuntimePaths(home))).toEqual([]);
   });
   it("does not remove a replacement plugin on uninstall", async () => {
     const dir = temporary(), result = await installNativeHostAdapter("opencode", { home: path.join(dir, "runtime"), hostHome: path.join(dir, "host") });
