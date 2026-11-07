@@ -225,6 +225,16 @@ describe("describeHostedFailure", () => {
 });
 
 describe("describeBoundedRecallFallback", () => {
+  it("keeps unknown commits distinct from confirmed free failures and contradicting charge claims", () => {
+    const uncertain = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 503, code: "paid_operation_commit_unknown", message: "private", details: { charged_sats: 0 } }));
+    expect(uncertain).toContain("same idempotency key");
+    expect(uncertain).not.toContain("charged nothing");
+    const contradictory = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "private", details: { charged_sats: 2 } }));
+    expect(contradictory).toContain("may still settle");
+    const rejected = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 400, code: "bad_request", message: "private", details: { charged_sats: 0 } }));
+    expect(rejected).toContain("charged nothing");
+    expect(rejected).not.toContain("missed its response budget");
+  });
   it("says nothing was charged only when the server confirms it, and keeps the settle caution otherwise", () => {
     const deadline = new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "late",
       details: { charged_sats: 0, retryable: true } });
