@@ -4,7 +4,7 @@ import { schnorr } from "@noble/curves/secp256k1";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { HostedOnlyBotsClient } from "../../src/runtime/hosted-client";
+import { describeBoundedRecallFallback, describeHostedFailure, HostedOnlyBotsClient, HostedOnlyBotsRequestError } from "../../src/runtime/hosted-client";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -206,5 +206,48 @@ describe("hosted client security boundaries", () => {
       membership: { id: "membership-test", status: "active" },
     });
     expect(receivedBody).toEqual({ code: "obj_test", agent_id: "agent-test" });
+  });
+});
+
+describe("describeHostedFailure", () => {
+  it("distinguishes a recall timeout from an HTTP failure without copying messages", () => {
+    const timeout = new DOMException("The operation was aborted due to timeout https://secret.example/?token=x", "TimeoutError");
+    expect(describeHostedFailure(timeout)).toEqual({ errorClass: "timeout" });
+    const http = new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "secret detail" });
+    expect(describeHostedFailure(http)).toEqual({ errorClass: "http", status: 503, code: "recall_deadline_exceeded" });
+    expect(describeHostedFailure(new TypeError("fetch failed: secret.example"))).toEqual({ errorClass: "TypeError" });
+    expect(JSON.stringify(describeHostedFailure(Object.assign(new Error("x"), { name: "bad name with token=1" })))).not.toContain("token");
+    // A server-chosen code that is not a plain identifier is dropped, not copied.
+    const unsafeCode = new HostedOnlyBotsRequestError({ status: 500, code: "oops token=secret https://x", message: "m" });
+    expect(describeHostedFailure(unsafeCode)).toEqual({ errorClass: "http", status: 500, code: null });
+    expect(describeHostedFailure(new HostedOnlyBotsRequestError({ status: 502, code: "a".repeat(65), message: "m" })).code).toBeNull();
+  });
+});
+
+describe("describeBoundedRecallFallback", () => {
+  it("keeps unknown commits distinct from confirmed free failures and contradicting charge claims", () => {
+    const uncertain = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 503, code: "paid_operation_commit_unknown", message: "private", details: { charged_sats: 0 } }));
+    expect(uncertain).toContain("same idempotency key");
+    expect(uncertain).not.toContain("charged nothing");
+    const contradictory = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "private", details: { charged_sats: 2 } }));
+    expect(contradictory).toContain("may still settle");
+    const rejected = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 400, code: "bad_request", message: "private", details: { charged_sats: 0 } }));
+    expect(rejected).toContain("charged nothing");
+    expect(rejected).not.toContain("missed its response budget");
+  });
+  it("says nothing was charged only when the server confirms it, and keeps the settle caution otherwise", () => {
+    const deadline = new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "late",
+      details: { charged_sats: 0, retryable: true } });
+    expect(describeBoundedRecallFallback(deadline)).toContain("charged nothing");
+    expect(describeBoundedRecallFallback(deadline)).not.toContain("may still settle");
+    const timeout = new DOMException("timed out", "TimeoutError");
+    expect(describeBoundedRecallFallback(timeout)).toContain("may still settle");
+    expect(describeBoundedRecallFallback(new TypeError("fetch failed"))).toContain("may still settle");
+    const gateway = new HostedOnlyBotsRequestError({ status: 504, code: null, message: "gateway timeout" });
+    expect(describeBoundedRecallFallback(gateway)).toContain("may still settle");
+    const rejected = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 400, code: "bad_request", message: "secret detail" }));
+    expect(rejected).toContain("HTTP 400");
+    expect(rejected).not.toContain("may still settle");
+    expect(rejected).not.toContain("secret detail");
   });
 });

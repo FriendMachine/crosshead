@@ -19,7 +19,7 @@ import {
   pickHotContextValidationCommand,
 } from "./hot-context-cues";
 import { buildRuntimeBillingRemediation, formatRuntimeBillingRemediation, isBillingBlockedError } from "./billing-remediation";
-import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
+import { describeBoundedRecallFallback, describeHostedFailure, HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, readLocalHotMemory, writeLocalHotMemory } from "./local-hot-memory";
 import { workspaceHotScope, selectWorkspaceHotState } from "./workspace-hot-memory";
 import { buildRuntimeContinuityOutcome, parseRuntimeContinuityOutcomeContent } from "./continuity-outcomes";
@@ -1795,10 +1795,10 @@ export class RuntimeLifecycleManager {
 						} catch (error) {
 	      if (!isBillingBlockedError(error) && packRequest.recallPolicy === "bounded") {
 		contextPack = buildLocalOnlyContextPack(event, packRequest);
-		warnings.push("Saved-context retrieval unavailable; continuing with free hot memory. A timed-out paid request may still settle; inspect billing before retrying.");
+		warnings.push(describeBoundedRecallFallback(error));
 		actions.push(this.recordAction({ eventId: event.eventId, profileName, type: "context_pack", status: "failed",
 		  mode: profile.memoryMode, reason: "Bounded recall unavailable; preserved free hot-memory delivery", queueItemId: null,
-		  details: { type: event.type, freeFallback: true } }));
+		  details: { type: event.type, freeFallback: true, failure: describeHostedFailure(error) } }));
 	      } else {
 	      if (!isBillingBlockedError(error)) throw error;
 							contextPack = buildLocalOnlyContextPack(event, packRequest);
