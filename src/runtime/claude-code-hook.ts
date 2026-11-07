@@ -393,7 +393,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     }
     if (viaPlugin) {
       try {
-        recordPluginInvocation(runtimeHome, "claude-code", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null);
+        recordPluginInvocation(runtimeHome, "claude-code", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null, claudeUserConfigDir());
       } catch {
         // A receipt is diagnostic only; never fail the hook over it.
       }
@@ -404,7 +404,10 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       viaPlugin,
       mode: normalizeHostHookMode(installedConfig.hookMode),
       legacyHooksPresent: () =>
-        findLegacyClaudeHookFiles(claudeUserConfigDir(), claudeSessionProjectDir(workspaceRoot), runtimeHome).length > 0,
+        findLegacyClaudeHookFiles(claudeUserConfigDir(), claudeSessionProjectDir(workspaceRoot), runtimeHome, {
+          event: eventName,
+          matcherValue: normalizedEventName.replace(/_/g, "") === "sessionstart" ? pickString(payload, ["source", "payload.source"]) ?? undefined : pickCompactionTrigger(payload) ?? undefined,
+        }).length > 0,
     });
     if (decision === "skip-duplicate") return;
   }

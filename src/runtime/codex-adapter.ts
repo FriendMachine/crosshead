@@ -66,6 +66,7 @@ import {
   normalizeHostHookMode,
   parseHookModeFlag,
   readPluginInvocation,
+  pluginInvocationMatches,
   readSettingsForInspection,
   resolveHostHookMode,
   type HookModeRequest,
@@ -623,12 +624,12 @@ export const codexContinuityTranslationContract: ContinuityTranslationContract<C
 const legacyCodexHookWrapper = (runtimeHome: string): string => path.join(runtimeHome, "bin", "crosshead-codex-hook");
 
 /** Number of installer-written Crosshead hook handlers in a Codex hooks.json. */
-export const countLegacyCodexHookCommands = (filePath: string, runtimeHome: string): number =>
-  countMatchingHookCommands(readSettingsForInspection(filePath), (command) => isLegacyCodexHookCommand(command, legacyCodexHookWrapper(runtimeHome)));
+export const countLegacyCodexHookCommands = (filePath: string, runtimeHome: string, match?: import("./host-plugin-mode").HookMatch): number =>
+  countMatchingHookCommands(readSettingsForInspection(filePath), (command) => isLegacyCodexHookCommand(command, legacyCodexHookWrapper(runtimeHome)), match);
 
 /** True when a Codex hooks.json still registers Crosshead's legacy (settings-mode) hooks. */
-export const codexHooksFileHasLegacyHooks = (filePath: string, runtimeHome: string): boolean =>
-  countLegacyCodexHookCommands(filePath, runtimeHome) > 0;
+export const codexHooksFileHasLegacyHooks = (filePath: string, runtimeHome: string, match?: import("./host-plugin-mode").HookMatch): boolean =>
+  countLegacyCodexHookCommands(filePath, runtimeHome, match) > 0;
 
 /**
  * Removes installer-written Crosshead hooks, keeping other hooks and top-level
@@ -667,7 +668,7 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
   // installer hooks until a plugin invocation has been observed; until then the
   // dispatch rule lets the installer hooks capture and the plugin defer.
   const legacyPresent = codexHooksFileHasLegacyHooks(hooksFile(hostHome), runtimeLayout.home);
-  const pluginObserved = readPluginInvocation(runtimeLayout.home, "codex") !== null;
+  const pluginObserved = pluginInvocationMatches(readPluginInvocation(runtimeLayout.home, "codex"), hostHome);
   const migrateLegacy = hookMode === "plugin" && legacyPresent && pluginObserved;
   const writeLegacy = hookMode === "settings" && resolution.writeLegacyHooks;
   const hookModeNote =

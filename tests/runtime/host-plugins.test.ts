@@ -110,6 +110,7 @@ describe("host plugin files", () => {
 	// never edit an old one. 1.0.0 is unreleased while PR #14 is open.
 	const PLUGIN_CONTENT_SHA256: Record<string, string> = {
 		"1.0.0": "1c6295e2195529599233fae8d5a46b5671ef18998beaf39652e7bc6d955dc4d4",
+		"1.0.1": "1fcdad297292b4ac92cf109a9b29da8f26928710099f028e53c12ae9c45ab5e6",
 	};
 	it("generated plugin content is pinned to CROSSHEAD_HOST_PLUGIN_VERSION", () => {
 		const files = renderHostPluginFiles(spec) as Record<string, string>;
@@ -168,7 +169,7 @@ describe("legacy hook rendering", () => {
 		// hosts start a fresh context after /clear, like startup), changed deliberately.
 		expect(readJson(path.join(f.workspace, ".claude", "settings.json"))).toEqual({
 			hooks: {
-				SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: command("SessionStart") }] }],
+				SessionStart: [{ matcher: "startup|resume|clear|compact|fork", hooks: [{ type: "command", command: command("SessionStart") }] }],
 				PreCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PreCompact") }] }],
 				PostCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PostCompact") }] }],
 				UserPromptSubmit: [{ hooks: [{ type: "command", command: command("UserPromptSubmit") }] }],
@@ -184,7 +185,7 @@ describe("legacy hook rendering", () => {
 		const command = (event: string) => `'${hookWrapper}' '${event}' --home '${f.home}' --codex-home '${f.codexHome}'`;
 		expect(readJson(path.join(f.codexHome, "hooks.json"))).toEqual({
 			hooks: {
-				SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: command("SessionStart"), statusMessage: "Crosshead session sync" }] }],
+				SessionStart: [{ matcher: "startup|resume|clear|compact|fork", hooks: [{ type: "command", command: command("SessionStart"), statusMessage: "Crosshead session sync" }] }],
 				PreCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PreCompact"), statusMessage: "Crosshead pre-compact checkpoint", timeout: 30 }] }],
 				PostCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PostCompact"), statusMessage: "Crosshead post-compact sync", timeout: 30 }] }],
 				UserPromptSubmit: [{ hooks: [{ type: "command", command: command("UserPromptSubmit"), statusMessage: "Crosshead context", timeout: 45 }] }],
@@ -312,7 +313,7 @@ describe("plugin mode install and migration", () => {
 		expect(pending.hookModeNote).toContain("/hooks");
 		expect(countLegacyCodexHookCommands(hooksFile, f.home)).toBe(5);
 
-		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION);
+		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION, f.codexHome);
 		const result = await installCodex(f);
 		expect(result.migratedFiles).toEqual([hooksFile]);
 		expect(readJson(hooksFile)).toEqual({ $schema: "keep-me", hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo unrelated" }] }] } });
@@ -339,6 +340,23 @@ describe("plugin mode install and migration", () => {
 		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(5);
 	});
 
+	it.each(["older-version", "different-home", "unbound-receipt"])("Codex: %s receipt cannot authorize global hook removal", async (kind) => {
+		const f = fixture(`codex-receipt-${kind}`);
+		await installCodex(f);
+		enableCodexPlugin(f.codexHome);
+		if (kind === "unbound-receipt") {
+			writeJson(path.join(f.home, "state", "host-plugin-invocations.json"), { codex: { lastSeenAt: new Date().toISOString(), pluginVersion: spec.CROSSHEAD_HOST_PLUGIN_VERSION } });
+		} else {
+			recordPluginInvocation(f.home, "codex", kind === "older-version" ? "1.0.0" : spec.CROSSHEAD_HOST_PLUGIN_VERSION, kind === "different-home" ? path.join(f.root, "other-codex") : f.codexHome);
+		}
+		const pending = await installCodex(f);
+		expect(pending.migratedFiles).toEqual([]);
+		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(5);
+		expect(inspectHostHookRegistrations(f.home, f.workspace).find((check) => check.id === "codex_hooks")).toMatchObject({ ok: false });
+		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION, f.codexHome);
+		expect((await installCodex(f)).migratedFiles).toEqual([path.join(f.codexHome, "hooks.json")]);
+	});
+
 	it("Codex: refuses a symlinked hooks.json before writing anything", async () => {
 		const f = fixture("codex-symlink");
 		const hooksFile = path.join(f.codexHome, "hooks.json");
@@ -350,7 +368,7 @@ describe("plugin mode install and migration", () => {
 		const configPath = path.join(f.codexHome, "onlybots", "codex-adapter.json");
 		const before = readFileSync(configPath, "utf8");
 		enableCodexPlugin(f.codexHome);
-		recordPluginInvocation(f.home, "codex", null);
+		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION, f.codexHome);
 		await expect(installCodex(f)).rejects.toThrow("regular file");
 		expect(readFileSync(configPath, "utf8")).toBe(before);
 		expect(countLegacyCodexHookCommands(real, f.home)).toBe(5);
@@ -502,7 +520,7 @@ describe("hook dispatch", () => {
 		await install(f, { workspaceRoot: path.join(f.root, "elsewhere") });
 		// No CLAUDE_CONFIG_DIR and no --claude-home: the plugin launcher passes neither.
 		const payload = JSON.stringify({ session_id: "s1", cwd: f.workspace });
-		await expect(runOnlyBotsClaudeCodeHookCli(["Stop", "--home", f.home, "--via", "plugin"], payload)).rejects.toThrow(RAN);
+		await expect(runOnlyBotsClaudeCodeHookCli(["Stop", "--home", f.home, "--via", "plugin", "--plugin-version", spec.CROSSHEAD_HOST_PLUGIN_VERSION], payload)).rejects.toThrow(RAN);
 	});
 
 	it("Claude Code: checks the session's project directory, not its ancestors, plus the user settings", async () => {
@@ -538,7 +556,7 @@ describe("hook dispatch", () => {
 		mkdirSync(outside, { recursive: true });
 		process.env.CLAUDE_PROJECT_DIR = outside;
 		const payload = JSON.stringify({ session_id: "s", cwd: outside });
-		await expect(runOnlyBotsClaudeCodeHookCli(["Stop", "--home", f.home, "--via", "plugin"], payload)).resolves.toBeUndefined();
+		await expect(runOnlyBotsClaudeCodeHookCli(["Stop", "--home", f.home, "--via", "plugin", "--plugin-version", spec.CROSSHEAD_HOST_PLUGIN_VERSION], payload)).resolves.toBeUndefined();
 		await expect(runOnlyBotsClaudeCodeHookCli(["Stop", "--home", f.home, "--claude-home", claudeHome], payload)).rejects.toThrow(RAN);
 		const [check] = inspectHostHookRegistrations(f.home, outside);
 		expect(check!.message).toContain(path.join(claudeHome, "settings.json"));
@@ -559,6 +577,25 @@ describe("hook dispatch", () => {
 		await installCodex(f, { hookMode: "settings" });
 		writeJson(path.join(f.codexHome, "hooks.json"), { hooks: { Stop: [null, { hooks: null }] } });
 		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--via", "plugin"], JSON.stringify({ session_id: "s", cwd: f.workspace }))).rejects.toThrow(RAN);
+	});
+
+	it.each(["claude-code", "codex"] as const)("%s: partial legacy registrations defer only matching events and sources", async (host) => {
+		const f = fixture(`${host}-partial`);
+		process.env.CROSSHEAD_HOOK_AUTOSTART = "0";
+		process.env.CLAUDE_CONFIG_DIR = f.claudeHome;
+		process.env.CLAUDE_PROJECT_DIR = f.workspace;
+		process.env.CODEX_HOME = f.codexHome;
+		if (host === "codex") await installCodex(f); else await install(f);
+		const file = host === "codex" ? path.join(f.codexHome, "hooks.json") : path.join(f.workspace, ".claude", "settings.json");
+		const legacy = readJson(file);
+		legacy.hooks = { SessionStart: [{ ...legacy.hooks.SessionStart[0], matcher: "startup|resume" }] };
+		writeJson(file, legacy);
+		const hook = host === "codex" ? runOnlyBotsCodexHookCli : runOnlyBotsClaudeCodeHookCli;
+		const invoke = (event: string, source?: string) => hook([event, "--home", f.home, "--via", "plugin", "--plugin-version", spec.CROSSHEAD_HOST_PLUGIN_VERSION], JSON.stringify({ session_id: "partial", cwd: f.workspace, source }));
+		await expect(invoke("SessionStart", "startup")).resolves.toBeUndefined();
+		await expect(invoke("SessionStart", "fork")).rejects.toThrow(RAN);
+		await expect(invoke("UserPromptSubmit")).rejects.toThrow(RAN);
+		await expect(invoke("Stop")).rejects.toThrow(RAN);
 	});
 
 	it("Claude Code: plugin mode defers to leftover installer hooks and skips stale ones", async () => {
@@ -601,11 +638,11 @@ describe("hook dispatch", () => {
 		// Untrusted plugin hooks never fire; the installer hook still captures.
 		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--codex-home", f.codexHome], payload)).rejects.toThrow(RAN);
 		// Once trusted, both fire: the plugin defers and records that it ran.
-		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--via", "plugin"], payload)).resolves.toBeUndefined();
+		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--via", "plugin", "--plugin-version", spec.CROSSHEAD_HOST_PLUGIN_VERSION], payload)).resolves.toBeUndefined();
 		expect(readPluginInvocation(f.home, "codex")).not.toBeNull();
 		const migrated = await installCodex(f);
 		expect(migrated.migratedFiles).toEqual([path.join(f.codexHome, "hooks.json")]);
-		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--via", "plugin"], payload)).rejects.toThrow(RAN);
+		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--via", "plugin", "--plugin-version", spec.CROSSHEAD_HOST_PLUGIN_VERSION], payload)).rejects.toThrow(RAN);
 		// A Codex session that loaded hooks.json before the migration: its installer hook is skipped.
 		await expect(runOnlyBotsCodexHookCli(["Stop", "--home", f.home, "--codex-home", f.codexHome], payload)).resolves.toBeUndefined();
 		expect(inspectHostHookRegistrations(f.home, f.workspace).find((check) => check.id === "codex_hooks")).toMatchObject({ ok: true });
@@ -625,10 +662,11 @@ describe("hook dispatch", () => {
 		expect(
 			evaluateHostHookInspection({
 				host: "codex",
+				hostHome: "/c",
 				mode: "plugin",
 				plugin: { enabled: true, source: "/c/config.toml", scope: "user", enabledAtUserScope: true },
 				legacyHookFiles: [],
-				pluginInvocation: { lastSeenAt: new Date().toISOString(), pluginVersion: "1.0.0" },
+				pluginInvocation: { lastSeenAt: new Date().toISOString(), pluginVersion: spec.CROSSHEAD_HOST_PLUGIN_VERSION, hostHome: "/c" },
 			}).ok
 		).toBe(true);
 	});
@@ -719,7 +757,7 @@ describe("doctor hook checks", () => {
 			mode: "settings",
 			plugin: { enabled: true, source: null, scope: "user", enabledAtUserScope: true },
 			legacyHookFiles: ["/c/hooks.json"],
-			pluginInvocation: { lastSeenAt: new Date().toISOString(), pluginVersion: null },
+			pluginInvocation: { lastSeenAt: new Date().toISOString(), pluginVersion: null, hostHome: null },
 		});
 		expect(duplicate.ok).toBe(false);
 		expect(duplicate.message).toContain("--hook-mode plugin");

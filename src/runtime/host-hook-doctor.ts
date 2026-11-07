@@ -9,6 +9,7 @@ import {
 	normalizeHookModeRequest,
 	normalizeHostHookMode,
 	readPluginInvocation,
+	pluginInvocationMatches,
 	type HostHookMode,
 	type PluginDetection,
 	type PluginInvocationRecord,
@@ -18,6 +19,7 @@ import { loadAdapterRecord, resolveRuntimePaths } from "./runtime-persistence";
 
 export type HostHookInspection = {
 	host: HookHost;
+	hostHome?: string;
 	mode: HostHookMode;
 	plugin: PluginDetection;
 	/** Installer-written Crosshead hooks the host loads for the inspected workspace. */
@@ -50,7 +52,7 @@ export const evaluateHostHookInspection = (inspection: HostHookInspection): Runt
 	const summary = `mode=${mode}; ${describePlugin(plugin)}; ${legacyState}.`;
 	const hasLegacy = legacyHookFiles.length > 0;
 	// Codex: plugin hooks that never ran are most likely untrusted.
-	const codexUnseen = host === "codex" && plugin.enabled && !inspection.pluginInvocation;
+	const codexUnseen = host === "codex" && plugin.enabled && !pluginInvocationMatches(inspection.pluginInvocation, inspection.hostHome ?? "");
 	const fail = (message: string): RuntimeDoctorCheck => ({ id, ok: false, message: `${summary} ${message}` });
 	const ok = (message?: string): RuntimeDoctorCheck => ({ id, ok: true, message: message ? `${summary} ${message}` : summary });
 
@@ -79,7 +81,7 @@ export const evaluateHostHookInspection = (inspection: HostHookInspection): Runt
 			return ok(`The plugin is enabled only for this project, so the installer hooks stay in place for other projects; here the plugin defers to them and each event is captured once.${requested}`);
 		}
 		return fail(
-			`Duplicate registration (the plugin defers to the installer hooks here): run ${installCommand(host)} --hook-mode plugin to migrate${host === "codex" && !inspection.pluginInvocation ? ` once Codex has run the plugin hooks. ${CODEX_TRUST_HINT}` : "."}`
+			`Duplicate registration (the plugin defers to the installer hooks here): run ${installCommand(host)} --hook-mode plugin to migrate${codexUnseen ? ` once Codex has run the plugin hooks. ${CODEX_TRUST_HINT}` : "."}`
 		);
 	}
 	if (plugin.enabled && codexUnseen) {
@@ -109,6 +111,7 @@ export const inspectHostHookRegistrations = (home?: string, workspaceRoot: strin
 			checks.push(
 				evaluateHostHookInspection({
 					host: "claude-code",
+					hostHome: config.hostHome,
 					mode,
 					plugin: detectClaudeCodePlugin(config.hostHome, workspace),
 					legacyHookFiles: legacy,
@@ -128,6 +131,7 @@ export const inspectHostHookRegistrations = (home?: string, workspaceRoot: strin
 			checks.push(
 				evaluateHostHookInspection({
 					host: "codex",
+					hostHome: config.hostHome,
 					mode: normalizeHostHookMode(config.hookMode),
 					plugin: detectCodexPlugin(config.hostHome, workspace),
 					legacyHookFiles: codexHooksFileHasLegacyHooks(hooksFile, paths.home) ? [hooksFile] : [],

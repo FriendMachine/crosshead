@@ -592,17 +592,17 @@ export const claudeCodeContinuityTranslationContract: ContinuityTranslationContr
 const legacyHookWrapper = (runtimeHome: string): string => path.join(runtimeHome, "bin", "crosshead-claude-code-hook");
 
 /** Number of installer-written Crosshead hook handlers in a Claude Code settings file. */
-export const countLegacyClaudeHookCommands = (filePath: string, runtimeHome: string): number =>
-  countMatchingHookCommands(readSettingsForInspection(filePath), (command) => isLegacyClaudeHookCommand(command, legacyHookWrapper(runtimeHome)));
+export const countLegacyClaudeHookCommands = (filePath: string, runtimeHome: string, match?: import("./host-plugin-mode").HookMatch): number =>
+  countMatchingHookCommands(readSettingsForInspection(filePath), (command) => isLegacyClaudeHookCommand(command, legacyHookWrapper(runtimeHome)), match);
 
 /**
  * Settings files Claude Code loads for a session in `projectDir` (user settings in
  * `userConfigDir`) that still register installer-written Crosshead hooks.
  */
-export const findLegacyClaudeHookFiles = (userConfigDir: string, projectDir: string, runtimeHome: string): string[] =>
+export const findLegacyClaudeHookFiles = (userConfigDir: string, projectDir: string, runtimeHome: string, match?: import("./host-plugin-mode").HookMatch): string[] =>
   claudeLoadedSettingsFiles(userConfigDir, projectDir)
     .map((source) => source.file)
-    .filter((filePath) => countLegacyClaudeHookCommands(filePath, runtimeHome) > 0);
+    .filter((filePath) => countLegacyClaudeHookCommands(filePath, runtimeHome, match) > 0);
 
 /**
  * Removes installer-written Crosshead hooks from a settings file, keeping every

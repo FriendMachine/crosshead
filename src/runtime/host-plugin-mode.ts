@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "fs";
 import os from "os";
 import path from "path";
 
-import { CROSSHEAD_MARKETPLACE_NAME, CROSSHEAD_PLUGIN_NAME, PLUGIN_HOOK_VIA_FLAG, type HookHost } from "./host-hook-spec";
+import { CROSSHEAD_HOST_PLUGIN_VERSION, CROSSHEAD_MARKETPLACE_NAME, CROSSHEAD_PLUGIN_NAME, PLUGIN_HOOK_VIA_FLAG, type HookHost } from "./host-hook-spec";
 import { ensureRuntimeHomeLayout, loadAdapterRecord, parseJsonFile, resolveRuntimePaths, writeJsonFile } from "./runtime-persistence";
 
 // Hook registration modes for Claude Code and Codex:
@@ -451,15 +451,25 @@ export const decideHookDispatch = (input: {
  * shape: non-object hooks, non-array events, null or non-object groups and
  * handlers are ignored, so empty arrays never count.
  */
-export const countMatchingHookCommands = (settings: unknown, isCrosshead: (command: string) => boolean): number => {
+export type HookMatch = { event: string; matcherValue?: string };
+
+export const countMatchingHookCommands = (settings: unknown, isCrosshead: (command: string) => boolean, match?: HookMatch): number => {
 	if (!settings || typeof settings !== "object" || Array.isArray(settings)) return 0;
 	const hooks = (settings as { hooks?: unknown }).hooks;
 	if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return 0;
 	let count = 0;
-	for (const groups of Object.values(hooks as Record<string, unknown>)) {
+	for (const [event, groups] of Object.entries(hooks as Record<string, unknown>)) {
+		if (match && event.toLowerCase().replace(/_/g, "") !== match.event.toLowerCase().replace(/_/g, "")) continue;
 		if (!Array.isArray(groups)) continue;
 		for (const group of groups) {
 			if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+			if (match) {
+				const matcher = (group as { matcher?: unknown }).matcher;
+				if (typeof matcher === "string" && matcher !== "" && matcher !== "*") {
+					if (match.matcherValue === undefined) continue;
+					try { if (!new RegExp(matcher).test(match.matcherValue)) continue; } catch { continue; }
+				}
+			}
 			const handlers = (group as { hooks?: unknown }).hooks;
 			if (!Array.isArray(handlers)) continue;
 			for (const handler of handlers) {
@@ -476,7 +486,7 @@ export const readSettingsForInspection = (filePath: string): unknown => (existsS
 
 // ---- Plugin invocation receipts -----------------------------------------------
 
-export type PluginInvocationRecord = { lastSeenAt: string; pluginVersion: string | null };
+export type PluginInvocationRecord = { lastSeenAt: string; pluginVersion: string | null; hostHome: string | null };
 
 const invocationFile = (runtimeHome: string): string => path.join(path.resolve(runtimeHome), "state", "host-plugin-invocations.json");
 
@@ -484,7 +494,7 @@ export const readPluginInvocation = (runtimeHome: string, host: HookHost): Plugi
 	const records = parseJsonFile<Record<string, unknown> | null>(invocationFile(runtimeHome), null);
 	const record = records?.[host] as Partial<PluginInvocationRecord> | undefined;
 	return record && typeof record.lastSeenAt === "string"
-		? { lastSeenAt: record.lastSeenAt, pluginVersion: typeof record.pluginVersion === "string" ? record.pluginVersion : null }
+		? { lastSeenAt: record.lastSeenAt, pluginVersion: typeof record.pluginVersion === "string" ? record.pluginVersion : null, hostHome: typeof record.hostHome === "string" ? record.hostHome : null }
 		: null;
 };
 
@@ -493,13 +503,17 @@ export const readPluginInvocation = (runtimeHome: string, host: HookHost): Plugi
  * the plugin hooks). Rewritten at most every 10 minutes per host, or when the
  * plugin version changes.
  */
-export const recordPluginInvocation = (runtimeHome: string, host: HookHost, pluginVersion: string | null, now: Date = new Date()): void => {
+export const pluginInvocationMatches = (record: PluginInvocationRecord | null | undefined, hostHome: string): boolean =>
+	record?.pluginVersion === CROSSHEAD_HOST_PLUGIN_VERSION && record.hostHome === path.resolve(hostHome);
+
+export const recordPluginInvocation = (runtimeHome: string, host: HookHost, pluginVersion: string | null, hostHome: string, now: Date = new Date()): void => {
 	const previous = readPluginInvocation(runtimeHome, host);
-	if (previous && previous.pluginVersion === pluginVersion && now.getTime() - Date.parse(previous.lastSeenAt) < 10 * 60_000) return;
+	const resolvedHome = path.resolve(hostHome);
+	if (previous && previous.pluginVersion === pluginVersion && previous.hostHome === resolvedHome && now.getTime() - Date.parse(previous.lastSeenAt) < 10 * 60_000) return;
 	ensureRuntimeHomeLayout(runtimeHome);
 	const file = invocationFile(runtimeHome);
 	const records = parseJsonFile<Record<string, unknown> | null>(file, null) ?? {};
-	writeJsonFile(file, { ...records, [host]: { lastSeenAt: now.toISOString(), pluginVersion } });
+	writeJsonFile(file, { ...records, [host]: { lastSeenAt: now.toISOString(), pluginVersion, hostHome: resolvedHome } });
 };
 
 /**

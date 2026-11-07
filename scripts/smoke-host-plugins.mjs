@@ -17,13 +17,13 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, write
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { generateSecretKey, getPublicKey, nip19 } = require("nostr-tools");
-const persistence = require("/crosshead/dist/runtime/runtime-persistence.js");
-const spec = require("/crosshead/dist/runtime/host-hook-spec.js");
-
-const repo = "/crosshead";
+const repo = path.resolve(process.env.CROSSHEAD_SMOKE_REPO ?? fileURLToPath(new URL("..", import.meta.url)));
+const persistence = require(path.join(repo, "dist/runtime/runtime-persistence.js"));
+const spec = require(path.join(repo, "dist/runtime/host-hook-spec.js"));
 const root = process.env.CROSSHEAD_SMOKE_ROOT ?? "/test";
 const logDir = path.join(root, "logs");
 mkdirSync(logDir, { recursive: true });
@@ -142,7 +142,8 @@ const addMarketplaces = async (home) => {
 	await run("codex-plugin-add", home, "codex", ["plugin", "add", "crosshead@crosshead"]);
 	const list = await run("codex-plugin-list", home, "codex", ["plugin", "list"]);
 	assert.match(list.stdout, /\.agents\/plugins\/marketplace\.json/);
-	assert.match(list.stdout, /crosshead@crosshead\s+installed.*\/crosshead\/plugins\/codex/);
+	assert.match(list.stdout, /crosshead@crosshead\s+installed/);
+	assert(list.stdout.includes(path.join(repo, "plugins", "codex")), "Codex loaded the wrong plugin source");
 	const claudeList = JSON.parse((await run("claude-plugin-list", home, "claude", ["plugin", "list", "--json"])).stdout);
 	assert(claudeList.some((entry) => entry.id === "crosshead@crosshead" && entry.enabled === true), "Claude plugin not enabled");
 };

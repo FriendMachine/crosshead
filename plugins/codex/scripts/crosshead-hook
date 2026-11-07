@@ -47,4 +47,4 @@ if [ "$host" = codex ]; then
   CROSSHEAD_HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
   export CROSSHEAD_HOST_CODEX_HOME
 fi
-exec "$wrapper" "$event" --home "$home" --via plugin --plugin-version 1.0.0
+exec "$wrapper" "$event" --home "$home" --via plugin --plugin-version 1.0.1

@@ -399,7 +399,7 @@ export const runOnlyBotsCodexHookCli = async (
     if (viaPlugin) {
       // Proof that Codex runs (so the user trusted) the plugin hooks; migration waits for it.
       try {
-        recordPluginInvocation(runtimeHome, "codex", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null);
+        recordPluginInvocation(runtimeHome, "codex", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null, codexLoadedHome(resolveCodexHome(hostHome)));
       } catch {
         // A receipt is diagnostic only; never fail the hook over it.
       }
@@ -412,7 +412,10 @@ export const runOnlyBotsCodexHookCli = async (
     const decision = decideHookDispatch({
       viaPlugin,
       mode: normalizeHostHookMode(installedConfig.hookMode),
-      legacyHooksPresent: () => codexHooksFileHasLegacyHooks(loadedHooksFile, runtimeHome),
+      legacyHooksPresent: () => codexHooksFileHasLegacyHooks(loadedHooksFile, runtimeHome, {
+        event: eventName,
+        matcherValue: normalizedEventName.replace(/_/g, "") === "sessionstart" ? pickString(payload, ["source", "payload.source"]) ?? undefined : pickCompactionTrigger(payload) ?? undefined,
+      }),
     });
     if (decision === "skip-duplicate") return;
   }
