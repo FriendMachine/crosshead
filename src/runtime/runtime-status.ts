@@ -53,6 +53,7 @@ import type {
 	RuntimeDoctorReport,
 	RuntimeStatus,
 } from "./local-runtime";
+import { adapterConfigUsesPluginHooks } from "./host-plugin-mode";
 
 const isSessionFresh = (session: HostedSession | null): boolean => {
 	if (!session) {
@@ -114,12 +115,15 @@ export const evaluateAdapterAutomation = (adapter: RuntimeAdapterRecord): Runtim
 	const hasManagedFile = (predicate: (filePath: string) => boolean): boolean =>
 		[...managedFiles].some((filePath) => predicate(filePath));
 	const basename = (name: string) => (filePath: string): boolean => path.basename(filePath) === name;
+	// In plugin mode the host plugin supplies the hooks; the <host>_hooks doctor check verifies it.
+	const pluginMode = (configName: string): boolean =>
+		[...managedFiles].some((filePath) => path.basename(filePath) === configName && adapterConfigUsesPluginHooks(filePath));
 
 	if (adapter.name === "codex") {
 		const requirements = [
 			{ label: "repo-local codex launcher", ok: hasManagedFile(basename("codex")) },
 			{ label: "Codex hook wrapper", ok: (hasManagedFile(basename("crosshead-codex-hook")) || hasManagedFile(basename("onlybots-codex-hook"))) },
-			{ label: "Codex hooks.json", ok: hasManagedFile((filePath) => path.basename(filePath) === "hooks.json") },
+			{ label: "Codex hooks.json", ok: pluginMode("codex-adapter.json") || hasManagedFile((filePath) => path.basename(filePath) === "hooks.json") },
 		];
 		const missing = requirements.filter((entry) => !entry.ok).map((entry) => entry.label);
 		return {
@@ -129,7 +133,9 @@ export const evaluateAdapterAutomation = (adapter: RuntimeAdapterRecord): Runtim
 				adapter.status === "failed"
 					? `Codex automatic integration is broken: ${adapter.lastError ?? "adapter attach failed"}.`
 					: missing.length === 0
-						? "Codex automatic integration is healthy through the repo-local launcher and managed hooks."
+						? pluginMode("codex-adapter.json")
+							? "Codex automatic integration uses the Crosshead plugin's hooks (see codex_hooks)."
+							: "Codex automatic integration is healthy through the repo-local launcher and managed hooks."
 						: `Codex automatic integration is degraded; missing ${missing.join(", ")}.`,
 		};
 	}
@@ -140,7 +146,9 @@ export const evaluateAdapterAutomation = (adapter: RuntimeAdapterRecord): Runtim
 			{ label: "Claude hook wrapper", ok: (hasManagedFile(basename("crosshead-claude-code-hook")) || hasManagedFile(basename("onlybots-claude-code-hook"))) },
 			{
 				label: "project Claude settings hooks",
-				ok: hasManagedFile((filePath) => path.basename(filePath) === "settings.json" && filePath.includes(`${path.sep}.claude${path.sep}`)),
+				ok:
+					pluginMode("claude-code-adapter.json") ||
+					hasManagedFile((filePath) => path.basename(filePath) === "settings.json" && filePath.includes(`${path.sep}.claude${path.sep}`)),
 			},
 		];
 		const missing = requirements.filter((entry) => !entry.ok).map((entry) => entry.label);
@@ -151,7 +159,9 @@ export const evaluateAdapterAutomation = (adapter: RuntimeAdapterRecord): Runtim
 				adapter.status === "failed"
 					? `Claude Code automatic integration is broken: ${adapter.lastError ?? "adapter attach failed"}.`
 					: missing.length === 0
-						? "Claude Code automatic integration is healthy through repo-local project hooks and the managed claude launcher."
+						? pluginMode("claude-code-adapter.json")
+							? "Claude Code automatic integration uses the Crosshead plugin's hooks (see claude_code_hooks)."
+							: "Claude Code automatic integration is healthy through repo-local project hooks and the managed claude launcher."
 						: `Claude Code automatic integration is degraded; missing ${missing.join(", ")}.`,
 		};
 	}

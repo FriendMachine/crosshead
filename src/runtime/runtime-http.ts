@@ -2,6 +2,7 @@
 // socket lifecycle; every route delegates to a daemon method, so this module is a
 // routing layer over the daemon's public surface.
 
+import path from "path";
 import { IncomingMessage, ServerResponse } from "http";
 
 import type { RuntimeLifecycleEventRequest } from "./lifecycle-engine";
@@ -212,6 +213,8 @@ export const handleRuntimeDaemonRequest = async (
 			sendJson(response, 200, {
 				ok: true,
 				coreVersion: loadRuntimeConfig(paths).coreVersion,
+				// The release this daemon runs, so quickstart can spot a daemon left on an older install.
+				daemonScriptPath: path.join(__dirname, "daemon.js"),
 				ownerId: owner.ownerId,
 				ownerProcess: owner.ownerProcess,
 			});

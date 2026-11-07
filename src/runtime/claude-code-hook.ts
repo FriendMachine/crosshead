@@ -5,7 +5,18 @@ import path from "path";
 import { captureHotFinding } from "./hot-continuity";
 import { readLastAssistantMessage } from "./hook-transcript";
 
-import { ClaudeCodeRuntimeAdapter } from "./claude-code-adapter";
+import { ClaudeCodeRuntimeAdapter, findLegacyClaudeHookFiles, loadClaudeCodeAdapterConfig } from "./claude-code-adapter";
+import { pluginSetupHint } from "./host-hook-spec";
+import {
+  claudeSessionProjectDir,
+  claudeUserConfigDir,
+  decideHookDispatch,
+  isPluginHookInvocation,
+  normalizeHostHookMode,
+  recordPluginInvocation,
+  resolvePluginHostHome,
+  writePluginSetupNotice,
+} from "./host-plugin-mode";
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
 import { writeJsonFile } from "./runtime-persistence";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -360,10 +371,46 @@ export const runOnlyBotsClaudeCodeHookCli = async (
   const eventName = positionals[0] ?? "help";
   const normalizedEventName = eventName.toLowerCase();
   const runtimeHome = resolveRuntimeHome(typeof flags.home === "string" ? flags.home : undefined);
-  const hostHome = typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined;
+  const viaPlugin = isPluginHookInvocation(flags);
+  const hostHome =
+    typeof flags["claude-home"] === "string" ? flags["claude-home"] : viaPlugin ? resolvePluginHostHome("claude-code", runtimeHome) : undefined;
   const payload = readStdinJson(stdinOverride);
   const workspaceRoot = resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = resolveHookWorkspaceId(payload, flags, workspaceRoot);
+  if (eventName !== "help") {
+    let installedConfig: ReturnType<typeof loadClaudeCodeAdapterConfig> | null = null;
+    try {
+      installedConfig = loadClaudeCodeAdapterConfig(runtimeHome, hostHome);
+    } catch (error) {
+      if (!viaPlugin) throw error;
+    }
+    if (!installedConfig) {
+      // Plugin installed before setup: tell the user how to finish, never fail the session.
+      if (normalizedEventName === "sessionstart" || normalizedEventName === "session_start") {
+        writePluginSetupNotice(pluginSetupHint("claude-code"));
+      }
+      return;
+    }
+    if (viaPlugin) {
+      try {
+        recordPluginInvocation(runtimeHome, "claude-code", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null, claudeUserConfigDir());
+      } catch {
+        // A receipt is diagnostic only; never fail the hook over it.
+      }
+    }
+    // Exactly the settings files Claude Code loaded for this session: the user
+    // settings and the session's project directory (CLAUDE_PROJECT_DIR).
+    const decision = decideHookDispatch({
+      viaPlugin,
+      mode: normalizeHostHookMode(installedConfig.hookMode),
+      legacyHooksPresent: () =>
+        findLegacyClaudeHookFiles(claudeUserConfigDir(), claudeSessionProjectDir(workspaceRoot), runtimeHome, {
+          event: eventName,
+          matcherValue: normalizedEventName.replace(/_/g, "") === "sessionstart" ? pickString(payload, ["source", "payload.source"]) ?? undefined : pickCompactionTrigger(payload) ?? undefined,
+        }).length > 0,
+    });
+    if (decision === "skip-duplicate") return;
+  }
   const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
     home: runtimeHome,
     hostHome,

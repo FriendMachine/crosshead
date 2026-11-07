@@ -59,6 +59,21 @@ import {
   type HostAdapterTurnPrepareResult,
 } from "./host-adapter-base";
 import { resolveClaudeCodeBinaryPath, resolveClaudeCodeHostHome } from "./runtime-env";
+import { PLUGIN_DISPATCH_CAPABILITY, renderHostHookGroups, type HostHookEvent } from "./host-hook-spec";
+import {
+  claudeLoadedSettingsFiles,
+  countMatchingHookCommands,
+  describeHookMode,
+  detectClaudeCodePlugin,
+  normalizeHookModeRequest,
+  normalizeHostHookMode,
+  parseHookModeFlag,
+  readSettingsForInspection,
+  resolveHostHookMode,
+  type HookModeRequest,
+  type HostHookMode,
+  type PluginDetection,
+} from "./host-plugin-mode";
 import type {
   HandoffCapsule,
   HandoffInspection,
@@ -81,6 +96,10 @@ export type ClaudeCodeAdapterConfig = {
   workspaceRoot: string;
   profileName: string;
   claudeBinary: string;
+  /** Absent in configs written before host plugins; treated as "settings". */
+  hookMode?: HostHookMode;
+  /** Explicit `--hook-mode` of the last install; reinstalls without the flag repeat it. */
+  hookModeRequest?: HostHookMode | null;
   installedAt: string;
   updatedAt: string;
 };
@@ -107,12 +126,19 @@ export type ClaudeCodeAdapterInstallOptions = {
   bridgeScriptPath: string;
   hookScriptPath: string;
   claudeBinary?: string;
+  /** "auto" (default) selects "plugin" when the Crosshead Claude Code plugin is enabled at user scope. */
+  hookMode?: HookModeRequest;
 };
 
 export type ClaudeCodeAdapterInstallResult = {
   adapter: RuntimeAdapterRecord;
   config: ClaudeCodeAdapterConfig;
   managedFiles: string[];
+  pluginDetection: PluginDetection | null;
+  /** Settings files whose legacy Crosshead hooks were removed because the plugin supplies them. */
+  migratedFiles: string[];
+  /** Explanation when plugin hooks were requested but plugin mode could not be used. */
+  hookModeNote: string | null;
 };
 
 export type ClaudeCodeAdapterUninstallOptions = {
@@ -273,8 +299,8 @@ const projectSettingsFile = (workspaceRoot: string): string => path.join(workspa
 const isManagedContent = (filePath: string): boolean =>
   existsSync(filePath) && readFileSync(filePath, "utf8").includes(CLAUDE_CODE_ADAPTER_MARKER);
 
-const writeManagedExecutable = (filePath: string, scriptPath: string, runtimeHome: string): void => {
-  writeManagedFile(filePath, buildWrapperScript(scriptPath), runtimeHome);
+const writeManagedExecutable = (filePath: string, scriptPath: string, runtimeHome: string, marker?: string): void => {
+  writeManagedFile(filePath, buildWrapperScript(scriptPath, undefined, marker), runtimeHome);
   chmodSync(filePath, 0o755);
 };
 
@@ -307,6 +333,8 @@ const buildClaudeCodeAdapterConfig = (options: {
   profileName: string;
   adapterVersion: string;
   claudeBinary: string;
+  hookMode: HostHookMode;
+  hookModeRequest: HostHookMode | null;
 }): ClaudeCodeAdapterConfig => ({
   marker: CLAUDE_CODE_MANAGED_CONFIG_MARKER,
   adapterName: "claude-code",
@@ -316,13 +344,15 @@ const buildClaudeCodeAdapterConfig = (options: {
   workspaceRoot: options.workspaceRoot,
   profileName: options.profileName,
   claudeBinary: options.claudeBinary,
+  hookMode: options.hookMode,
+  hookModeRequest: options.hookModeRequest,
   installedAt: nowIso(),
   updatedAt: nowIso(),
 });
 
 const buildHookCommand = (
   hookWrapperFile: string,
-  eventName: "SessionStart" | "PreCompact" | "PostCompact" | "UserPromptSubmit" | "Stop",
+  eventName: HostHookEvent,
   config: ClaudeCodeAdapterConfig
 ): string =>
   [
@@ -335,6 +365,11 @@ const buildHookCommand = (
   ].join(" ");
 
 const CLAUDE_HOOK_MARKER = "crosshead-claude-code-hook";
+
+/** True for a hook command an installer-written (settings-mode) Crosshead registration uses. */
+const isLegacyClaudeHookCommand = (command: string | undefined, hookWrapperPath: string): boolean =>
+  isManagedHookCommand(command, hookWrapperPath, CLAUDE_HOOK_MARKER) ||
+  isManagedHookCommand(command, path.join(path.dirname(hookWrapperPath), "onlybots-claude-code-hook"), "onlybots-claude-code-hook");
 
 const readClaudeSettingsConfig = (filePath: string): ClaudeSettingsConfig => {
   if (!existsSync(filePath)) {
@@ -358,11 +393,13 @@ const filterManagedClaudeHooks = (existing: ClaudeSettingsConfig, hookWrapperPat
 
   const filteredHooks: ClaudeHooksConfig = {};
   for (const [eventName, matcherGroups] of Object.entries(hooks)) {
-    const remainingGroups = (matcherGroups ?? [])
+    const remainingGroups = (Array.isArray(matcherGroups) ? matcherGroups : [])
       .filter((group): group is ClaudeHookMatcherGroup => !!group && typeof group === "object" && !Array.isArray(group))
       .map((group) => ({
         ...group,
-        hooks: (group.hooks ?? []).filter((hook) => !isManagedHookCommand(hook.command, hookWrapperPath, CLAUDE_HOOK_MARKER) && !isManagedHookCommand(hook.command, path.join(path.dirname(hookWrapperPath), "onlybots-claude-code-hook"), "onlybots-claude-code-hook")),
+        hooks: (Array.isArray(group.hooks) ? group.hooks : []).filter(
+          (hook) => !(hook && typeof hook === "object" && isLegacyClaudeHookCommand(hook.command, hookWrapperPath))
+        ),
       }))
       .filter((group) => group.hooks.length > 0);
     if (remainingGroups.length > 0) {
@@ -385,43 +422,9 @@ const renderClaudeSettingsConfig = (
 ): string => {
 	const next = filterManagedClaudeHooks(existing, adapterPaths.hookWrapperFile);
 	const hooks: ClaudeHooksConfig = next.hooks && typeof next.hooks === "object" && !Array.isArray(next.hooks) ? next.hooks : {};
-	const managedHooks: Array<
-		readonly ["SessionStart" | "PreCompact" | "PostCompact" | "UserPromptSubmit" | "Stop", ClaudeHookMatcherGroup]
-	> = [
-		[
-			"SessionStart",
-			{
-				matcher: "startup|resume|compact",
-				hooks: [{ type: "command", command: buildHookCommand(adapterPaths.hookWrapperFile, "SessionStart", config) }],
-			},
-		],
-		[
-			"PreCompact",
-			{
-				matcher: "manual|auto",
-				hooks: [{ type: "command", command: buildHookCommand(adapterPaths.hookWrapperFile, "PreCompact", config) }],
-			},
-		],
-		[
-			"PostCompact",
-			{
-				matcher: "manual|auto",
-				hooks: [{ type: "command", command: buildHookCommand(adapterPaths.hookWrapperFile, "PostCompact", config) }],
-			},
-		],
-		[
-			"UserPromptSubmit",
-      {
-        hooks: [{ type: "command", command: buildHookCommand(adapterPaths.hookWrapperFile, "UserPromptSubmit", config) }],
-      },
-    ],
-    [
-      "Stop",
-      {
-        hooks: [{ type: "command", command: buildHookCommand(adapterPaths.hookWrapperFile, "Stop", config) }],
-      },
-    ],
-  ];
+	const managedHooks = renderHostHookGroups("claude-code", (eventName) =>
+		buildHookCommand(adapterPaths.hookWrapperFile, eventName, config)
+	);
   for (const [eventName, group] of managedHooks) {
     const existingGroups = hooks[eventName] ?? [];
     hooks[eventName] = [...existingGroups, group];
@@ -586,6 +589,33 @@ export const claudeCodeContinuityTranslationContract: ContinuityTranslationContr
   reportFidelity: (translation) => translation.fidelity,
 };
 
+const legacyHookWrapper = (runtimeHome: string): string => path.join(runtimeHome, "bin", "crosshead-claude-code-hook");
+
+/** Number of installer-written Crosshead hook handlers in a Claude Code settings file. */
+export const countLegacyClaudeHookCommands = (filePath: string, runtimeHome: string, match?: import("./host-plugin-mode").HookMatch): number =>
+  countMatchingHookCommands(readSettingsForInspection(filePath), (command) => isLegacyClaudeHookCommand(command, legacyHookWrapper(runtimeHome)), match);
+
+/**
+ * Settings files Claude Code loads for a session in `projectDir` (user settings in
+ * `userConfigDir`) that still register installer-written Crosshead hooks.
+ */
+export const findLegacyClaudeHookFiles = (userConfigDir: string, projectDir: string, runtimeHome: string, match?: import("./host-plugin-mode").HookMatch): string[] =>
+  claudeLoadedSettingsFiles(userConfigDir, projectDir)
+    .map((source) => source.file)
+    .filter((filePath) => countLegacyClaudeHookCommands(filePath, runtimeHome, match) > 0);
+
+/**
+ * Removes installer-written Crosshead hooks from a settings file, keeping every
+ * other key and hook. A file left with nothing is rewritten as `{}`, never
+ * deleted, so a tracked project file stays in place.
+ */
+const removeLegacyClaudeHooks = (filePath: string, managedRoot: string, runtimeHome: string): boolean => {
+  if (countLegacyClaudeHookCommands(filePath, runtimeHome) === 0) return false;
+  const filtered = filterManagedClaudeHooks(readClaudeSettingsConfig(filePath), legacyHookWrapper(runtimeHome));
+  writeManagedFile(filePath, `${JSON.stringify(filtered, null, 2)}\n`, managedRoot);
+  return true;
+};
+
 export const installClaudeCodeAdapter = async (
   options: ClaudeCodeAdapterInstallOptions
 ): Promise<ClaudeCodeAdapterInstallResult> => {
@@ -596,6 +626,22 @@ export const installClaudeCodeAdapter = async (
   const profileName = options.profileName ?? "default";
   const adapterVersion = options.adapterVersion ?? ONLYBOTS_CLAUDE_CODE_ADAPTER_VERSION;
   const claudeBinary = resolveClaudeCodeBinary(runtimeLayout.home, options.claudeBinary);
+  const previousConfig = existsSync(adapterPaths.configFile)
+    ? (() => {
+        try {
+          return loadClaudeCodeAdapterConfig(runtimeLayout.home, hostHome);
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+  // Plugin mode needs the plugin enabled in the user settings of this Claude config dir.
+  const resolution = resolveHostHookMode(
+    options.hookMode,
+    () => detectClaudeCodePlugin(hostHome, workspaceRoot),
+    normalizeHookModeRequest(previousConfig?.hookModeRequest)
+  );
+  const { mode: hookMode, detection: pluginDetection } = resolution;
 
   const config = buildClaudeCodeAdapterConfig({
     runtimeHome: runtimeLayout.home,
@@ -604,29 +650,62 @@ export const installClaudeCodeAdapter = async (
     profileName,
     adapterVersion,
     claudeBinary,
+    hookMode,
+    hookModeRequest: resolution.request,
   });
 
-  assertManagedFilePath(adapterPaths.projectSettingsFile, workspaceRoot);
+  // Plugin mode retires legacy entries this runtime wrote (in this workspace and
+  // the previously configured one) so that no event is handled twice.
+  const legacyRoots = [workspaceRoot, previousConfig?.workspaceRoot].filter(
+    (root, index, all): root is string => typeof root === "string" && all.indexOf(root) === index
+  );
+  const migrationTargets =
+    hookMode === "plugin"
+      ? legacyRoots
+          .map((root) => ({ root, filePath: projectSettingsFile(root) }))
+          .filter(({ filePath }) => countLegacyClaudeHookCommands(filePath, runtimeLayout.home) > 0)
+      : [];
+  // Check every host file this install changes before writing any of them. A
+  // symlinked settings file is refused rather than followed or half-migrated.
+  if (hookMode === "settings" && resolution.writeLegacyHooks) assertManagedFilePath(adapterPaths.projectSettingsFile, workspaceRoot);
+  for (const { root, filePath } of migrationTargets) {
+    try {
+      assertManagedFilePath(filePath, root);
+    } catch (error) {
+      throw new Error(
+        `Refusing to migrate Crosshead hooks in ${filePath}: ${error instanceof Error ? error.message : String(error)}. No files were changed; remove the Crosshead hooks from it by hand or rerun with --hook-mode settings.`
+      );
+    }
+  }
+  assertManagedFilePath(adapterPaths.configFile, hostHome);
   writeManagedFile(
     adapterPaths.configFile,
     `${CLAUDE_CODE_ADAPTER_MARKER}\n${JSON.stringify(config, null, 2)}\n`,
     hostHome
   );
-  writeManagedFile(
-    adapterPaths.projectSettingsFile,
-    renderClaudeSettingsConfig(readClaudeSettingsConfig(adapterPaths.projectSettingsFile), adapterPaths, config),
-    workspaceRoot
-  );
+  const migratedFiles: string[] = [];
+  for (const { root, filePath } of migrationTargets) {
+    if (removeLegacyClaudeHooks(filePath, root, runtimeLayout.home)) migratedFiles.push(filePath);
+  }
+  if (hookMode === "settings" && resolution.writeLegacyHooks) {
+    writeManagedFile(
+      adapterPaths.projectSettingsFile,
+      renderClaudeSettingsConfig(readClaudeSettingsConfig(adapterPaths.projectSettingsFile), adapterPaths, config),
+      workspaceRoot
+    );
+  }
   writeManagedExecutable(adapterPaths.wrapperFile, options.bridgeScriptPath, runtimeLayout.home);
-  writeManagedExecutable(adapterPaths.hookWrapperFile, options.hookScriptPath, runtimeLayout.home);
+  writeManagedExecutable(adapterPaths.hookWrapperFile, options.hookScriptPath, runtimeLayout.home, PLUGIN_DISPATCH_CAPABILITY);
   writeManagedExecutable(path.join(config.runtimeHome, "bin", "onlybots-claude-code"), options.bridgeScriptPath, runtimeLayout.home);
-  writeManagedExecutable(path.join(config.runtimeHome, "bin", "onlybots-claude-code-hook"), options.hookScriptPath, runtimeLayout.home);
+  writeManagedExecutable(path.join(config.runtimeHome, "bin", "onlybots-claude-code-hook"), options.hookScriptPath, runtimeLayout.home, PLUGIN_DISPATCH_CAPABILITY);
   writeManagedFile(adapterPaths.claudeLaunchWrapperFile, renderClaudeLaunchWrapper(config), runtimeLayout.home);
   chmodSync(adapterPaths.claudeLaunchWrapperFile, 0o755);
 
   const managedFiles = [
     adapterPaths.configFile,
-    adapterPaths.projectSettingsFile,
+    ...(hookMode === "settings" && (resolution.writeLegacyHooks || countLegacyClaudeHookCommands(adapterPaths.projectSettingsFile, runtimeLayout.home) > 0)
+      ? [adapterPaths.projectSettingsFile]
+      : []),
     adapterPaths.wrapperFile,
     adapterPaths.hookWrapperFile,
     path.join(config.runtimeHome, "bin", "onlybots-claude-code"),
@@ -650,6 +729,9 @@ export const installClaudeCodeAdapter = async (
     adapter: existingRecord,
     config,
     managedFiles,
+    pluginDetection,
+    migratedFiles,
+    hookModeNote: resolution.note,
   };
 };
 
@@ -675,13 +757,8 @@ export const uninstallClaudeCodeAdapter = async (
       continue;
     }
     if (filePath === projectSettingsFile(workspaceRoot)) {
-      const filtered = filterManagedClaudeHooks(readClaudeSettingsConfig(filePath), path.join(runtimeHome, "bin", "crosshead-claude-code-hook"));
-      if (Object.keys(filtered).length > 0) {
-		writeManagedFile(filePath, `${JSON.stringify(filtered, null, 2)}\n`, workspaceRoot);
-      } else {
-        rmSync(filePath, { force: true });
-        removed.push(filePath);
-      }
+      // Never delete the settings file (it may be tracked); leave it cleaned, or `{}`.
+      removeLegacyClaudeHooks(filePath, workspaceRoot, runtimeHome);
       continue;
     }
     if (["onlybots-claude-code", "onlybots-claude-code-hook", "crosshead-claude-code", "crosshead-claude-code-hook", "claude"].includes(path.basename(filePath)) || isManagedContent(filePath)) {
@@ -759,7 +836,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       hostHome: input.hostHome ?? this.config.hostHome,
       managedFiles: [
         configFile(this.config.hostHome),
-        projectSettingsFile(this.config.workspaceRoot),
+        ...(normalizeHostHookMode(this.config.hookMode) === "settings" ? [projectSettingsFile(this.config.workspaceRoot)] : []),
         path.join(this.config.runtimeHome, "bin", "crosshead-claude-code"),
         path.join(this.config.runtimeHome, "bin", "crosshead-claude-code-hook"),
         path.join(this.config.runtimeHome, "bin", "onlybots-claude-code"),
@@ -1289,6 +1366,7 @@ export const installClaudeCodeFromCli = async (
     bridgeScriptPath,
     hookScriptPath,
     claudeBinary: typeof flags["claude-bin"] === "string" ? flags["claude-bin"] : undefined,
+    hookMode: parseHookModeFlag(flags["hook-mode"]),
   });
   return [
     `Installed Claude Code adapter ${result.adapter.version}`,
@@ -1296,6 +1374,9 @@ export const installClaudeCodeFromCli = async (
     `claude_home: ${result.config.hostHome}`,
     `workspace_root: ${result.config.workspaceRoot}`,
     `claude_bin: ${result.config.claudeBinary}`,
+    `hook_mode: ${describeHookMode(result.config.hookMode ?? "settings", result.pluginDetection)}`,
+    ...(result.hookModeNote ? [`hook_mode_note: ${result.hookModeNote}`] : []),
+    ...result.migratedFiles.map((filePath) => `migrated_legacy_hooks: ${filePath}`),
   ].join("\n");
 };
 

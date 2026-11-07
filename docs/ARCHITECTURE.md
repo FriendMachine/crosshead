@@ -27,6 +27,12 @@ Rules, enforced by `npm run check:boundary` and `scripts/verify-release.mjs`:
 Code that only the hosted service needs, such as recall heuristics, does not
 belong here. Code both sides need lives here; the hosted service imports it.
 
+The Claude Code and Codex plugins (`plugins/`, `.claude-plugin/`,
+`.agents/plugins/`) are generated from `src/runtime/host-hook-spec.ts` and are
+installed from this repository by the hosts, not from the release tarball. They
+only run the installed runtime's hook entrypoints; see
+[HOST-PLUGINS.md](HOST-PLUGINS.md).
+
 ## Operator extensions
 
 FriendMachine's local operator runs a superset build from the hosted

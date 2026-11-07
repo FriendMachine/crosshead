@@ -51,33 +51,52 @@ export const daemonOwnerIsLive = (state: RuntimeDaemonState | null): boolean => 
 	catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
 };
 
-/** A bounded health response belongs to the recorded owner, not just a port. */
-export const probeRuntimeDaemonHealth = async (state: RuntimeDaemonState, timeoutMs = 1_000): Promise<boolean> => {
-	if (state.status !== "running" || !state.port || !daemonOwnerIsLive(state)) return false;
+export type RuntimeDaemonHealth = {
+	coreVersion?: string;
+	/** Entry script of the running daemon (absent in daemons that predate it). */
+	daemonScriptPath?: string;
+};
+
+/**
+ * Authenticated health of the recorded owner, or null when it is not the live
+ * recorded owner. A bounded health response belongs to the owner, not just a port.
+ */
+export const readRuntimeDaemonHealth = async (state: RuntimeDaemonState, timeoutMs = 1_000): Promise<RuntimeDaemonHealth | null> => {
+	if (state.status !== "running" || !state.port || !daemonOwnerIsLive(state)) return null;
 	try {
 		const response = await fetch(`http://127.0.0.1:${state.port}/health`, {
 			redirect: "error", signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
 			headers: { "x-onlybots-local-token": state.controlToken },
 		});
-		if (!response.ok) return false;
-		if (!state.ownerId) return true; // Read-only compatibility for legacy runtimes.
+		if (!response.ok) return null;
 		const reader = response.body?.getReader();
-		if (!reader) return false;
+		if (!reader) return state.ownerId ? null : {};
 		const chunks: Uint8Array[] = [];
 		let bytes = 0;
 		while (true) {
 			const chunk = await reader.read();
 			if (chunk.done) break;
 			bytes += chunk.value.byteLength;
-			if (bytes > 4_096) { await reader.cancel(); return false; }
+			if (bytes > 4_096) { await reader.cancel(); return null; }
 			chunks.push(chunk.value);
 		}
-		const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { ownerId?: string; ownerProcess?: HostedControllerProcess };
+		let body: { ownerId?: string; ownerProcess?: HostedControllerProcess; coreVersion?: unknown; daemonScriptPath?: unknown };
+		try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+		catch { if (!state.ownerId) return {}; return null; }
+		const health: RuntimeDaemonHealth = {
+			...(typeof body.coreVersion === "string" ? { coreVersion: body.coreVersion } : {}),
+			...(typeof body.daemonScriptPath === "string" ? { daemonScriptPath: body.daemonScriptPath } : {}),
+		};
+		if (!state.ownerId) return health; // Read-only compatibility for legacy runtimes.
 		return body.ownerId === state.ownerId && body.ownerProcess?.pid === state.ownerProcess?.pid &&
 			body.ownerProcess?.startedAtTicks === state.ownerProcess?.startedAtTicks &&
-			body.ownerProcess?.bootId === state.ownerProcess?.bootId && daemonOwnerIsLive(state);
-	} catch { return false; }
+			body.ownerProcess?.bootId === state.ownerProcess?.bootId && daemonOwnerIsLive(state) ? health : null;
+	} catch { return null; }
 };
+
+/** A bounded health response belongs to the recorded owner, not just a port. */
+export const probeRuntimeDaemonHealth = async (state: RuntimeDaemonState, timeoutMs = 1_000): Promise<boolean> =>
+	(await readRuntimeDaemonHealth(state, timeoutMs)) !== null;
 
 export class RuntimeDaemonOwnership {
 	readonly ownerId = randomUUID();

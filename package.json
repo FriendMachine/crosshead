@@ -1,6 +1,6 @@
 {
   "name": "@crosshead/runtime",
-  "version": "0.5.0-alpha.8",
+  "version": "0.5.0-alpha.9",
   "description": "Crosshead local runtime: persistent memory for Claude Code, Codex, Pi, Hermes and OpenCode. CLI, daemon, host adapters and hooks.",
   "license": "Apache-2.0",
   "private": true,
@@ -24,6 +24,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check:boundary": "node scripts/check-boundary.mjs",
+    "plugins:generate": "node scripts/host-plugins.mjs",
+    "plugins:check": "node scripts/host-plugins.mjs --check",
     "release:build": "npm run build && node scripts/build-release.mjs",
     "release:verify": "node scripts/verify-release.mjs"
   },

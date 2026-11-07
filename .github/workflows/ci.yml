@@ -33,6 +33,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run check:boundary
       - run: npm run build
+      - run: npm run plugins:check
       - run: npm test
 
   release-build:
