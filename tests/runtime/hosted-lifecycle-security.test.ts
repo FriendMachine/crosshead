@@ -189,7 +189,16 @@ describe("hosted lifecycle prompt boundary", () => {
 			failure: { errorClass: "timeout" },
 			warning: "may still settle",
 		},
+		{
+			label: "an unacknowledged paid commit",
+			contextPack: async () => jsonResponse({ error: { code: "paid_operation_commit_unknown", message: "uncertain", details: { retry_with_same_key: true } } }, 503),
+			failure: { errorClass: "http", status: 503, code: "paid_operation_commit_unknown" },
+			warning: "same idempotency key",
+		},
 	])("records why bounded recall fell back to free hot memory after $label", async ({ contextPack, failure, warning }) => {
+		// Local-first sessions deliberately skip paid automatic recall. Exercise the
+		// still-supported hosted path explicitly rather than depending on defaults.
+		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "false");
 		const signer = identity();
 		const home = mkdtempSync(path.join(os.tmpdir(), "crosshead-bounded-fallback-"));
 		homes.push(home);
