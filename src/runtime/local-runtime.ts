@@ -1,3 +1,4 @@
+import { parsePrivateMemoryErasureChallenge, signPrivateMemoryErasureChallenge } from "./erasure-proof";
 import { getHotSyncManager, hotSyncEnabled, stopHotSyncManagers } from "./hot-sync-manager";
 import { shellQuote, writeManagedFile } from "./adapter-utils";
 import { renderAgentMarkText } from "../protocol/agent-mark";
@@ -2579,6 +2580,17 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const signature = Buffer.from(schnorr.sign(new TextEncoder().encode(text), decoded.data)).toString("hex");
 		writeRuntimeLog(this.paths, "console.challenge_signed", { profileName: resolvedProfileName, kind: attachNpub ? "organization_attach" : "npub_link" });
 		return { npub: profile.npub, signature, profileName: resolvedProfileName };
+	}
+
+	signDeletionChallenge(challenge: string, options: { profileName?: string; confirmation?: string } = {}) {
+		if (options.confirmation !== "erase-private-memory") throw new Error("Requires --confirm erase-private-memory. This authorizes hosted private-memory deletion and permanently disables this cloud identity; local files remain on your machine.");
+		const parsed = parsePrivateMemoryErasureChallenge(challenge);
+		const profileName = options.profileName ?? this.profileNameForNpub(parsed.npub) ?? loadRuntimeConfig(this.paths).defaultProfile;
+		if (!profileName) throw new Error("No matching runtime profile is configured");
+		const {profile,secret} = this.loadProfileClient(profileName);
+		const proof = signPrivateMemoryErasureChallenge(parsed,profile,secret.nsec);
+		writeRuntimeLog(this.paths,"private_memory.erasure_proof_signed",{profileName});
+		return proof;
 	}
 
 	async createBillingCheckout(request: Record<string, unknown>, profileName?: string): Promise<Record<string, unknown>> {

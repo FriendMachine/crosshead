@@ -12,6 +12,7 @@ const homes: string[] = [];
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
 	for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
 
@@ -139,6 +140,8 @@ describe("hosted lifecycle prompt boundary", () => {
 		["a successful hosted response", 200],
 		["a payment-required hosted response", 402],
 	] as const)("renders only client-verified hot memory after %s", async (_label, contextStatus) => {
+		// Exercise the explicit legacy opt-out path and its untrusted hosted responses.
+		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "false");
 		const signer = identity();
 		const home = mkdtempSync(path.join(os.tmpdir(), "crosshead-hosted-lifecycle-security-"));
 		homes.push(home);

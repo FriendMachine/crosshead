@@ -115,7 +115,7 @@ const decodeAuthChallenge = (input: {
   }
   if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || !Number.isFinite(responseExpiresAt) ||
       expiresAt !== responseExpiresAt || issuedAt > now + 30_000 || issuedAt < now - 5 * 60_000 ||
-      expiresAt <= now || expiresAt > now + 5 * 60_000 || expiresAt <= issuedAt) {
+      expiresAt <= now || expiresAt - issuedAt > 5 * 60_000 || expiresAt <= issuedAt) {
     throw new Error("Hosted auth challenge timestamps are invalid");
   }
   return bytes;

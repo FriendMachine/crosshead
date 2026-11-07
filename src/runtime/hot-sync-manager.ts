@@ -8,7 +8,7 @@ import { hotSyncName, HOT_SYNC_PROTOCOL_VERSION, HOT_SYNC_MAX_SCOPES, type HotSy
 import { workspaceHotScope } from "./workspace-hot-memory";
 import { hotSyncConflictIds, hotSyncSupersededIds } from "./hot-sync-signing";
 import { normalizeTaskEvidence } from "./task-evidence";
-export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
+export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === undefined || process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
 type Config = {
 	stateDir: string;
 	origin: string;
@@ -22,6 +22,7 @@ type Metadata = {
 	linked: Record<string, string>;
 	migrated: Record<string, string>;
 	mixedVersion: boolean;
+	recoverySnapshots?: string[];
 	lastDiscoveryAt?: string;
 	error?: string | null;
 };
@@ -49,7 +50,12 @@ export class HotSyncManager {
 	private failures = 0;
 	private inflight: Promise<void> | null = null;
 	private stopped = false;
+	private legacyQueueError: string | null = null;
 	private cursor = 0;
+	private nextCapabilities = 0;
+	private nextDiscovery = 0;
+	private nextLegacyCheck = 0;
+	private workspaceGeneration = 0;
 	private active = new Set<string>();
 	constructor(private readonly config: Config, client?: HostedOnlyBotsClient) {
 		this.namespace = createHmac("sha256", config.nsec).update(`crosshead-profile-v1\n${config.profileName.normalize("NFC")}`).digest("hex");
@@ -82,6 +88,8 @@ export class HotSyncManager {
 			catch { }
 		const id = this.digest(remote ? `git:${remote}` : `local:${raw}`);
 		this.metadata.workspaces[raw] = id;
+		this.nextLegacyCheck = 0;
+		this.workspaceGeneration++;
 		this.persist();
 		return id;
 	}
@@ -94,6 +102,8 @@ export class HotSyncManager {
 			throw new Error("Workspace already contains hot memory; reset its scopes before relinking");
 		this.metadata.workspaces[raw] = id;
 		this.metadata.linked[raw] = label;
+		this.nextLegacyCheck = 0;
+		this.workspaceGeneration++;
 		this.persist();
 		return { workspaceId: id, workspaceRoot: path.resolve(root) };
 	}
@@ -138,22 +148,66 @@ export class HotSyncManager {
 		if (!this.failures)
 			this.nextSync = Math.min(this.nextSync, Date.now() + 1250);
 	}
+	private captureLegacy(raw: string, runtime: string, checkpoint: Record<string, unknown>): void {
+		const digest = createHash("sha256").update(JSON.stringify(checkpoint)).digest("hex");
+		const workspaceId = this.workspace(raw), scope = workspaceHotScope(runtime, workspaceId)!;
+		this.active.add(scope);
+		// Identical imports on two devices must have identical signed provenance.
+		this.replica(scope).capture({ id: `legacy:${digest}`, deviceId: `legacy:${digest}`, runtime, workspaceId, occurredAt: String(checkpoint.occurredAt), goal: String(checkpoint.goal).slice(0, 2000), summary: String(checkpoint.summary).slice(0, 6000), evidence: normalizeTaskEvidence(checkpoint.evidence) ?? undefined });
+		this.persist();
+	}
+	/** Import a durable pre-sync queue snapshot before allowing any new upload.
+	 * Stable IDs make an interrupted import safe to repeat before removing its row. */
+	setLegacyQueueError(error: string | null): void { this.legacyQueueError = error; }
+	importQueuedLegacy(state: Record<string, unknown>, fallbackRuntime: string, fallbackWorkspace: string | null): void {
+		const raw = typeof state.workspaceId === "string" ? state.workspaceId : fallbackWorkspace;
+		if (!raw) throw new Error("Queued hot memory has no workspace; retain it for recovery");
+		const runtime = typeof state.runtime === "string" ? state.runtime : fallbackRuntime;
+		const scope = workspaceHotScope(runtime, this.workspace(raw))!;
+		const replica = this.replica(scope).inspect();
+		// A legacy queue has no reset epoch. Preserve ambiguous snapshots for
+		// explicit recovery rather than silently discarding or resurrecting them.
+		if (replica.pendingReset || replica.base.document.epoch > 0)
+			throw new Error("Queued legacy hot memory needs review after a reset");
+		if (!Array.isArray(state.continuityCheckpoints) || !state.continuityCheckpoints.length)
+			throw new Error("Queued hot memory has no checkpoints; retain it for recovery");
+		// An undiscovered remote reset can discard epoch-zero pending captures.
+		// Retain the exact original locally even after the old queue row is removed.
+		const digest = createHash("sha256").update(JSON.stringify(state)).digest("hex");
+		const recoveryFile = `legacy-recovery-${this.namespace}-${digest}.json`;
+		if (!(this.metadata.recoverySnapshots ?? []).includes(recoveryFile)) {
+			if ((this.metadata.recoverySnapshots?.length ?? 0) >= 200) throw new Error("Legacy recovery snapshot limit reached");
+			writeHotSyncState(path.join(path.dirname(this.metadataFile), recoveryFile), state);
+			this.metadata.recoverySnapshots = [...(this.metadata.recoverySnapshots ?? []), recoveryFile];
+			this.persist();
+		}
+		for (const value of state.continuityCheckpoints) {
+			const checkpoint = value as Record<string, unknown>;
+			if (!checkpoint || typeof checkpoint.goal !== "string" || typeof checkpoint.summary !== "string" || typeof checkpoint.occurredAt !== "string" || !Number.isFinite(Date.parse(checkpoint.occurredAt)))
+				throw new Error("Invalid queued hot-memory checkpoint; retain it for recovery");
+			this.captureLegacy(raw, runtime, checkpoint);
+		}
+	}
 	reset(scope: string): Record<string, unknown> { this.replica(scope).resetLocally(); this.nextSync = 0; return { scope, status: "pending_reset", message: "Cleared on this machine. Other devices clear this scope when they next sync." }; }
 	status(): Record<string, unknown> {
 		const scopes = [...this.replicas].map(([scope, r]) => { const x = r.inspect(); return { scope, epoch: x.base.document.epoch, remoteRevision: x.revision, pending: x.pendingCount, pendingReset: x.pendingReset, oldestPendingAt: x.oldestPendingAt, lastSuccessfulSyncAt: x.lastSyncedAt, conflicts: x.local.document.checkpoints.filter(c => c.conflictOf || hotSyncConflictIds(x.local.document).has(c.id)).length, error: x.error ?? (x.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==scope) ? "workspace_boundary_invalid" : null), discardedByReset: x.discardedByReset }; });
-		return { enabled: true, initialSyncPending: !this.metadata.lastDiscoveryAt, lastSuccessfulDiscoveryAt: this.metadata.lastDiscoveryAt ?? null, pendingCount: scopes.reduce((n, s) => n + s.pending, 0), pendingScopes: scopes.filter(s => s.pending || s.pendingReset).length, state: this.metadata.error || this.metadata.mixedVersion || scopes.some(s=>s.conflicts>0 || s.error) ? "needs_attention" : scopes.some(s => s.pending || s.pendingReset) || !this.metadata.lastDiscoveryAt ? "saved_locally" : "synced", error: this.metadata.error, mixedVersion: this.metadata.mixedVersion, namespace: this.namespace, scopes };
+		return { enabled: true, initialSyncPending: !this.metadata.lastDiscoveryAt, lastSuccessfulDiscoveryAt: this.metadata.lastDiscoveryAt ?? null, pendingCount: scopes.reduce((n, s) => n + s.pending, 0), pendingScopes: scopes.filter(s => s.pending || s.pendingReset).length, state: this.legacyQueueError || this.metadata.error || this.metadata.mixedVersion || scopes.some(s=>s.conflicts>0 || s.error || s.discardedByReset>0) ? "needs_attention" : scopes.some(s => s.pending || s.pendingReset) || !this.metadata.lastDiscoveryAt ? "saved_locally" : "synced", error: this.legacyQueueError ?? this.metadata.error, mixedVersion: this.metadata.mixedVersion, legacyRecoverySnapshots: this.metadata.recoverySnapshots ?? [], namespace: this.namespace, scopes };
 	}
 	tick(): void {
 		if (this.stopped || this.inflight || Date.now() < this.nextSync)
 			return;
-		this.inflight = this.flush().catch(() => { }).finally(() => { this.inflight = null; });
+		this.inflight = this.flush(false).catch(() => { }).finally(() => { this.inflight = null; });
 	}
 	async stop(): Promise<void> { this.stopped = true; await this.inflight; }
-	async flush(): Promise<void> {
+	async flush(forceDiscovery = true): Promise<void> {
 		try {
+			if (forceDiscovery || Date.now() >= this.nextCapabilities) {
 			const capabilities = await this.client.hotSyncCapabilities();
 			if (capabilities.version !== HOT_SYNC_PROTOCOL_VERSION || capabilities.enabled !== true)
 				throw new Error("hot_sync_unavailable");
+			this.nextCapabilities = Date.now() + 300000;
+			}
+			if (forceDiscovery || Date.now() >= this.nextDiscovery) {
 			let cursor: string | null = null;
 			for (let page = 0; page < 2 && !this.stopped; page++) {
 				const listing = await this.client.listHotSync(this.namespace, cursor);
@@ -169,6 +223,9 @@ export class HotSyncManager {
 				if (!hotSyncName(listing.next_cursor) || listing.next_cursor === cursor)
 					throw new Error("Invalid scope cursor");
 				cursor = listing.next_cursor;
+			}
+			this.nextDiscovery = Date.now() + 30000;
+			this.metadata.lastDiscoveryAt = new Date().toISOString();
 			}
 			const scopes = [...this.replicas.entries()];
 			// Two slots favor active/dirty scopes, two rotate through discovery/recovery.
@@ -192,7 +249,15 @@ export class HotSyncManager {
 			}
 			this.cursor += 2;
 			let migrated = false;
-			try { await this.migrateLegacy(); migrated = true; } catch(error) { syncError ??= error; }
+			if (this.legacyQueueError) syncError ??= new Error(this.legacyQueueError);
+			else try {
+				if (forceDiscovery || Date.now() >= this.nextLegacyCheck) {
+					const generation = this.workspaceGeneration;
+					await this.migrateLegacy();
+					this.nextLegacyCheck = generation === this.workspaceGeneration ? Date.now() + 60000 : 0;
+				}
+				migrated = true;
+			} catch(error) { syncError ??= error; }
 			// A failed import must not let a first upload create the revision that
 			// would cause the next migration attempt to skip legacy history.
 			if (migrated) for (const replica of selected) {
@@ -205,7 +270,6 @@ export class HotSyncManager {
 			if(syncError)throw syncError;
 			this.failures = 0;
 			this.metadata.error = null;
-			this.metadata.lastDiscoveryAt = new Date().toISOString();
 			this.persist();
 			this.nextSync = Date.now() + ([...this.replicas.values()].some(r => r.inspect().dirty) ? 1500 : 15000) + Math.random() * 500;
 		}
@@ -213,6 +277,7 @@ export class HotSyncManager {
 			this.failures++;
 			this.metadata.error = error instanceof HostedOnlyBotsRequestError ? error.code ?? `http_${error.status}` : "sync_unavailable";
 			this.persist();
+			if (error instanceof HostedOnlyBotsRequestError && [401, 426, 503].includes(error.status)) this.nextCapabilities = 0;
 			if (error instanceof HostedOnlyBotsRequestError && error.status === 401)
 				this.client.setSession(null);
 			this.nextSync = Date.now() + Math.max(error instanceof HostedOnlyBotsRequestError ? error.retryAfterMs : 0, Math.min(300000, 1000 * 2 ** Math.min(this.failures, 8))) + Math.random() * 1000;
@@ -252,12 +317,15 @@ export class HotSyncManager {
 			// Never let a legacy import repopulate or block an explicitly reset scope.
 			if(this.replica(scope).inspect().pendingReset)continue;
 			const remote = await this.client.readHotSync(this.namespace, scope);
+			// Linking can change the mapping while the cloud read is pending. Its
+			// absence/reset proof is valid only for the scope that was read.
+			if (workspaceHotScope(runtime, this.workspace(raw)) !== scope) continue;
 			if(this.replica(scope).inspect().pendingReset)continue;
 			if (remote.revision === 0 && remote.epoch === 0) {
 				for (const checkpoint of Array.isArray(state.continuityCheckpoints) ? state.continuityCheckpoints : []) {
 					if (typeof checkpoint.summary !== "string" || typeof checkpoint.goal !== "string" || !Number.isFinite(Date.parse(checkpoint.occurredAt)))
 						continue;
-					this.capture(scope, { id: `legacy:${createHash("sha256").update(JSON.stringify(checkpoint)).digest("hex")}`, runtime, workspaceId: raw, occurredAt: checkpoint.occurredAt, goal: checkpoint.goal.slice(0, 2000), summary: checkpoint.summary.slice(0, 6000), evidence: normalizeTaskEvidence(checkpoint.evidence) ?? undefined });
+					this.captureLegacy(raw, runtime, checkpoint);
 				}
 			}
 			this.metadata.migrated[key] = digest;
