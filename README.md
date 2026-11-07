@@ -136,10 +136,12 @@ remotely exploitable Brotli and HTTP client vulnerabilities).
 npm ci
 npm run typecheck
 npm run check:boundary
-npm run build        # tests spawn the compiled daemon and hooks
+npm test             # builds first; tests spawn the compiled daemon and hooks
 npm run plugins:check
-npm test
 ```
+
+`npm test` works after a clean checkout and `npm ci`; no separate build is needed.
+Run `npm run build` before invoking Vitest or the plugin checks directly.
 
 ## Releases
 
