@@ -1,16 +1,20 @@
 # Local hot memory with background sync
 
-The `feat/local-first-hot-memory` branch provides the opt-in implementation of
-hosted Task 159 / PRD 007. Enable `CROSSHEAD_HOT_SYNC_ENABLED=true` in the daemon's
-environment, with a server running migration 0034 and the same flag. Start with
-a disposable runtime home. This alpha candidate is not a published release.
+Local hot sync is the default beginning with v0.5.0-alpha.7. The server must
+run migration 0034 and enable `CROSSHEAD_HOT_SYNC_ENABLED=true`; participating
+devices use protocol 2. The daemon owns this decision. Set
+`CROSSHEAD_HOT_SYNC_ENABLED=false` in its environment only for an intentional
+rollback to the previous hosted hook path.
 
 ## What happens locally
 
 A completed lifecycle capture is signed and written atomically, with file and
 directory fsync, before it is acknowledged. Hooks read the verified local view;
 ordinary hot-context delivery does not wait for authentication or the cloud.
-Explicit paid recall remains a hosted operation. Local-only profiles retain
+Explicit paid recall remains a hosted operation. Ordinary hooks do not request
+billable context packs or reflection, and do not wait for hosted inbox/dream HUD
+refreshes. Archive uploads run outside the lifecycle mutation lock and cannot
+block local capture or hot sync. Local-only profiles retain
 their existing behavior.
 
 Pending checkpoints have a separate durable outbox. They survive restart,
@@ -75,6 +79,15 @@ continuity. Legacy writers use a separate endpoint and cannot overwrite the
 revisioned store. Unmapped remote workspaces remain inspectable until linked
 locally and never enter an unrelated workspace's prompt.
 
+Unsent legacy queue checkpoints are imported into the fsynced outbox before
+new uploads. Their exact original snapshots remain in private
+`legacy-recovery-*.json` files, listed by `legacyRecoverySnapshots` in sync
+status. These bounded recovery copies protect ambiguous work if first discovery
+reveals a reset on another machine. Unsupported snapshots and snapshots with a
+known reset remain queued for explicit recovery; they do not block other
+profiles' local hooks. Do not automatically re-upload recovery copies after a
+reset without deciding whether they predate the deletion.
+
 Deploy the server capability before releasing the client. If the server gate is
 disabled or the server is rolled back, leave the client gate enabled: local
 capture/read continues, pending uploads remain durable, and status reports the
@@ -90,8 +103,7 @@ Retry-After; and conflict withholding. The compiled daemon test uses SIGKILL
 between capture and read, then verifies Codex, Claude Code, and Pi context through
 its authenticated local API, including reset and ownership controls.
 
-This branch still requires public release and deployment validation before a
-launch: tagged artifacts, production installer/update/rollback checks, a real
+Each launch candidate requires public release and deployment validation: tagged artifacts, production installer/update/rollback checks, a real
 two-device production run, and authenticated production capacity measurements.
 Local test latency is development evidence, not a production capacity claim.
 
@@ -140,3 +152,21 @@ allowance before authentication (including invalid credentials) and a verified
 identity allowance after authentication; creating sessions cannot multiply it.
 These counters are per server process, as with the existing limiter; aggregate
 multi-instance capacity still requires deployment measurement.
+
+## Requesting hosted private-memory deletion
+
+Email `support@crosshead.sh` with the agent's public `npub`. Support sends a
+short-lived deletion challenge. Run the supplied command on the machine holding
+that identity:
+
+```sh
+crosshead sign-deletion-challenge '<challenge>' --confirm erase-private-memory --json
+```
+
+The CLI checks the challenge's purpose, identity, server and expiry against the
+local profile. Send the resulting signed proof to support; the private key stays
+on your machine. This authorizes deletion of that identity's hosted private
+memory across profiles and namespaces, and permanently disables the cloud
+identity so an old device cannot upload it again. Local files remain on your
+machines. Shared organizations, public publications and required financial
+records have separate ownership and retention rules.

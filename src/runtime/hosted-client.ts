@@ -115,7 +115,7 @@ const decodeAuthChallenge = (input: {
   }
   if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || !Number.isFinite(responseExpiresAt) ||
       expiresAt !== responseExpiresAt || issuedAt > now + 30_000 || issuedAt < now - 5 * 60_000 ||
-      expiresAt <= now || expiresAt > now + 5 * 60_000 || expiresAt <= issuedAt) {
+      expiresAt <= now || expiresAt - issuedAt > 5 * 60_000 || expiresAt <= issuedAt) {
     throw new Error("Hosted auth challenge timestamps are invalid");
   }
   return bytes;
@@ -245,6 +245,42 @@ export class HostedOnlyBotsRequestError extends Error {
     this.retryAfterMs = input.retryAfterMs ?? 0;
   }
 }
+
+/**
+ * Classify a failed hosted request for local diagnostics without copying its
+ * message, URL, headers or body: a timeout, an HTTP status/code, or an error name.
+ */
+const SAFE_FAILURE_LABEL = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const safeFailureLabel = (value: string | null): string | null => (value !== null && SAFE_FAILURE_LABEL.test(value) ? value : null);
+
+export const describeHostedFailure = (error: unknown): Record<string, string | number | null> => {
+  // The server chooses `code`; validate it like an error name so it cannot carry message text.
+  if (error instanceof HostedOnlyBotsRequestError) return { errorClass: "http", status: error.status, code: safeFailureLabel(error.code) };
+  const name = error instanceof Error ? error.name : typeof error;
+  if (name === "TimeoutError") return { errorClass: "timeout" };
+  if (name === "AbortError") return { errorClass: "aborted" };
+  return { errorClass: safeFailureLabel(name) ?? "unknown" };
+};
+
+/**
+ * Warning for a bounded recall that fell back to free hot memory. Only a timeout, abort,
+ * network failure or unconfirmed server error leaves open whether the paid request settled.
+ */
+export const describeBoundedRecallFallback = (error: unknown): string => {
+  const prefix = "Saved-context retrieval unavailable; continuing with free hot memory.";
+  if (error instanceof HostedOnlyBotsRequestError) {
+    const details = error.details && typeof error.details === "object" ? (error.details as Record<string, unknown>) : null;
+    if (error.code === "paid_operation_commit_unknown") {
+      return `${prefix} The payment outcome is unknown; retry only with the same idempotency key to resolve it without a duplicate charge.`;
+    }
+    if (error.code === "recall_deadline_exceeded" && details?.charged_sats === 0) {
+      return `${prefix} The server missed its response budget (HTTP ${error.status}) and charged nothing; a retry is safe.`;
+    }
+    if (details?.charged_sats === 0) return `${prefix} The server could not deliver the request (HTTP ${error.status}) and charged nothing; a retry is safe.`;
+    if (error.status < 500) return `${prefix} The server rejected the request (HTTP ${error.status}).`;
+  }
+  return `${prefix} A timed-out or failed paid request may still settle; inspect billing before retrying.`;
+};
 
 const extractHostedError = (data: unknown): { message: string | null; code: string | null; details: unknown } => {
   if (!data || typeof data !== "object" || Array.isArray(data)) {

@@ -73,6 +73,7 @@ export const runOnlyBotsDaemonCli = async (
   let cleanup: Promise<void> | null = null;
   const closeComposition = () => cleanup ??= composition?.close() ?? Promise.resolve();
   let daemon: OnlyBotsLocalRuntimeDaemon;
+  let removeSignalHandlers = () => {};
   try {
     if (organizationalWorkerConfigPath && composeOrganizationalWorker) {
       composition = await composeOrganizationalWorker({
@@ -96,13 +97,8 @@ export const runOnlyBotsDaemonCli = async (
         ? { organizationalWorkerConfigPath }
         : {}),
     });
-    await daemon.start(port, ownership);
-  } catch (error) {
-    await closeComposition().catch(() => undefined);
-    await ownership.close();
-    throw error;
-  }
-
+    // Readiness is published inside start(). Arm signals first; stop() waits
+    // for an in-progress start before quiescing writers and releasing ownership.
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
@@ -125,4 +121,14 @@ export const runOnlyBotsDaemonCli = async (
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+  removeSignalHandlers = () => { process.off("SIGTERM", shutdown); process.off("SIGINT", shutdown); };
+    await daemon.start(port, ownership);
+  } catch (error) {
+    removeSignalHandlers();
+    await closeComposition().catch(() => undefined);
+    await ownership.close();
+    throw error;
+  }
+
+
 };

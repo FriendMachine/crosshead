@@ -2,12 +2,13 @@ import { createServer, type Server } from "node:http";
 
 import { schnorr } from "@noble/curves/secp256k1";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { HostedOnlyBotsClient } from "../../src/runtime/hosted-client";
+import { describeBoundedRecallFallback, describeHostedFailure, HostedOnlyBotsClient, HostedOnlyBotsRequestError } from "../../src/runtime/hosted-client";
 
 const servers: Server[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
 });
 
@@ -99,6 +100,30 @@ describe("hosted client security boundaries", () => {
     expect(await schnorr.verify(receivedSignature, challengeBytes, getPublicKey(signer.secret))).toBe(true);
   });
 
+  it.each([
+    { skew: 20_000, lifetime: 300_000, valid: true },
+    { skew: -20_000, lifetime: 300_000, valid: true },
+    { skew: 31_000, lifetime: 60_000, valid: false },
+    { skew: 0, lifetime: 300_001, valid: false },
+    { skew: -310_000, lifetime: 300_000, valid: false },
+    { skew: -100_000, lifetime: 60_000, valid: false },
+  ])("bounds challenge lifetime independently of tolerated clock skew: $skew ms / $lifetime ms", async ({skew,lifetime,valid}) => {
+    const now=Date.now(),signer=identity();let base="",verifies=0;
+    vi.spyOn(Date,"now").mockReturnValue(now);
+    base=await listen(async(request,response)=>{
+      if(request.url==="/v1/auth/challenge"){
+        const issued=new Date(now+skew).toISOString(),expires=new Date(now+skew+lifetime).toISOString();
+        const challenge={version:"crosshead_auth_v1",purpose:"crosshead_hosted_auth",audience:base,npub:signer.npub,nonce:Buffer.alloc(24,3).toString("base64url"),issued_at:issued,expires_at:expires};
+        return json(response,200,{challenge:Buffer.from(JSON.stringify(challenge)).toString("base64url"),expires_at:expires});
+      }
+      verifies++;return json(response,200,{session_token:"session-test",expires_at:new Date(now+3600000).toISOString(),scopes:[]});
+    });
+    const client=new HostedOnlyBotsClient({apiBase:base,npub:signer.npub,nsec:signer.nsec});
+    if(valid)await expect(client.authenticate()).resolves.toMatchObject({sessionToken:"session-test"});
+    else await expect(client.authenticate()).rejects.toThrow("timestamps are invalid");
+    expect(verifies).toBe(valid?1:0);
+  });
+
   it("never uses the hosted service for handoff state or verification", async () => {
     const signer = identity();
     let requests = 0;
@@ -181,5 +206,48 @@ describe("hosted client security boundaries", () => {
       membership: { id: "membership-test", status: "active" },
     });
     expect(receivedBody).toEqual({ code: "obj_test", agent_id: "agent-test" });
+  });
+});
+
+describe("describeHostedFailure", () => {
+  it("distinguishes a recall timeout from an HTTP failure without copying messages", () => {
+    const timeout = new DOMException("The operation was aborted due to timeout https://secret.example/?token=x", "TimeoutError");
+    expect(describeHostedFailure(timeout)).toEqual({ errorClass: "timeout" });
+    const http = new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "secret detail" });
+    expect(describeHostedFailure(http)).toEqual({ errorClass: "http", status: 503, code: "recall_deadline_exceeded" });
+    expect(describeHostedFailure(new TypeError("fetch failed: secret.example"))).toEqual({ errorClass: "TypeError" });
+    expect(JSON.stringify(describeHostedFailure(Object.assign(new Error("x"), { name: "bad name with token=1" })))).not.toContain("token");
+    // A server-chosen code that is not a plain identifier is dropped, not copied.
+    const unsafeCode = new HostedOnlyBotsRequestError({ status: 500, code: "oops token=secret https://x", message: "m" });
+    expect(describeHostedFailure(unsafeCode)).toEqual({ errorClass: "http", status: 500, code: null });
+    expect(describeHostedFailure(new HostedOnlyBotsRequestError({ status: 502, code: "a".repeat(65), message: "m" })).code).toBeNull();
+  });
+});
+
+describe("describeBoundedRecallFallback", () => {
+  it("keeps unknown commits distinct from confirmed free failures and contradicting charge claims", () => {
+    const uncertain = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 503, code: "paid_operation_commit_unknown", message: "private", details: { charged_sats: 0 } }));
+    expect(uncertain).toContain("same idempotency key");
+    expect(uncertain).not.toContain("charged nothing");
+    const contradictory = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "private", details: { charged_sats: 2 } }));
+    expect(contradictory).toContain("may still settle");
+    const rejected = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 400, code: "bad_request", message: "private", details: { charged_sats: 0 } }));
+    expect(rejected).toContain("charged nothing");
+    expect(rejected).not.toContain("missed its response budget");
+  });
+  it("says nothing was charged only when the server confirms it, and keeps the settle caution otherwise", () => {
+    const deadline = new HostedOnlyBotsRequestError({ status: 503, code: "recall_deadline_exceeded", message: "late",
+      details: { charged_sats: 0, retryable: true } });
+    expect(describeBoundedRecallFallback(deadline)).toContain("charged nothing");
+    expect(describeBoundedRecallFallback(deadline)).not.toContain("may still settle");
+    const timeout = new DOMException("timed out", "TimeoutError");
+    expect(describeBoundedRecallFallback(timeout)).toContain("may still settle");
+    expect(describeBoundedRecallFallback(new TypeError("fetch failed"))).toContain("may still settle");
+    const gateway = new HostedOnlyBotsRequestError({ status: 504, code: null, message: "gateway timeout" });
+    expect(describeBoundedRecallFallback(gateway)).toContain("may still settle");
+    const rejected = describeBoundedRecallFallback(new HostedOnlyBotsRequestError({ status: 400, code: "bad_request", message: "secret detail" }));
+    expect(rejected).toContain("HTTP 400");
+    expect(rejected).not.toContain("may still settle");
+    expect(rejected).not.toContain("secret detail");
   });
 });

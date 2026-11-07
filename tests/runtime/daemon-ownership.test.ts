@@ -20,10 +20,10 @@ const fixture = async (run: (home: string) => Promise<void>) => {
 	ensureRuntimeHomeLayout(home);
 	try { await run(home); } finally { rmSync(home, { recursive: true, force: true }); }
 };
-const childDaemon = (home: string, extra: string[] = []) => {
+const childDaemon = (home: string, extra: string[] = [], entry = path.resolve("dist/runtime/daemon.js")) => {
 	// Build before this suite: these checks exercise the shipped CLI in another
 	// OS process, including signal handlers and the parent-death kernel lock.
-	const child = spawn(process.execPath, [path.resolve("dist/runtime/daemon.js"), "serve", "--home", home, ...extra], {
+	const child = spawn(process.execPath, [entry, "serve", "--home", home, ...extra], {
 		stdio: ["ignore", "ignore", "pipe"], env: { PATH: process.env.PATH },
 	});
 	let error = "";
@@ -62,6 +62,28 @@ const ready = async (home: string, job: Job) => {
 };
 
 describe("single-home daemon ownership", () => {
+  it("handles SIGTERM while startup has published readiness but has not returned", async () => fixture(async home => {
+    const entry=path.join(home,"paused-start.cjs");
+    writeFileSync(entry,`
+      const {OnlyBotsLocalRuntimeDaemon}=require(${JSON.stringify(path.resolve("dist/runtime/local-runtime.js"))});
+      const original=OnlyBotsLocalRuntimeDaemon.prototype.start;
+      OnlyBotsLocalRuntimeDaemon.prototype.start=async function(...args){
+        await original.apply(this,args);
+        await new Promise(()=>{}); // Deterministically hold the readiness boundary.
+      };
+      require(${JSON.stringify(path.resolve("dist/runtime/daemon-host.js"))}).runOnlyBotsDaemonCli().catch(error=>{console.error(error.message);process.exit(1);});
+    `,{mode:0o600});
+    const job=childDaemon(home,[],entry);
+    try {
+      await ready(home,job);
+      await stopDetachedRuntimeDaemon(home);
+      expect(await waitTerminal(job)).toEqual({code:0,signal:null});
+      expect(loadDaemonState(ensureRuntimeHomeLayout(home)).status).toBe("stopped");
+      const successor=new OnlyBotsLocalRuntimeDaemon(home);
+      try {await successor.start();} finally {await successor.stop();}
+    } finally {await cleanup(job);}
+  }),15000);
+
 	it("excludes another instance and a failed contender stop cannot alter owner state", async () => fixture(async home => {
 		const owner = new OnlyBotsLocalRuntimeDaemon(home);
 		const contender = new OnlyBotsLocalRuntimeDaemon(home);
