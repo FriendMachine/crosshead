@@ -32,7 +32,7 @@
   },
   "dependencies": {
     "@noble/curves": "^1.9.7",
-    "nostr-tools": "^2.25.2",
+    "nostr-tools": "^2.25.5",
     "tar": "^7.5.22"
   },
   "devDependencies": {
