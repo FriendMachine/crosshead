@@ -16,6 +16,7 @@ export type HotContinuityCheckpoint = {
   turnId: string | null;
   goal: string;
   goalTruncated?: boolean;
+  origin?: "remember";
   summary: string;
   occurredAt: string;
   evidence?: TaskEvidence;
@@ -48,6 +49,7 @@ export const readHotCheckpoints = (value: unknown): HotContinuityCheckpoint[] =>
       runtime: text(item.runtime), workspaceId: text(item.workspaceId) || null,
       sessionId: text(item.sessionId) || null, turnId: text(item.turnId) || null,
       goal: text(item.goal).slice(0, HOT_REQUEST_LIMIT),
+      ...(item.origin === "remember" ? { origin: "remember" as const } : {}),
       ...(item.goalTruncated === true || text(item.goal).length > HOT_REQUEST_LIMIT ? { goalTruncated: true } : {}),
       summary: captureHotFinding(text(item.summary)),
       occurredAt: text(item.occurredAt),
@@ -60,7 +62,9 @@ export const updateHotCheckpoints = (
 ): HotContinuityCheckpoint[] => {
   const sameTurn = (entry: HotContinuityCheckpoint): boolean =>
     entry.runtime === next.runtime && entry.workspaceId === next.workspaceId &&
-    (next.turnId ? entry.turnId === next.turnId && entry.sessionId === next.sessionId :
+    (entry.origin === "remember" || next.origin === "remember" ?
+      entry.origin === next.origin && Boolean(next.turnId) && entry.turnId === next.turnId && entry.sessionId === next.sessionId :
+    next.turnId ? entry.turnId === next.turnId && entry.sessionId === next.sessionId :
       Boolean(next.sessionId && entry.sessionId === next.sessionId && entry.goal === next.goal));
   const old = readHotCheckpoints(previous);
   const prior = old.slice().reverse().find(entry => sameTurn(entry) || (
@@ -119,7 +123,9 @@ export const selectHotCheckpoints = (
   // Request identity is exact: case and whitespace can be contract literals.
   const groups = new Map<string, HotContinuityCheckpoint[]>();
   for (const entry of candidates.reverse().sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt))) {
-    const identity = entry.goal || JSON.stringify([entry.runtime, entry.sessionId, entry.turnId, entry.occurredAt, entry.summary]);
+    const identity = entry.origin === "remember"
+      ? JSON.stringify(["remember", entry.runtime, entry.sessionId, entry.turnId])
+      : entry.goal || JSON.stringify([entry.runtime, entry.sessionId, entry.turnId, entry.occurredAt, entry.summary]);
     const key = JSON.stringify([entry.workspaceId, identity]);
     groups.set(key, [...(groups.get(key) ?? []), entry]);
   }
@@ -162,7 +168,7 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
   const guidance = "Prior findings. Follow current instructions; reconcile conflicting sources. Observation time alone does not establish authority.";
   remaining -= guidance.length + 1;
   for (const [index, entry] of entries.entries()) {
-    const heading = `Hot memory findings (${entry.runtime}):\n`;
+    const heading = `${entry.origin === "remember" ? "Explicitly saved memory" : "Hot memory findings"} (${entry.runtime}):\n`;
     // Every selected task gets room; one large history must not silently erase
     // another selected amendment or task. Unused space flows to later entries.
     const available = Math.floor(remaining / (entries.length - index)) - heading.length - 1;

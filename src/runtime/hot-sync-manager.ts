@@ -153,7 +153,7 @@ export class HotSyncManager {
 		const workspaceId = this.workspace(raw), scope = workspaceHotScope(runtime, workspaceId)!;
 		this.active.add(scope);
 		// Identical imports on two devices must have identical signed provenance.
-		this.replica(scope).capture({ id: `legacy:${digest}`, deviceId: `legacy:${digest}`, runtime, workspaceId, occurredAt: String(checkpoint.occurredAt), goal: String(checkpoint.goal).slice(0, 2000), summary: String(checkpoint.summary).slice(0, 6000), evidence: normalizeTaskEvidence(checkpoint.evidence) ?? undefined });
+		this.replica(scope).capture({ id: `legacy:${digest}`, deviceId: `legacy:${digest}`, runtime, workspaceId, occurredAt: String(checkpoint.occurredAt), goal: String(checkpoint.goal).slice(0, 2000), summary: String(checkpoint.summary).slice(0, 6000), ...(checkpoint.origin === "remember" ? { origin: "remember" as const, turnId: typeof checkpoint.turnId === "string" ? checkpoint.turnId : `legacy:${digest}` } : {}), evidence: normalizeTaskEvidence(checkpoint.evidence) ?? undefined });
 		this.persist();
 	}
 	/** Import a durable pre-sync queue snapshot before allowing any new upload.
