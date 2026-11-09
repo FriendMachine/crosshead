@@ -14,6 +14,7 @@ export type HotSyncCheckpoint = {
 	occurredAt: string;
 	goal: string;
 	summary: string;
+	origin?: "remember";
 	sessionId?: string | null;
 	turnId?: string | null;
 	evidence?: unknown;
@@ -59,7 +60,8 @@ export function validHotSyncDocument(value: unknown): value is HotSyncDocument {
 			Number.isFinite(Date.parse(c.occurredAt)) && (c.sequence === undefined || hotSyncCounter(c.sequence)) &&
 			(c.supersedes === undefined || Array.isArray(c.supersedes) && c.supersedes.length <= 256 && c.supersedes.every(id => typeof id === "string")) &&
 			(c.conflictsWith === undefined || Array.isArray(c.conflictsWith) && c.conflictsWith.length <= 256 && c.conflictsWith.every(id => typeof id === "string")) &&
-			(c.conflictOf === undefined || typeof c.conflictOf === "string")) &&
+			(c.conflictOf === undefined || typeof c.conflictOf === "string") &&
+			(c.origin === undefined || c.origin === "remember")) &&
 		new Set(d.checkpoints.map(c => c.id)).size === d.checkpoints.length;
 }
 /** Conditional cache identity includes the authenticated owner and document boundary. */

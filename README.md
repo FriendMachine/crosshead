@@ -65,6 +65,30 @@ install tarball, verify it with
 reproducible: `npm ci && npm run release:build` at the tagged commit yields the
 same bytes (see [Releases](#releases)).
 
+## Choose what memory can retain
+
+The default keeps bounded task summaries and explicitly saved memory. It does
+not automatically collect exact source excerpts. Summaries and explicit writes
+can still contain code; this is not a guarantee that code never enters memory.
+
+For work where exact specifications or code must survive a fresh session, you
+can opt in before launching the host:
+
+```bash
+export CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=1
+codex  # or launch Claude Code from this shell
+```
+
+This permits bounded excerpts of supported workspace file reads to enter memory.
+They can be stored, synced through the configured service, and sent to a later
+coding-model session. Filters exclude some sensitive paths and credential-like
+text, but cannot guarantee that every secret is removed. Use this option only
+for repositories whose text you intend to disclose through those paths.
+
+To disable automatic excerpt capture for later turns, launch the host with
+`CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=0`. This does not delete existing memory.
+Verify a concrete rule in a fresh session after choosing either setting.
+
 ## What runs locally and what is sent
 
 - Each agent has its own Nostr keypair, created locally. The private key stays

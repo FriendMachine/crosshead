@@ -894,7 +894,13 @@ const buildHotState = (
   const baseHot = event.workspaceId && currentWorkspaceId !== event.workspaceId ? {} : currentHot;
   const payload = event.payload;
   const continuityOutcome = buildRuntimeContinuityOutcome(event);
+  // An explicit write is already user-selected memory. Preserve its text in
+  // bounded hot continuity as well as proposing warm storage. Source-excerpt
+  // capture remains a separate opt-in operation.
+  const explicitMemory = event.type === "operator.command" && payload.command === "remember"
+    ? asString(payload.content) : null;
   const summary =
+    explicitMemory ??
     continuityOutcome?.summary ??
     asString(payload.summary) ??
     asString(payload.result) ??
@@ -970,17 +976,19 @@ const buildHotState = (
     };
   }
 
-  if (event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
+  if (explicitMemory || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
     const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
     const assistant = transcript.slice().reverse().map(asRecord).find((item) => item?.role === "assistant");
-    const finding = asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
+    const finding = explicitMemory ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
     // Lifecycle acknowledgments describe transport, not findings. They must not
     // replace a completed turn's substantive checkpoint.
     const evidence = normalizeTaskEvidence(payload.taskEvidence);
-    if (evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
+    if (explicitMemory || evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
       nextState.continuityCheckpoints = updateHotCheckpoints(baseHot.continuityCheckpoints, {
 	runtime: event.runtime, workspaceId: event.workspaceId, sessionId: event.sessionId,
-	turnId: event.turnId, goal: continuityOutcome?.goal ?? asString(payload.goal) ?? "",
+	turnId: explicitMemory ? event.eventId : event.turnId,
+	goal: continuityOutcome?.goal ?? asString(payload.goal) ?? "",
+	...(explicitMemory ? { origin: "remember" as const } : {}),
 	summary: captureHotFinding(finding), occurredAt: event.occurredAt,
 	...(evidence ? { evidence } : {}),
       });
@@ -1969,8 +1977,8 @@ export class RuntimeLifecycleManager {
 						const hot=buildHotState(current,event);
 						const checkpoints=Array.isArray(hot.continuityCheckpoints)?hot.continuityCheckpoints:[];
 						const last=checkpoints[checkpoints.length-1] as Record<string,unknown>|undefined;
-						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints && ["turn.completed","turn.failed","session.ended","compact.started"].includes(event.type)) {
-						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:event.turnId,...(Array.isArray(event.payload.supersedes) ? {supersedes:event.payload.supersedes.filter((v):v is string=>typeof v === "string")} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
+						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints) {
+						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(Array.isArray(event.payload.supersedes) ? {supersedes:event.payload.supersedes.filter((v):v is string=>typeof v === "string")} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));
 						}
 					} else {
