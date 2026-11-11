@@ -24,6 +24,8 @@ type RuntimeStartupContextInput = {
   actions: RuntimeMemoryActionRecord[];
   warnings: string[];
   injectedContext: string;
+  /** Hot checkpoint text already rendered by the host adapter (paged at session start). */
+  hotContextText?: string;
   freshness?: RuntimeStartupFreshness | null;
   hotMemorySnapshot?: Record<string, unknown> | null;
   goal?: string | null;
@@ -711,7 +713,7 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
     formatHealthLine(input.status),
     formatLifecycleLine(input.actions, manifest),
     manifest ? formatLayerLine("Hot memory", manifest.hotMemory) : hasHotMemoryFallback
-      ? renderHotCheckpoints(selectHotCheckpoints(input.hotMemorySnapshot, input.goal ?? null)) || formatFreeHotMemorySnapshotLine(input.hotMemorySnapshot)
+      ? input.hotContextText || renderHotCheckpoints(selectHotCheckpoints(input.hotMemorySnapshot, input.goal ?? null)) || formatFreeHotMemorySnapshotLine(input.hotMemorySnapshot)
       : null,
     formatWarmLine(manifest),
     manifest && (manifest.layeredContext.available > 0 || manifest.layeredContext.injected > 0)

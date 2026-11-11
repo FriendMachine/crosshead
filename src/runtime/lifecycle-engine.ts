@@ -11,7 +11,7 @@ import type { Npub } from "../protocol/base";
 import { COLLABORATION_EVENT_PRIORITIES } from "../protocol/collaboration";
 import { DURABLE_INBOX_STATUSES, DURABLE_INBOX_TERMINAL_STATUSES } from "../protocol/inbox";
 import { HOT_SCOPE_ALL } from "../protocol/memory";
-import { captureHotFinding, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
+import { captureHotFinding, HOT_TURN_IN_PROGRESS, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
 import { normalizeTaskEvidence } from "./task-evidence";
 import {
   buildHotContextActionCue,
@@ -976,10 +976,13 @@ const buildHotState = (
     };
   }
 
-  if (explicitMemory || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
+  // A tool result observed mid-turn is checkpointed at once: a session that is
+  // killed or crashes never reaches turn.completed, and would otherwise leave nothing.
+  const toolEvidence = event.type === "tool.completed" && Boolean(normalizeTaskEvidence(payload.taskEvidence)?.sources.length);
+  if (explicitMemory || toolEvidence || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
     const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
     const assistant = transcript.slice().reverse().map(asRecord).find((item) => item?.role === "assistant");
-    const finding = explicitMemory ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
+    const finding = explicitMemory ?? (toolEvidence ? HOT_TURN_IN_PROGRESS : null) ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
     // Lifecycle acknowledgments describe transport, not findings. They must not
     // replace a completed turn's substantive checkpoint.
     const evidence = normalizeTaskEvidence(payload.taskEvidence);
@@ -1525,7 +1528,8 @@ const shouldQueueColdBatch = (
     return false;
   }
   if (mode === "auto" && profile.features.coldSync) {
-    return event.type === "turn.completed" || event.type === "tool.completed" || event.type === "operator.command";
+    // A mid-turn evidence checkpoint is not a turn outcome and is never archived.
+    return event.type === "turn.completed" || (event.type === "tool.completed" && event.payload.checkpointOnly !== true) || event.type === "operator.command";
   }
   if (mode === "assist") {
     return explicitApprovalRequested(event);
@@ -1977,8 +1981,13 @@ export class RuntimeLifecycleManager {
 						const hot=buildHotState(current,event);
 						const checkpoints=Array.isArray(hot.continuityCheckpoints)?hot.continuityCheckpoints:[];
 						const last=checkpoints[checkpoints.length-1] as Record<string,unknown>|undefined;
+						// Each capture is a new synced record. Mid-turn snapshots of this same
+						// turn are superseded by the newer one, so one turn never crowds
+						// earlier sessions out of the bounded synced document.
+						const sameTurn=last ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && c.summary === HOT_TURN_IN_PROGRESS && c.sessionId === event.sessionId && c.turnId === (typeof last.turnId === "string" ? last.turnId : event.turnId) && typeof c.id === "string").map(c=>String(c!.id)) : [];
+						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn])];
 						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints) {
-						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(Array.isArray(event.payload.supersedes) ? {supersedes:event.payload.supersedes.filter((v):v is string=>typeof v === "string")} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
+						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(supersededIds.length ? {supersedes:supersededIds} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));
 						}
 					} else {
@@ -2044,7 +2053,7 @@ export class RuntimeLifecycleManager {
         );
       }
 
-      const warmCandidates = buildWarmPromotionCandidates(event);
+      const warmCandidates = event.payload.checkpointOnly === true ? [] : buildWarmPromotionCandidates(event);
       if (warmCandidates.length > 0) {
         if (continuity.paused) {
           actions.push(

@@ -51,6 +51,19 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|shell|exec_command|shell_command|read_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/crosshead-hook\" codex PostToolUse",
+            "statusMessage": "Crosshead checkpoint",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

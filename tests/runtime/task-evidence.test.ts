@@ -34,7 +34,7 @@ describe("source-backed task continuity", () => {
       ...Array.from({ length: 30 }, (_, i) => codex(`Unrelated observation ${i}`, `cat other-${i}.txt`, `other-${i}`)).flat()];
     const evidence = read(rows, "session", "/workspace", "Implement requested.txt");
     expect(evidence.sources[0]?.text).toBe("EXACT_REQUESTED_RULE");
-    expect(evidence.sources).toHaveLength(6);
+    expect(evidence.sources).toHaveLength(10);
     expect(evidence.omitted).toBeGreaterThan(0);
   });
 
@@ -159,7 +159,7 @@ describe("source-backed task continuity", () => {
 
   it("bounds storage and delivery and discloses incomplete excerpts", () => {
     const evidence = read(codex("Long requirement. ".repeat(1000)));
-    expect(evidence.sources[0]?.text.length).toBe(6000);
+    expect(evidence.sources[0]?.text.length).toBe(8000);
     expect(evidence.sources[0]?.truncated).toBe(true);
     expect(renderTaskEvidence(evidence, 1000).length).toBeLessThanOrEqual(1000);
     expect(renderTaskEvidence(evidence, 1000)).toContain("[excerpt incomplete]");

@@ -1,13 +1,26 @@
 import { compactContinuitySummary } from "./summary-compaction";
-import { normalizeTaskEvidence, renderTaskEvidence, taskEvidenceChars, type TaskEvidence } from "./task-evidence";
+import { normalizeTaskEvidence, preferFileSources, renderTaskEvidence, taskEvidenceChars, type TaskEvidence } from "./task-evidence";
 
 // Capture and delivery have separate bounds. Keep exact findings, including list/code
 // formatting, until a real size limit requires compaction. No model call is needed.
-export const HOT_FINDING_LIMIT = 6000;
+// A handoff that carries exact tables or rules is routinely 5-10k characters;
+// compacting it loses the values the next session needs.
+export const HOT_FINDING_LIMIT = 12000;
 const HOT_REQUEST_LIMIT = 6000;
+// Delivery budget for a prompt inside a session that already received context.
 export const HOT_CONTEXT_LIMIT = 4200;
+// The first prompt of a session has nothing else to go on, so it gets the first
+// page of the whole checkpoint (see checkpoint-pages.ts); later prompts fall
+// back to the small budget. This bounds the complete rendering that is paged.
+export const HOT_FULL_RENDER_LIMIT = 80000;
 const MAX_CHECKPOINTS = 12;
-const MAX_HISTORY_CHARS = 30000;
+// The hot-sync replica (hot-sync-replica.ts) refuses a checkpoint whose request,
+// finding and serialized evidence exceed 30,000 characters. Every stored
+// checkpoint is kept under that with the same measure, so a checkpoint that is
+// valid locally is always valid to sync.
+export const HOT_CHECKPOINT_BUDGET = 29000;
+const MAX_HISTORY_CHARS = 72000;
+export const HOT_TURN_IN_PROGRESS = "Turn in progress: the session has not recorded a final response for this request yet. If nothing newer follows, it ended before finishing; the observed sources below are what it saw.";
 
 export type HotContinuityCheckpoint = {
   runtime: string;
@@ -57,6 +70,18 @@ export const readHotCheckpoints = (value: unknown): HotContinuityCheckpoint[] =>
     }];
   });
 
+const checkpointSize = (entry: Pick<HotContinuityCheckpoint, "goal" | "summary" | "evidence">): number =>
+  entry.goal.length + entry.summary.length + JSON.stringify(entry.evidence ?? "").length;
+/** Drop the lowest-priority sources (the last ones) until the checkpoint fits the sync budget. */
+const fitCheckpoint = <T extends Pick<HotContinuityCheckpoint, "goal" | "summary" | "evidence">>(entry: T): T => {
+  let evidence = entry.evidence;
+  while (evidence?.sources.length && checkpointSize({ ...entry, evidence }) > HOT_CHECKPOINT_BUDGET) {
+    evidence = { ...evidence, sources: evidence.sources.slice(0, -1), omitted: evidence.omitted + 1 };
+  }
+  return evidence === entry.evidence ? entry : { ...entry, evidence };
+};
+const commandOf = (source: string): string => source.replace(/ \(exited non-zero\)$/, "");
+
 export const updateHotCheckpoints = (
   previous: unknown, next: HotContinuityCheckpoint
 ): HotContinuityCheckpoint[] => {
@@ -75,17 +100,22 @@ export const updateHotCheckpoints = (
   // Keep earlier evidence; repeated quotes dedupe by bytes, while conflicting
   // versions remain visible. Observation recency alone cannot establish authority.
   const evidence = freshEvidence?.sources.length ? normalizeTaskEvidence({ ...freshEvidence,
-    sources: [...freshEvidence.sources, ...(prior?.evidence?.sources ?? []).filter(s => !freshEvidence.sources.some(n => n.sha256 === s.sha256))],
+    // Two captures of one command (the per-call hook and the end-of-turn
+    // transcript, or a rerun) are one observation: the newest replaces the older.
+    // Differing versions of a file are kept so they can be reconciled.
+    sources: preferFileSources([...freshEvidence.sources, ...(prior?.evidence?.sources ?? []).filter(s =>
+      !freshEvidence.sources.some(n => n.sha256 === s.sha256 || (s.source.startsWith("$ ") && commandOf(n.source) === commandOf(s.source))))]),
   }) : prior?.evidence ?? freshEvidence;
   const entries = old.filter((entry) => !sameTurn(entry));
-  entries.push({ ...next, goal: next.goal.slice(0, HOT_REQUEST_LIMIT),
+  entries.push(fitCheckpoint({ ...next, goal: next.goal.slice(0, HOT_REQUEST_LIMIT),
     ...(next.goalTruncated || next.goal.length > HOT_REQUEST_LIMIT ? { goalTruncated: true } : {}),
-    summary: captureHotFinding(next.summary), ...(evidence ? { evidence } : {}) });
+    summary: captureHotFinding(next.summary), ...(evidence ? { evidence } : {}) }));
   const bounded: HotContinuityCheckpoint[] = [];
   let size = 0;
   for (const entry of entries.reverse()) {
     const chars = entry.goal.length + entry.summary.length + taskEvidenceChars(entry.evidence);
-    if (bounded.length >= MAX_CHECKPOINTS || size + chars > MAX_HISTORY_CHARS) break;
+    // The newest checkpoint is always kept; the bound trims history, not the present.
+    if (bounded.length > 0 && (bounded.length >= MAX_CHECKPOINTS || size + chars > MAX_HISTORY_CHARS)) break;
     bounded.push(entry);
     size += chars;
   }
@@ -99,9 +129,7 @@ const terms = (value: string): Set<string> => new Set(
   ) ?? []
 );
 
-export const selectHotCheckpoints = (
-  snapshot: unknown, goal: string | null, workspaceId?: string | null
-): SelectedHotCheckpoint[] => {
+const collectHotCheckpoints = (snapshot: unknown, workspaceId?: string | null): HotContinuityCheckpoint[] => {
   const candidates: HotContinuityCheckpoint[] = [];
   const visit = (value: unknown, depth: number): void => {
     if (depth > 6) return;
@@ -118,6 +146,57 @@ export const selectHotCheckpoints = (
     }
   };
   visit(snapshot, 0);
+  return candidates;
+};
+
+export type HotSearchResult = { kind: "finding" | "request" | "source"; source: string | null; runtime: string; occurredAt: string; score: number; text: string };
+
+/**
+ * Term search over locally held checkpoints: findings, requests and observed
+ * sources. Used when no hosted search exists (local-only profiles), so a
+ * search command answers from what this machine has instead of failing.
+ */
+export const searchHotCheckpoints = (snapshot: unknown, query: string, topK = 10, workspaceId?: string | null): HotSearchResult[] => {
+  const wanted = terms(query);
+  if (!wanted.size) return [];
+  const passages: Array<Omit<HotSearchResult, "score">> = [];
+  const seen = new Set<string>();
+  const add = (kind: HotSearchResult["kind"], source: string | null, entry: HotContinuityCheckpoint, body: string): void => {
+    // Split on line boundaries so a returned passage is readable on its own.
+    let chunk = "";
+    const flush = (): void => {
+      const text = chunk.trim();
+      chunk = "";
+      if (!text || seen.has(text)) return;
+      seen.add(text);
+      passages.push({ kind, source, runtime: entry.runtime, occurredAt: entry.occurredAt, text });
+    };
+    for (const line of body.split("\n")) {
+      if (chunk.length + line.length > 1800) flush();
+      chunk += `${line.slice(0, 1800)}\n`;
+    }
+    flush();
+  };
+  for (const entry of collectHotCheckpoints(snapshot, workspaceId).sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt))) {
+    add("finding", null, entry, entry.summary);
+    if (entry.goal) add("request", null, entry, entry.goal);
+    for (const source of entry.evidence?.sources ?? []) add("source", source.source, entry, source.text);
+  }
+  const documents = passages.map(p => terms(`${p.source ?? ""}\n${p.text}`));
+  return passages.map((passage, index) => {
+    let score = 0;
+    for (const term of wanted) {
+      if (!documents[index]!.has(term)) continue;
+      score += Math.log(1 + passages.length / documents.filter(doc => doc.has(term)).length);
+    }
+    return { ...passage, score: Number(score.toFixed(4)) };
+  }).filter(result => result.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.max(1, Math.min(50, topK)));
+};
+
+export const selectHotCheckpoints = (
+  snapshot: unknown, goal: string | null, workspaceId?: string | null
+): SelectedHotCheckpoint[] => {
+  const candidates = collectHotCheckpoints(snapshot, workspaceId);
   // A new finding does not revoke earlier source observations. Merge evidence
   // across host bodies and keep distinct earlier findings visibly historical.
   // Request identity is exact: case and whitespace can be contract literals.
@@ -157,8 +236,15 @@ export const selectHotCheckpoints = (
   }).sort((a, b) => b.score - a.score || a.index - b.index);
   const first = scored[0];
   if (!first) return [];
-  return scored.filter((entry, index) => index === 0 || (entry.score > 0 && entry.score >= first.score * 0.6))
+  const chosen = scored.filter((entry, index) => index === 0 || (entry.score > 0 && entry.score >= first.score * 0.6))
     .slice(0, 2).map(({ entry }) => entry);
+  // An explicit save is a deliberate handoff. Boilerplate shared between an
+  // unrelated later request and the current one must not rank it out, so the
+  // most recent save in this workspace is always included. One only: every
+  // extra entry divides the small per-prompt budget further.
+  const saved = chosen.some(entry => entry.origin === "remember") ? [] : unique.filter(entry => entry.origin === "remember")
+    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, 1);
+  return [...chosen, ...saved];
 };
 
 export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT): string => {
@@ -178,7 +264,11 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
     const requestText = entry.goal.slice(0, Math.max(0, Math.floor(available * 0.4) - 70));
     const request = requestText ? `Prior task request:\n${requestText}${entry.goalTruncated || requestText.length < entry.goal.length ? "\n[request incomplete]" : ""}\n` : "";
     const historyReserve = entry.earlierFindings?.length ? Math.min(900, Math.floor((available - request.length) * 0.25)) : 0;
-    const evidence = entry.evidence?.sources.length ? renderTaskEvidence(entry.evidence, Math.max(0, available - request.length - historyReserve - 650), entry.goal) : "";
+    // The agent's own finding and the observed sources compete for room. Neither
+    // may crowd the other out: the finding keeps up to 45% when both are large.
+    const shared = available - request.length - historyReserve;
+    const findingReserve = Math.min(entry.summary.length + 20, Math.max(650, Math.floor(shared * 0.45)));
+    const evidence = entry.evidence?.sources.length ? renderTaskEvidence(entry.evidence, Math.max(0, shared - findingReserve), entry.goal) : "";
     const findingBudget = available - request.length - historyReserve - (evidence ? evidence.length + 16 : 0);
     const summary = entry.summary.length <= findingBudget ? entry.summary : compactContinuitySummary(entry.summary, findingBudget);
     const historyBudget = entry.earlierFindings?.length ? available - request.length - summary.length - (evidence ? evidence.length + 16 : 0) : 0;

@@ -5,7 +5,7 @@
 
 export type HookHost = "claude-code" | "codex";
 
-export type HostHookEvent = "SessionStart" | "PreCompact" | "PostCompact" | "UserPromptSubmit" | "Stop";
+export type HostHookEvent = "SessionStart" | "PreCompact" | "PostCompact" | "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "Stop";
 
 export type HostHookHandler = {
 	type: "command";
@@ -26,6 +26,8 @@ type HostHookEventSpec = {
 	codexStatusMessage: string;
 	/** Codex timeout in seconds. Claude Code uses its own defaults. */
 	codexTimeout?: number;
+	/** Hosts that have this event. Omitted means both. */
+	hosts?: readonly HookHost[];
 };
 
 export const HOST_HOOK_EVENTS: readonly HostHookEventSpec[] = [
@@ -33,6 +35,13 @@ export const HOST_HOOK_EVENTS: readonly HostHookEventSpec[] = [
 	{ event: "PreCompact", matcher: "manual|auto", codexStatusMessage: "Crosshead pre-compact checkpoint", codexTimeout: 30 },
 	{ event: "PostCompact", matcher: "manual|auto", codexStatusMessage: "Crosshead post-compact sync", codexTimeout: 30 },
 	{ event: "UserPromptSubmit", codexStatusMessage: "Crosshead context", codexTimeout: 45 },
+	// Checkpoints what a file read or shell command showed as soon as it finishes,
+	// so a session killed mid-turn still leaves it. A no-op unless source evidence
+	// capture is enabled; the matcher keeps it off every other tool.
+	{ event: "PostToolUse", matcher: "Bash|Read|shell|exec_command|shell_command|read_file", codexStatusMessage: "Crosshead checkpoint", codexTimeout: 15 },
+	// Claude Code reports a failed call separately. A batch like `cat a b missing`
+	// fails as a whole yet still printed the files that exist.
+	{ event: "PostToolUseFailure", matcher: "Bash|Read", codexStatusMessage: "Crosshead checkpoint", hosts: ["claude-code"] },
 	{ event: "Stop", codexStatusMessage: "Crosshead memory sync", codexTimeout: 30 },
 ];
 
@@ -40,7 +49,7 @@ export const HOST_HOOK_EVENTS: readonly HostHookEventSpec[] = [
 export const CROSSHEAD_PLUGIN_NAME = "crosshead";
 export const CROSSHEAD_MARKETPLACE_NAME = "crosshead";
 /** Bump when any generated plugin file changes; hosts pin installed plugins by version. */
-export const CROSSHEAD_HOST_PLUGIN_VERSION = "1.0.1";
+export const CROSSHEAD_HOST_PLUGIN_VERSION = "1.1.0";
 
 /** Path, relative to the plugin root, of the launcher the plugin hooks run. */
 export const PLUGIN_HOOK_LAUNCHER = "scripts/crosshead-hook";
@@ -77,7 +86,7 @@ export const renderHostHookGroups = (
 	host: HookHost,
 	commandFor: (event: HostHookEvent) => string
 ): Array<readonly [HostHookEvent, HostHookMatcherGroup]> =>
-	HOST_HOOK_EVENTS.map((spec) => {
+	HOST_HOOK_EVENTS.filter((spec) => !spec.hosts || spec.hosts.includes(host)).map((spec) => {
 		const handler: HostHookHandler = { type: "command", command: commandFor(spec.event) };
 		if (host === "codex") {
 			handler.statusMessage = spec.codexStatusMessage;

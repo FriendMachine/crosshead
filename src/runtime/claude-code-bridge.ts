@@ -1,4 +1,5 @@
 import { ClaudeCodeRuntimeAdapter } from "./claude-code-adapter";
+import { runCheckpointPageCommand } from "./checkpoint-pages";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
 
 const parseArgs = (args: string[]): { positionals: string[]; flags: Record<string, string | boolean> } => {
@@ -60,6 +61,10 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
 	assertSecureNodeRuntimeVersion();
   const { positionals, flags } = parseArgs(argv);
   const command = positionals[0] ?? "help";
+  if (command === "checkpoint-page") {
+    runCheckpointPageCommand("claude-code", positionals, flags);
+    return;
+  }
 
   if (command === "help") {
     process.stdout.write(
@@ -248,7 +253,9 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
     const result = await adapter.searchMemory(
       String(flags.query ?? ""),
       typeof flags.profile === "string" ? flags.profile : undefined,
-      typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10
+      typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10,
+      false,
+      typeof flags["workspace-id"] === "string" ? flags["workspace-id"] : process.env.CROSSHEAD_WORKSPACE_ID ?? process.env.ONLYBOTS_WORKSPACE_ID ?? `repo:${typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.env.ONLYBOTS_WORKSPACE_ROOT ?? process.cwd()}`
     );
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;

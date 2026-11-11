@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync, readFileSync } from "fs";
+import { closeSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync, readFileSync } from "fs";
 import path from "path";
 
 // Evidence is a quote of an observed source, never a verified claim or a new
@@ -19,9 +19,13 @@ export type TaskEvidence = {
 };
 
 const MAX_BYTES = 4 * 1024 * 1024;
-const MAX_SOURCE_CHARS = 6000;
-const MAX_TOTAL_CHARS = 12000;
-const MAX_SOURCES = 6;
+// A checkpoint's request, finding and serialized evidence must together stay
+// under the 30,000-character hot-sync replica budget (see hot-continuity.ts).
+const MAX_SOURCE_CHARS = 8000;
+const MAX_TOTAL_CHARS = 16000;
+const MAX_SOURCES = 10;
+const MIN_COMMAND_OUTPUT_CHARS = 80;
+const SHELL_TOOLS = ["exec_command", "shell_command", "shell", "Bash"];
 const object = (v: unknown): Record<string, unknown> | null =>
   v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 const text = (v: unknown): string => typeof v === "string" ? v : "";
@@ -43,8 +47,8 @@ const credentialLikeContent = (value: string): boolean => [
 export const taskEvidenceCaptureEnabled = (env: NodeJS.ProcessEnv = process.env): boolean =>
   (env.CROSSHEAD_CAPTURE_SOURCE_EVIDENCE ?? env.ONLYBOTS_CAPTURE_SOURCE_EVIDENCE) === "1";
 
-// These are observed workspace reads, not arbitrary shell output, remote MCP
-// responses, environment dumps, or private host state.
+// These are observed workspace reads, not remote MCP responses, environment
+// dumps, or private host state.
 const readSource = (name: string, input: unknown, workspace: string): string | null => {
   const args = object(input);
   if (!args) return null;
@@ -54,7 +58,7 @@ const readSource = (name: string, input: unknown, workspace: string): string | n
     if (!file || relative.startsWith("..") || path.isAbsolute(relative) || sensitive.test(file) || privateHost.test(relative)) return null;
     return relative;
   }
-  if (!["exec_command", "shell_command", "shell", "Bash"].includes(name)) return null;
+  if (!SHELL_TOOLS.includes(name)) return null;
   let cmd = text(args.cmd ?? args.command);
   if (!cmd || cmd.length > 1000 || sensitive.test(cmd) || privateHost.test(cmd)) return null;
   const cwd = text(args.workdir ?? args.cwd) || workspace;
@@ -88,8 +92,25 @@ const observedFiles = (input: unknown, workspace: string, output: string): Array
   const found: Array<{ source: string; text: string }> = [];
   let root: string;
   try { root = realpathSync(workspace); } catch { return []; }
+  // `cat docs/*` and `for f in docs/*; do cat "$f"; done` name a directory, not
+  // files. Offer that directory's own files as candidates; a candidate is still
+  // only evidence when its exact current bytes occur in the observed output.
+  const candidates: string[] = [];
   for (const raw of tokens.slice(0, 64)) {
-    const candidate = raw.replace(/^['"]|['"]$/g, "");
+    const token = raw.replace(/^['"]|['"]$/g, "");
+    const glob = /^([^<>`$*?\[\]{}()]*\/)?\*(\.[A-Za-z0-9]+)?$/.exec(token);
+    const directory = glob ? glob[1] ?? "." : token;
+    if (/[<>`$*?\[\]{}()]/.test(directory) || sensitive.test(directory) || privateHost.test(directory)) continue;
+    if (!glob) candidates.push(token);
+    try {
+      const resolved = path.resolve(root, directory);
+      if (!statSync(resolved).isDirectory()) continue;
+      for (const name of readdirSync(resolved).sort().slice(0, 48)) {
+	if (!glob || !glob[2] || name.endsWith(glob[2])) candidates.push(path.join(directory, name));
+      }
+    } catch { /* Not a directory: the plain token above is the only candidate. */ }
+  }
+  for (const candidate of candidates.slice(0, 160)) {
     if (/[<>`$*?\[\]{}()]/.test(candidate) || sensitive.test(candidate) || privateHost.test(candidate)) continue;
     try {
       const file = realpathSync(path.resolve(root, candidate)), relative = path.relative(root, file);
@@ -103,6 +124,81 @@ const observedFiles = (input: unknown, workspace: string, output: string): Array
     } catch { /* Absent/unavailable files are not evidence. */ }
   }
   return found;
+};
+
+// Facts a session learns often exist only in what a command printed (a replay,
+// a migration dry run, a failing test). Keep the bounded output of a successful
+// command run inside the workspace, labelled as command output so it is never
+// mistaken for a file. The same opt-in, path and credential filters apply, and
+// Crosshead's own commands are skipped so stored memory is not re-captured.
+//
+// Only commands that work on the project itself qualify. Every step of a batch
+// or pipeline must start with a program from this list (interpreters, package
+// and build tools, test runners, version control, text utilities). Network and
+// database clients, environment dumps, secret managers and anything not listed
+// are therefore never captured, and neither is a command that sets variables
+// inline, names a path outside the workspace, or itself looks like a credential.
+const PROJECT_COMMANDS = new Set(("node nodejs deno bun python python3 ruby php java go cargo rustc dotnet make cmake ninja gradle mvn " +
+  "npm npx pnpm yarn pip pytest jest vitest mocha tsc eslint prettier ruff mypy tox " +
+  "git ls cat head tail sed awk grep rg find wc sort uniq diff cut tr jq echo printf cd pwd test true false tree stat file basename dirname").split(" "));
+const projectCommand = (cmd: string, workspace: string): boolean => {
+  if (/[`]|\$\(|<\(/.test(cmd)) return false; // substitutions can run anything
+  for (const step of cmd.split(/&&|\|\||[;|\n]/)) {
+    const words = step.trim().match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    if (!words.length) continue;
+    // Loop and conditional keywords wrap another step; look at what they run.
+    while (words.length && /^(?:for|do|done|then|else|fi|if|while|in|time|\{|\})$/.test(words[0]!)) words.shift();
+    if (!words.length || /^[A-Za-z_][A-Za-z0-9_]*$/.test(words[0]!) && words[1] === "in") continue;
+    const program = words[0]!.replace(/^['"]|['"]$/g, "");
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(program)) return false;
+    const local = program.startsWith("./") && !program.includes("..");
+    if (!local && !PROJECT_COMMANDS.has(program)) return false;
+  }
+  for (const raw of cmd.match(/'[^']*'|"[^"]*"|[^\s;&|]+/g) ?? []) {
+    const token = raw.replace(/^['"]|['"]$/g, "");
+    if (token.startsWith("~") || /(?:^|\/)\.\.(?:\/|$)/.test(token)) return false;
+    if (token.startsWith("/") && token !== workspace && !token.startsWith(`${workspace}/`) && token !== "/dev/null") return false;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return false;
+  }
+  return true;
+};
+const commandOutputSource = (name: string, input: unknown, workspace: string): string | null => {
+  if (!SHELL_TOOLS.includes(name)) return null;
+  const args = object(input), cmd = text(args?.cmd ?? args?.command).trim();
+  if (!cmd || cmd.length > 1000 || sensitive.test(cmd) || privateHost.test(cmd) || /crosshead|onlybots/i.test(cmd)) return null;
+  if (credentialLikeContent(cmd) || !projectCommand(cmd, path.resolve(workspace))) return null;
+  const relative = path.relative(path.resolve(workspace), path.resolve(text(args?.workdir ?? args?.cwd) || workspace));
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return `$ ${cmd.replace(/\s+/g, " ").slice(0, 300)}`;
+};
+
+/** Sources one finished tool call contributes. Shared by transcript and hook capture. */
+const toolCallQuotes = (
+  call: { name: string; args: unknown }, raw: string, failed: boolean, workspaceRoot: string
+): Array<{ source: string; text: string }> => {
+  let result = raw.trim();
+  const unsuccessful = failed || /Process exited with code [1-9]|^Exit code [1-9]/.test(result);
+  // Codex wraps shell output in execution metadata. Preserve the observed
+  // text, not those per-request wrappers or Claude's line-number gutters.
+  if (/^Chunk ID:/.test(result) && result.includes("\nOutput:\n")) result = result.slice(result.indexOf("\nOutput:\n") + 9);
+  result = result.replace(/^\s*\d+→/gm, "").trim();
+  if (!result) return [];
+  const recovered = ["Read", "read_file"].includes(call.name) ? [] : observedFiles(call.args, workspaceRoot, result);
+  // A Read that failed returned an error, not a file.
+  if (!recovered.length && !unsuccessful) {
+    const fileRead = readSource(call.name, call.args, workspaceRoot);
+    if (fileRead) return [{ source: fileRead, text: result }];
+  }
+  // A batch such as `cat README.md; node tools/replay.js; node test.js` prints
+  // files and something else, and takes its exit status from the last command.
+  // Keep what the matched files do not account for, labelled as command output
+  // (and as failed when it was), so it is never read as a file or as success.
+  let rest = result;
+  for (const file of recovered) rest = rest.split(file.text).join("\n");
+  rest = rest.replace(/\n{3,}/g, "\n\n").trim();
+  const enough = recovered.length ? Math.max(MIN_COMMAND_OUTPUT_CHARS * 3, Math.floor(result.length * 0.2)) : MIN_COMMAND_OUTPUT_CHARS;
+  const command = rest.length >= enough ? commandOutputSource(call.name, call.args, workspaceRoot) : null;
+  return command ? [...recovered, { source: unsuccessful ? `${command} (exited non-zero)` : command, text: rest }] : recovered;
 };
 
 const outputText = (value: unknown): string => {
@@ -182,25 +278,12 @@ export const readTaskEvidence = (
       if (userText || (entry.type === "event_msg" && payload?.type === "user_message")) { calls.clear(); sources = []; omitted = 0; }
       const addCall = (id: string, name: string, args: unknown): void => {
 	if (typeof args === "string") { try { args = JSON.parse(args); } catch { return; } }
-	if (id && ["Read", "read_file", "exec_command", "shell_command", "shell", "Bash"].includes(name)) calls.set(id, { name, args });
+	if (id && ["Read", "read_file", ...SHELL_TOOLS].includes(name)) calls.set(id, { name, args });
       };
       const addResult = (id: string, raw: unknown, failed = false): void => {
 	const call = calls.get(id);
 	if (!call) return;
-	let result = outputText(raw).trim();
-	const unsuccessful = failed || /Process exited with code [1-9]|^Exit code [1-9]/.test(result);
-	// Codex wraps shell output in execution metadata. Preserve the observed
-	// text, not those per-request wrappers or Claude's line-number gutters.
-	if (/^Chunk ID:/.test(result) && result.includes("\nOutput:\n")) result = result.slice(result.indexOf("\nOutput:\n") + 9);
-	result = result.replace(/^\s*\d+→/gm, "").trim();
-	if (!result) return;
-	const recovered = ["Read", "read_file"].includes(call.name) ? [] : observedFiles(call.args, workspaceRoot, result);
-	// A later command can fail after an earlier file read succeeded. In that
-	// case retain only exact, independently matched source bytes, never the
-	// failed command's unclassified output or an error from a Read tool.
-	const fallback = unsuccessful ? null : readSource(call.name, call.args, workspaceRoot);
-	const quotes = recovered.length ? recovered : fallback ? [{ source: fallback, text: result }] : [];
-	for (const quote of quotes) {
+	for (const quote of toolCallQuotes(call, outputText(raw), failed, workspaceRoot)) {
 	const next = { ...quote, sha256: digest(quote.text), truncated: /tokens truncated|output truncated/i.test(quote.text),
 	  ...(typeof entry.timestamp === "string" ? { observedAt: entry.timestamp } : {}),
 	};
@@ -234,6 +317,39 @@ export const readTaskEvidence = (
   } catch { return unavailable; }
   finally { if (fd !== undefined) closeSync(fd); }
 };
+
+const hookResponseText = (value: unknown): { text: string; failed: boolean } => {
+  if (typeof value === "string" || Array.isArray(value)) return { text: outputText(value), failed: false };
+  const item = object(value);
+  if (!item) return { text: "", failed: false };
+  const file = object(item.file);
+  const exit = item.exit_code ?? item.exitCode ?? object(item.metadata)?.exit_code;
+  const body = [item.stdout, item.aggregated_output, item.output, file?.content, item.content, item.text]
+    .map(outputText).find(part => part.trim().length > 0) ?? "";
+  return { text: body, failed: item.is_error === true || item.interrupted === true || item.success === false || (typeof exit === "number" && exit !== 0) };
+};
+
+/**
+ * Evidence from a single finished tool call, as a host reports it to a
+ * PostToolUse hook. This lets a checkpoint exist before the turn ends, so a
+ * session that is killed or crashes mid-turn still leaves what it observed.
+ */
+export const evidenceFromToolCall = (
+  toolName: string, toolInput: unknown, toolResponse: unknown, workspaceRoot: string, observedAt?: string, toolFailed = false
+): TaskEvidence => {
+  let args = toolInput;
+  if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = { command: args }; } }
+  const { text: body, failed } = hookResponseText(toolResponse);
+  const sources = toolCallQuotes({ name: toolName, args }, body, failed || toolFailed, workspaceRoot).map(quote => ({
+    ...quote, sha256: digest(quote.text), truncated: /tokens truncated|output truncated/i.test(quote.text),
+    ...(observedAt ? { observedAt } : {}),
+  }));
+  return normalizeTaskEvidence({ version: 1, sources, coverage: "bounded", omitted: 0 })!;
+};
+
+/** Files before command output, otherwise unchanged. Used when a bound must drop sources. */
+export const preferFileSources = <T extends { source: string }>(sources: T[]): T[] =>
+  [...sources.filter(s => !s.source.startsWith("$ ")), ...sources.filter(s => s.source.startsWith("$ "))];
 
 export const taskEvidenceChars = (evidence?: TaskEvidence): number =>
   evidence?.sources.reduce((n, s) => n + s.source.length + s.text.length, 0) ?? 0;
