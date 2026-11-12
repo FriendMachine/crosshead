@@ -42,7 +42,7 @@ const harness = (runtime = "codex", coldSync = false) => {
 		loadContinuityGovernorState: () => buildContinuityGovernorState(buildDefaultContinuityPolicy(), []), writeLog: () => {} });
 	managers.push(lifecycle);
 	const sync = getHotSyncManager({ stateDir, origin: profile.apiBase, npub, nsec, profileName: "default" });
-	const client = { readHotMemory: async () => sync.read(), emitEvent: (event: Parameters<RuntimeLifecycleManager['handleEvent']>[0]) => lifecycle.handleEvent({ ...event, eventId: event.eventId ?? randomUUID() }) } as unknown as LocalRuntimeClient;
+	const client = { readHotMemory: async () => sync.read(), emitEvent: (event: Parameters<RuntimeLifecycleManager['handleEvent']>[0]) => lifecycle.handleEvent({ ...event, eventId: event.eventId ?? randomUUID() }), status: async () => ({ profile }) } as unknown as LocalRuntimeClient;
 	return { stateDir, lifecycle, sync, adapter: new Adapter(client, runtime), fetcher, release };
 };
 afterEach(async () => {
@@ -169,6 +169,33 @@ describe("real adapter local hot-memory path", () => {
 			expect(write).toHaveBeenCalled();
 			expect(JSON.parse(readFileSync(path.join(h.stateDir, "queue.json"), "utf8")).items).toHaveLength(1);
 		} finally { release?.(); h.release(); await h.lifecycle.stop(); }
+	});
+
+	it("checkpoints tool results mid-turn on the hosted path without exceeding the sync budget or crowding the document", async () => {
+		const h = harness("claude-code", true);
+		vi.stubEnv("CROSSHEAD_CAPTURE_SOURCE_EVIDENCE", "1");
+		const input = { workspaceRoot: "/fixture-project", sessionId: "session", turnId: "first", prompt: "Fix the window bug" };
+		await deadline(h.adapter.prepareTurn(input));
+		const output = (label: string) => `NOTICE ${label}: partner ids use the px: prefix\n${"2026-10-10 INFO tick tock\n".repeat(300)}`;
+		// Three large command outputs: together they exceed what one synced checkpoint may hold.
+		for (const label of ["alpha", "beta", "gamma"]) {
+			expect(await deadline(h.adapter.recordToolEvidence({ ...input, goal: input.prompt, toolName: "Bash", toolInput: { command: `node tools/${label}.js` }, toolResponse: { stdout: output(label) } }))).toBe(true);
+		}
+		const midTurn = JSON.parse(String((h.sync.read() as { scopes: Array<{ content: string }> }).scopes[0]!.content)).continuityCheckpoints;
+		expect(midTurn).toHaveLength(1); // earlier snapshots of this turn are superseded, not accumulated
+		expect(midTurn[0].summary).toContain("Turn in progress");
+		await deadline(h.adapter.completeTurn({ ...input, packId: null, goal: input.prompt, summary: `Fixed the window bug. ${"Detail. ".repeat(1400)}` }));
+		const done = JSON.parse(String((h.sync.read() as { scopes: Array<{ content: string }> }).scopes[0]!.content)).continuityCheckpoints;
+		expect(done).toHaveLength(1);
+		expect(done[0].summary).toContain("Fixed the window bug.");
+		expect(done[0].goal.length + done[0].summary.length + JSON.stringify(done[0].evidence ?? "").length).toBeLessThanOrEqual(30000);
+		expect(JSON.stringify(done[0].evidence)).toContain("NOTICE gamma");
+		// A mid-turn snapshot is not a turn outcome: the three tool results queue nothing for the archive.
+		const queued = JSON.parse(readFileSync(path.join(h.stateDir, "queue.json"), "utf8")).items as Array<{ kind: string }>;
+		expect(queued.filter(item => item.kind === "cold_batch").length).toBeLessThanOrEqual(1);
+		const continued = await deadline(h.adapter.prepareTurn({ ...input, sessionId: "next", turnId: "second", prompt: "Implement the feed parser" }));
+		expect(continued.contextText).toContain("NOTICE gamma");
+		expect(h.fetcher).not.toHaveBeenCalled();
 	});
 
 });

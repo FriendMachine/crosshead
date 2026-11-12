@@ -16,6 +16,8 @@ import {
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
 import { compactContinuitySummary } from "./summary-compaction";
 import { captureHotFinding } from "./hot-continuity";
+import { claimSessionStartContext, releaseSessionStartContext } from "./hook-session-context";
+import { taskEvidenceCaptureEnabled } from "./task-evidence";
 import { readLastAssistantMessage } from "./hook-transcript";
 import { writeJsonFile } from "./runtime-persistence";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -375,6 +377,11 @@ export const runOnlyBotsCodexHookCli = async (
   const viaPlugin = isPluginHookInvocation(flags);
   const hostHome =
     typeof flags["codex-home"] === "string" ? flags["codex-home"] : viaPlugin ? resolvePluginHostHome("codex", runtimeHome) : undefined;
+  const isToolFailure = normalizedEventName === "posttoolusefailure" || normalizedEventName === "post_tool_use_failure";
+  const isPostToolUse = isToolFailure || normalizedEventName === "posttooluse" || normalizedEventName === "post_tool_use";
+  // This hook runs after every matching tool call. With evidence capture off
+  // (the default) it has nothing to record, so leave before any other work.
+  if (isPostToolUse && !taskEvidenceCaptureEnabled()) return;
   const payload = readStdinJson(stdinOverride);
   const workspaceRoot = resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = resolveHookWorkspaceId(payload, flags, workspaceRoot);
@@ -414,7 +421,7 @@ export const runOnlyBotsCodexHookCli = async (
       mode: normalizeHostHookMode(installedConfig.hookMode),
       legacyHooksPresent: () => codexHooksFileHasLegacyHooks(loadedHooksFile, runtimeHome, {
         event: eventName,
-        matcherValue: normalizedEventName.replace(/_/g, "") === "sessionstart" ? pickString(payload, ["source", "payload.source"]) ?? undefined : pickCompactionTrigger(payload) ?? undefined,
+        matcherValue: normalizedEventName.replace(/_/g, "") === "sessionstart" ? pickString(payload, ["source", "payload.source"]) ?? undefined : isPostToolUse ? pickString(payload, ["tool_name", "toolName"]) ?? undefined : pickCompactionTrigger(payload) ?? undefined,
       }),
     });
     if (decision === "skip-duplicate") return;
@@ -428,13 +435,43 @@ export const runOnlyBotsCodexHookCli = async (
 
   if (eventName === "help") {
     process.stdout.write(
-      "crosshead-codex-hook <SessionStart|PreCompact|PostCompact|UserPromptSubmit|Stop> [--home <path>] [--codex-home <path>]\n"
+      "crosshead-codex-hook <SessionStart|PreCompact|PostCompact|UserPromptSubmit|PostToolUse|PostToolUseFailure|Stop> [--home <path>] [--codex-home <path>]\n"
     );
     return;
   }
 
   if (["sessionstart", "session_start", "precompact", "pre_compact", "postcompact", "post_compact", "userpromptsubmit", "user_prompt_submit", "stop"].includes(normalizedEventName)) {
     await ensureHookRuntime(runtimeHome);
+  }
+
+  if (isPostToolUse) {
+    const sessionId =
+      pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ?? state.sessionId ?? null;
+    const toolName = pickString(payload, ["tool_name", "toolName"]);
+    if (!sessionId || !toolName) return;
+    // The payload may carry no turn id. Attach to the session's most recently
+    // started turn, never to an older one that a killed session left open.
+    const requestedTurnId = pickString(payload, ["turn_id", "turnId"]) ?? null;
+    const sessionTurns = Object.values(state.activeTurns).filter((turn) => turn.sessionId === sessionId && turn.turnId)
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+    const turnState = sessionTurns.find((turn) => turn.turnId === requestedTurnId) ?? sessionTurns.at(-1)
+      ?? (state.sessionId === sessionId && state.turnId ? state : null);
+    // Only a turn this hook saw start has a request and turn id to attach to.
+    if (!turnState) return;
+    const record = payload as Record<string, unknown>;
+    await ensureHookRuntime(runtimeHome);
+    await adapter.recordToolEvidence({
+      workspaceRoot: turnState.workspaceRoot,
+      workspaceId: turnState.workspaceId,
+      sessionId,
+      turnId: turnState.turnId,
+      goal: turnState.prompt,
+      toolName,
+      toolInput: record.tool_input ?? record.toolInput,
+      toolResponse: record.tool_response ?? record.toolResponse ?? record.tool_output ?? record.toolOutput ?? record.error,
+      failed: isToolFailure,
+    });
+    return;
   }
 
   if (normalizedEventName === "sessionstart" || normalizedEventName === "session_start") {
@@ -504,6 +541,7 @@ export const runOnlyBotsCodexHookCli = async (
 	}
 
 	if (normalizedEventName === "postcompact" || normalizedEventName === "post_compact") {
+		releaseSessionStartContext(runtimeHome, "codex", workspaceId);
 		const requestedSessionId =
 			pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
 			state.sessionId ??
@@ -585,6 +623,8 @@ export const runOnlyBotsCodexHookCli = async (
       hostVersion: pickString(payload, ["codex_version", "codexVersion", "client.version"]) ?? "codex-hook",
       hookObservedAt,
       previousContextReadAt: turnState.lastContextReadAt,
+      // A blank prompt gets no context, so it must not use up the session-start delivery.
+      sessionStart: (prompt ?? "").trim() ? claimSessionStartContext(runtimeHome, "codex", turnState.workspaceId, sessionId) : false,
       transcript: prompt ? [{ role: "user", content: prompt }] : [],
     });
     saveHookTurnState(runtimeHome, state, {

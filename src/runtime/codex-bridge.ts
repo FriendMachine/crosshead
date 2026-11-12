@@ -1,4 +1,5 @@
 import path from "path";
+import { runCheckpointPageCommand } from "./checkpoint-pages";
 
 import { CodexRuntimeAdapter } from "./codex-adapter";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -155,6 +156,10 @@ export const runOnlyBotsCodexBridgeCli = async (argv: string[] = process.argv.sl
 	assertSecureNodeRuntimeVersion();
   const { positionals, flags } = parseArgs(argv);
   const command = canonicalCommand(positionals[0] ?? "help");
+  if (command === "checkpoint-page") {
+    runCheckpointPageCommand("codex", positionals, flags);
+    return;
+  }
 
   if (command === "help" || flags.help) {
     process.stdout.write(`${commandUsage(command === "help" ? undefined : command).join("\n")}\n`);
@@ -330,7 +335,8 @@ export const runOnlyBotsCodexBridgeCli = async (argv: string[] = process.argv.sl
       query,
       typeof flags.profile === "string" ? flags.profile : undefined,
       typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10,
-      flags["include-system"] === true || flags.includeSystem === true
+      flags["include-system"] === true || flags.includeSystem === true,
+      typeof flags["workspace-id"] === "string" ? flags["workspace-id"] : process.env.CROSSHEAD_WORKSPACE_ID ?? process.env.ONLYBOTS_WORKSPACE_ID ?? `repo:${typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.env.ONLYBOTS_WORKSPACE_ROOT ?? process.cwd()}`
     );
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;

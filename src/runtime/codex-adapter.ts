@@ -364,6 +364,7 @@ type CodexHooksConfig = Record<string, unknown> & {
       | "PostCompact"
       | "PreToolUse"
       | "PostToolUse"
+      | "PostToolUseFailure"
       | "UserPromptSubmit"
       | "Stop",
       CodexHookMatcherGroup[]
@@ -896,13 +897,16 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     query: string,
     profileName?: string,
     topK: number = 10,
-    includeSystemMemory: boolean = false
+    includeSystemMemory: boolean = false,
+    workspaceId?: string
   ): Promise<Record<string, unknown>> {
     return this.client.searchMemory({
       profileName: profileName ?? this.config.profileName,
       query,
       top_k: topK,
       include_system: includeSystemMemory,
+      // Confines a local-only search to the caller's project; never sent to a hosted API.
+      ...(workspaceId ? { local_workspace_id: workspaceId } : {}),
     });
   }
 

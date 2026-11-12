@@ -111,6 +111,7 @@ describe("host plugin files", () => {
 	const PLUGIN_CONTENT_SHA256: Record<string, string> = {
 		"1.0.0": "1c6295e2195529599233fae8d5a46b5671ef18998beaf39652e7bc6d955dc4d4",
 		"1.0.1": "1fcdad297292b4ac92cf109a9b29da8f26928710099f028e53c12ae9c45ab5e6",
+		"1.1.0": "afca3f9cf117ed90071a265abd0fa6ebe4d0cb22d1b0e344d20ce70af16d3a9b",
 	};
 	it("generated plugin content is pinned to CROSSHEAD_HOST_PLUGIN_VERSION", () => {
 		const files = renderHostPluginFiles(spec) as Record<string, string>;
@@ -126,8 +127,9 @@ describe("host plugin files", () => {
 	it("plugin hooks cover exactly the events the legacy installer registers", () => {
 		for (const host of ["claude-code", "codex"] as const) {
 			const hooks = JSON.parse(spec.renderPluginHooksFile(host)).hooks as Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
-			expect(Object.keys(hooks)).toEqual(spec.HOST_HOOK_EVENTS.map((entry) => entry.event));
-			for (const entry of spec.HOST_HOOK_EVENTS) {
+			const events = spec.HOST_HOOK_EVENTS.filter((entry) => !entry.hosts || entry.hosts.includes(host));
+			expect(Object.keys(hooks)).toEqual(events.map((entry) => entry.event));
+			for (const entry of events) {
 				expect(hooks[entry.event]).toHaveLength(1);
 				expect(hooks[entry.event]![0]!.matcher).toBe(entry.matcher);
 				expect(hooks[entry.event]![0]!.hooks[0]!.command).toBe(spec.pluginHookCommand(host, entry.event));
@@ -173,6 +175,8 @@ describe("legacy hook rendering", () => {
 				PreCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PreCompact") }] }],
 				PostCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PostCompact") }] }],
 				UserPromptSubmit: [{ hooks: [{ type: "command", command: command("UserPromptSubmit") }] }],
+				PostToolUse: [{ matcher: "Bash|Read|shell|exec_command|shell_command|read_file", hooks: [{ type: "command", command: command("PostToolUse") }] }],
+				PostToolUseFailure: [{ matcher: "Bash|Read", hooks: [{ type: "command", command: command("PostToolUseFailure") }] }],
 				Stop: [{ hooks: [{ type: "command", command: command("Stop") }] }],
 			},
 		});
@@ -189,6 +193,7 @@ describe("legacy hook rendering", () => {
 				PreCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PreCompact"), statusMessage: "Crosshead pre-compact checkpoint", timeout: 30 }] }],
 				PostCompact: [{ matcher: "manual|auto", hooks: [{ type: "command", command: command("PostCompact"), statusMessage: "Crosshead post-compact sync", timeout: 30 }] }],
 				UserPromptSubmit: [{ hooks: [{ type: "command", command: command("UserPromptSubmit"), statusMessage: "Crosshead context", timeout: 45 }] }],
+				PostToolUse: [{ matcher: "Bash|Read|shell|exec_command|shell_command|read_file", hooks: [{ type: "command", command: command("PostToolUse"), statusMessage: "Crosshead checkpoint", timeout: 15 }] }],
 				Stop: [{ hooks: [{ type: "command", command: command("Stop"), statusMessage: "Crosshead memory sync", timeout: 30 }] }],
 			},
 		});
@@ -238,7 +243,7 @@ describe("plugin mode install and migration", () => {
 
 		const forced = await install(f, { hookMode: "settings" });
 		expect(forced.config.hookMode).toBe("settings");
-		expect(managedCommands(readJson(settings).hooks, "crosshead-claude-code-hook")).toHaveLength(5);
+		expect(managedCommands(readJson(settings).hooks, "crosshead-claude-code-hook")).toHaveLength(7);
 		await uninstallClaudeCodeAdapter({ home: f.home, hostHome: f.claudeHome });
 		expect(readJson(settings)).toEqual({});
 	});
@@ -251,14 +256,14 @@ describe("plugin mode install and migration", () => {
 		const userSettings = path.join(claudeHome, "settings.json");
 		mkdirSync(claudeHome, { recursive: true });
 		await install(f, { hostHome: claudeHome, workspaceRoot: userHome });
-		expect(countLegacyClaudeHookCommands(userSettings, f.home)).toBe(5);
+		expect(countLegacyClaudeHookCommands(userSettings, f.home)).toBe(7);
 		writeJson(path.join(f.workspace, ".claude", "settings.json"), { enabledPlugins: { "crosshead@crosshead": true } });
 
 		for (const hookMode of [undefined, "plugin"] as const) {
 			const result = await install(f, { hostHome: claudeHome, workspaceRoot: userHome, hookMode });
 			expect(result.config.hookMode).toBe("settings");
 			expect(result.migratedFiles).toEqual([]);
-			expect(countLegacyClaudeHookCommands(userSettings, f.home)).toBe(5);
+			expect(countLegacyClaudeHookCommands(userSettings, f.home)).toBe(7);
 		}
 		const explicit = await install(f, { hostHome: claudeHome, workspaceRoot: f.workspace, hookMode: "plugin" });
 		expect(explicit.config.hookMode).toBe("settings");
@@ -311,7 +316,7 @@ describe("plugin mode install and migration", () => {
 		expect(pending.config.hookMode).toBe("plugin");
 		expect(pending.migratedFiles).toEqual([]);
 		expect(pending.hookModeNote).toContain("/hooks");
-		expect(countLegacyCodexHookCommands(hooksFile, f.home)).toBe(5);
+		expect(countLegacyCodexHookCommands(hooksFile, f.home)).toBe(6);
 
 		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION, f.codexHome);
 		const result = await installCodex(f);
@@ -328,7 +333,7 @@ describe("plugin mode install and migration", () => {
 		enableCodexPlugin(f.codexHome, false);
 		const result = await installCodex(f);
 		expect(result.config.hookMode).toBe("settings");
-		expect(managedCommands(readJson(path.join(f.codexHome, "hooks.json")).hooks, "crosshead-codex-hook")).toHaveLength(5);
+		expect(managedCommands(readJson(path.join(f.codexHome, "hooks.json")).hooks, "crosshead-codex-hook")).toHaveLength(6);
 
 		writeFileSync(path.join(f.codexHome, "config.toml"), `[projects."${f.workspace}"]\ntrust_level = "trusted"\n`);
 		mkdirSync(path.join(f.workspace, ".codex"));
@@ -337,7 +342,7 @@ describe("plugin mode install and migration", () => {
 		expect(project.pluginDetection).toMatchObject({ enabled: true, scope: "project", enabledAtUserScope: false });
 		expect(project.config.hookMode).toBe("settings");
 		expect(project.migratedFiles).toEqual([]);
-		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(5);
+		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(6);
 	});
 
 	it.each(["older-version", "different-home", "unbound-receipt"])("Codex: %s receipt cannot authorize global hook removal", async (kind) => {
@@ -351,7 +356,7 @@ describe("plugin mode install and migration", () => {
 		}
 		const pending = await installCodex(f);
 		expect(pending.migratedFiles).toEqual([]);
-		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(5);
+		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(6);
 		expect(inspectHostHookRegistrations(f.home, f.workspace).find((check) => check.id === "codex_hooks")).toMatchObject({ ok: false });
 		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION, f.codexHome);
 		expect((await installCodex(f)).migratedFiles).toEqual([path.join(f.codexHome, "hooks.json")]);
@@ -371,7 +376,7 @@ describe("plugin mode install and migration", () => {
 		recordPluginInvocation(f.home, "codex", spec.CROSSHEAD_HOST_PLUGIN_VERSION, f.codexHome);
 		await expect(installCodex(f)).rejects.toThrow("regular file");
 		expect(readFileSync(configPath, "utf8")).toBe(before);
-		expect(countLegacyCodexHookCommands(real, f.home)).toBe(5);
+		expect(countLegacyCodexHookCommands(real, f.home)).toBe(6);
 	});
 });
 
@@ -629,7 +634,7 @@ describe("hook dispatch", () => {
 		enableCodexPlugin(f.codexHome);
 		const pending = await installCodex(f, { hookMode: "plugin" });
 		expect(pending.config.hookMode).toBe("plugin");
-		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(5);
+		expect(countLegacyCodexHookCommands(path.join(f.codexHome, "hooks.json"), f.home)).toBe(6);
 		const window = inspectHostHookRegistrations(f.home, f.workspace).find((check) => check.id === "codex_hooks")!;
 		expect(window.ok).toBe(false);
 		expect(window.message).toContain("/hooks");

@@ -142,7 +142,7 @@ describe("hot continuity findings", () => {
     let entries: HotContinuityCheckpoint[] = [];
     for (let i = 0; i < 30; i++) entries = updateHotCheckpoints(entries, checkpoint({ turnId: String(i), summary: "Bounded evidence. ".repeat(800) }));
     expect(entries.length).toBeLessThanOrEqual(12);
-    expect(entries.reduce((n, entry) => n + entry.goal.length + entry.summary.length, 0)).toBeLessThanOrEqual(30000);
+    expect(entries.reduce((n, entry) => n + entry.goal.length + entry.summary.length, 0)).toBeLessThanOrEqual(72000);
     expect(entries.every((entry) => entry.summary.length <= HOT_FINDING_LIMIT)).toBe(true);
     expect(renderHotCheckpoints(entries).length).toBeLessThanOrEqual(HOT_CONTEXT_LIMIT);
     expect(entries.at(-1)?.turnId).toBe("29");

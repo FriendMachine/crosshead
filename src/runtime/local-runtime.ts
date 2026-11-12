@@ -30,6 +30,7 @@ import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedCont
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
 import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, readLocalHotMemory } from "./local-hot-memory";
+import { searchHotCheckpoints } from "./hot-continuity";
 import {
 	RuntimeLifecycleManager,
 	type RuntimeLifecycleActivity,
@@ -3286,6 +3287,15 @@ export class OnlyBotsLocalRuntimeDaemon {
 			profileName,
 			...request,
 		});
+		const profile = loadProfile(this.paths, resolvedProfileName);
+		if (profile && isLocalOnlyRuntimeProfile(profile)) {
+			// No hosted index exists for this profile. Answer from local hot memory.
+			const query = typeof payload.query === "string" ? payload.query : "";
+			const workspaceId = typeof payload.local_workspace_id === "string" ? payload.local_workspace_id : null;
+			const results = searchHotCheckpoints(readLocalHotMemory(this.paths.state, "all"), query, Number(payload.top_k) || 10, workspaceId);
+			return { scope: "local_hot_memory", query, count: results.length, results };
+		}
+		delete payload.local_workspace_id;
 		const result = await client.searchMemory(payload);
 		await this.persistSession(resolvedProfileName, secret, client);
 		return result;

@@ -44,6 +44,28 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|shell|exec_command|shell_command|read_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/crosshead-hook\" claude-code PostToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/crosshead-hook\" claude-code PostToolUseFailure"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -1,7 +1,7 @@
 {
   "name": "crosshead",
   "displayName": "Crosshead",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Persistent memory across coding agents. Hooks connect this host to the locally installed Crosshead runtime, shared with Claude Code, Codex, Hermes, OpenCode and Pi.",
   "author": {
     "name": "FriendMachine",

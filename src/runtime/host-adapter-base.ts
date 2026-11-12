@@ -1,6 +1,11 @@
-import { nowIso, renderInjectedPrompt } from "./adapter-utils";
+import { existsSync } from "fs";
+import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
 import { workspaceHotScope } from "./workspace-hot-memory";
-import { readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
+import path from "path";
+import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
+import { CHECKPOINT_PAGE_CHARS, inlineCheckpointPages, paginateCheckpoint, saveCheckpointPages } from "./checkpoint-pages";
+import { resolveRuntimeHome } from "./local-runtime";
+import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
 import type { LocalRuntimeClient } from "./local-client";
 import {
   buildRuntimeStartupFreshness,
@@ -26,6 +31,8 @@ export type HostAdapterBaseConfig = {
   profileName: string;
   hostHome: string;
   adapterVersion: string;
+  /** Runtime home holding this host's bridge wrapper under bin/. */
+  runtimeHome?: string;
 };
 
 export type HostAdapterTranscriptEntry = {
@@ -55,6 +62,23 @@ export type HostAdapterTurnPrepareRequest = {
   turnId: string;
   prompt: string;
   transcript?: HostAdapterTranscriptEntry[];
+  /** True for the first prompt of a host session; it gets the larger hot-context budget. */
+  sessionStart?: boolean;
+};
+
+export type HostAdapterToolEvidenceRequest = {
+  profileName?: string;
+  workspaceRoot: string;
+  workspaceId?: string;
+  hostVersion?: string;
+  sessionId: string;
+  turnId?: string | null;
+  goal?: string | null;
+  toolName: string;
+  toolInput: unknown;
+  toolResponse: unknown;
+  /** The host reported the call as failed; only exact file matches are kept from its output. */
+  failed?: boolean;
 };
 
 export type HostAdapterTurnPrepareResult = {
@@ -254,6 +278,69 @@ export abstract class HostRuntimeAdapterBase {
     return readTaskEvidence(file, sessionId, workspaceRoot, since, goal ?? "");
   }
 
+  /** This host's Crosshead command, or null when no wrapper is installed (other hosts). */
+  protected bridgeCommand(): string | null {
+    const wrapper = { "claude-code": "crosshead-claude-code", codex: "crosshead-codex" }[this.identity.runtimeId as string];
+    if (!wrapper || !this.config.runtimeHome) return null;
+    // Plugin-only installs may have no wrapper; never name a command that is not there.
+    const file = path.join(this.config.runtimeHome, "bin", wrapper);
+    if (!existsSync(file)) return null;
+    const quoted = /^[A-Za-z0-9_@%+=:,./-]+$/.test(file) ? file : shellQuote(file);
+    const home = path.resolve(this.config.runtimeHome) === path.resolve(resolveRuntimeHome(undefined)) ? "" : ` --home ${shellQuote(this.config.runtimeHome)}`;
+    return `${quoted} checkpoint-page%PAGE%${home}`;
+  }
+
+  /**
+   * Hot checkpoint text for one prompt. The first prompt of a session gets the
+   * first page of the complete checkpoint; later prompts get the small excerpt.
+   * Whenever more is saved than is shown, the pages are stored and the text ends
+   * with the exact command that prints them, so an agent never has to stop or
+   * guess because a note was cut off.
+   */
+  protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean): string | undefined {
+    const command = this.bridgeCommand();
+    if (!command || !this.config.runtimeHome) return undefined;
+    const selected = selectHotCheckpoints(snapshot, prompt);
+    if (!selected.length) return undefined;
+    const full = renderHotCheckpoints(selected, HOT_FULL_RENDER_LIMIT);
+    const inline = sessionStart ? inlineCheckpointPages(this.identity.runtimeId) : 0;
+    if (full.length <= (sessionStart ? CHECKPOINT_PAGE_CHARS * inline : HOT_CONTEXT_LIMIT)) return full;
+    const pages = paginateCheckpoint(full);
+    if (sessionStart && pages.length <= inline) return full;
+    const key = saveCheckpointPages(this.config.runtimeHome, this.identity.runtimeId, workspaceId, pages);
+    const read = (page: number): string => `${command.replace("%PAGE%", ` ${page}`)} --key ${key}`;
+    const shown = inline === 1 ? "page 1" : `pages 1 to ${inline}`;
+    const remaining = pages.length - inline === 1 ? `page ${pages.length}` : `pages ${inline + 1} to ${pages.length}, one page number per call`;
+    return sessionStart
+      ? `${pages.slice(0, inline).join("\n")}\n[Crosshead: ${shown} of ${pages.length} of the saved checkpoint shown. The rest holds further saved findings and observed sources. Before relying on partial values, read ${remaining}, with this Crosshead command: ${read(inline + 1)}]`
+      : `${renderHotCheckpoints(selected, HOT_CONTEXT_LIMIT)}\n[Crosshead: excerpt only. The saved checkpoint has ${pages.length} page${pages.length === 1 ? "" : "s"}; read from the start with: ${read(1)}]`;
+  }
+
+  /**
+   * Checkpoint what one finished tool call showed, before the turn ends. Same
+   * opt-in and memory-mode gates as captureTaskEvidence. Returns whether
+   * anything was recorded.
+   */
+  async recordToolEvidence(input: HostAdapterToolEvidenceRequest): Promise<boolean> {
+    if (!taskEvidenceCaptureEnabled()) return false;
+    const taskEvidence = evidenceFromToolCall(input.toolName, input.toolInput, input.toolResponse, input.workspaceRoot, nowIso(), input.failed === true);
+    if (!taskEvidence.sources.length) return false;
+    const profileName = input.profileName ?? this.config.profileName;
+    const status = await this.client.status(profileName).catch(() => null);
+    if (status?.profile?.memoryMode !== "auto" && status?.profile?.memoryMode !== "assist") return false;
+    await this.client.emitEvent({
+      runtime: this.identity.runtimeId,
+      profileName,
+      workspaceId: input.workspaceId ?? `repo:${input.workspaceRoot}`,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      type: "tool.completed",
+      payload: { toolName: input.toolName, summary: `Observed ${input.toolName} result`, checkpointOnly: true, ...(input.goal ? { goal: input.goal } : {}), taskEvidence },
+      metadata: { hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback, adapterVersion: this.config.adapterVersion },
+    });
+    return true;
+  }
+
   /** Adapter-specific workspace attachment (managed files and manifest differ per host). */
   protected abstract attachWorkspace(input: {
     profileName?: string;
@@ -363,6 +450,7 @@ export abstract class HostRuntimeAdapterBase {
       freshness,
       hotMemorySnapshot: preTurnHotMemory,
       goal: input.prompt,
+      hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
     return {
       packId,
