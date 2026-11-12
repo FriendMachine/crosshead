@@ -44,8 +44,10 @@ const credentialLikeContent = (value: string): boolean => [
   /\b(?:aws_secret_access_key|aws_session_token|database_url|private[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|api[_-]?key|password|passwd|auth[_-]?token|github[_-]?token|gitlab[_-]?token|[a-z0-9_]*(?:secret|token|credential)[a-z0-9_]*)["']?\s*[:=]\s*["']?[^\s"']{8,}/i,
 ].some((pattern) => pattern.test(value));
 
+// On unless explicitly turned off. Without it a fresh session receives a summary of the earlier
+// work but not the exact rules it read, which is what most often has to survive.
 export const taskEvidenceCaptureEnabled = (env: NodeJS.ProcessEnv = process.env): boolean =>
-  (env.CROSSHEAD_CAPTURE_SOURCE_EVIDENCE ?? env.ONLYBOTS_CAPTURE_SOURCE_EVIDENCE) === "1";
+  (env.CROSSHEAD_CAPTURE_SOURCE_EVIDENCE ?? env.ONLYBOTS_CAPTURE_SOURCE_EVIDENCE) !== "0";
 
 // These are observed workspace reads, not remote MCP responses, environment
 // dumps, or private host state.

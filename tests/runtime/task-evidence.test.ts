@@ -24,9 +24,11 @@ const checkpoint = (evidence: unknown, overrides: Partial<HotContinuityCheckpoin
 });
 
 describe("source-backed task continuity", () => {
-  it("requires explicit opt-in before host adapters capture exact source excerpts", () => {
-    expect(taskEvidenceCaptureEnabled({})).toBe(false);
+  it("captures exact source excerpts unless the user turns it off", () => {
+    expect(taskEvidenceCaptureEnabled({})).toBe(true);
     expect(taskEvidenceCaptureEnabled({ CROSSHEAD_CAPTURE_SOURCE_EVIDENCE: "1" })).toBe(true);
+    expect(taskEvidenceCaptureEnabled({ CROSSHEAD_CAPTURE_SOURCE_EVIDENCE: "0" })).toBe(false);
+    expect(taskEvidenceCaptureEnabled({ ONLYBOTS_CAPTURE_SOURCE_EVIDENCE: "0" })).toBe(false);
     expect(taskEvidenceCaptureEnabled({ CROSSHEAD_CAPTURE_SOURCE_EVIDENCE: "0", ONLYBOTS_CAPTURE_SOURCE_EVIDENCE: "1" })).toBe(false);
   });
   it("keeps explicitly requested sources through more than 24 later unrelated reads", () => {

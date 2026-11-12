@@ -67,27 +67,26 @@ same bytes (see [Releases](#releases)).
 
 ## Choose what memory can retain
 
-The default keeps bounded task summaries and explicitly saved memory. It does
-not automatically collect exact source excerpts. Summaries and explicit writes
-can still contain code; this is not a guarantee that code never enters memory.
+By default Crosshead keeps bounded task summaries, explicitly saved memory, and
+bounded excerpts of the workspace files and command output your agent reads
+while it works. The excerpts are what let a fresh session recover an exact
+specification or rule instead of a summary of it.
 
-For work where exact specifications or code must survive a fresh session, you
-can opt in before launching the host:
+Those excerpts can be stored, synced through the configured service, and sent
+to a later coding-model session. Filters exclude some sensitive paths and
+credential-like text, but cannot guarantee that every secret is removed. If a
+repository contains text you do not intend to disclose through those paths,
+turn excerpt capture off before launching the host:
 
 ```bash
-export CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=1
+export CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=0
 codex  # or launch Claude Code from this shell
 ```
 
-This permits bounded excerpts of supported workspace file reads to enter memory.
-They can be stored, synced through the configured service, and sent to a later
-coding-model session. Filters exclude some sensitive paths and credential-like
-text, but cannot guarantee that every secret is removed. Use this option only
-for repositories whose text you intend to disclose through those paths.
-
-To disable automatic excerpt capture for later turns, launch the host with
-`CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=0`. This does not delete existing memory.
-Verify a concrete rule in a fresh session after choosing either setting.
+With capture off, memory still holds summaries and explicit writes, which can
+themselves contain code; this is not a guarantee that code never enters memory.
+Turning capture off does not delete existing memory. Verify a concrete rule in
+a fresh session after choosing either setting.
 
 ## What runs locally and what is sent
 
@@ -102,9 +101,9 @@ Verify a concrete rule in a fresh session after choosing either setting.
   service. Promotion to warm memory and archiving to cold memory follow your
   memory mode (`crosshead memory mode`).
 - Hot-memory documents are signed by the local identity before upload and are
-  ignored on read if the signature, identity, or scope does not verify. Exact
-  source-file excerpts are disabled by default; opt in with
-  `CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=1` only when that disclosure is intended.
+  ignored on read if the signature, identity, or scope does not verify. Bounded
+  source-file excerpts are captured by default; set
+  `CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=0` when that disclosure is not intended.
 - Paid recall (warm and cold memory) is selected and assembled by the hosted
   service. This client sends the turn's goal and workspace scope, but no hosted
   response field is injected into an agent prompt. Only locally signature-
