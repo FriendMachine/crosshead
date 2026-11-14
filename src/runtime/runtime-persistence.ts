@@ -22,7 +22,7 @@ import { randomUUID } from "crypto";
 import path from "path";
 
 import { nowIso } from "./adapter-utils";
-import { resolveOnlyBotsHome } from "./runtime-env";
+import { isRuntimeProfileName, resolveOnlyBotsHome } from "./runtime-env";
 import type { AgentPassport } from "../protocol/passports";
 import {
 	buildDefaultContinuityPolicy,
@@ -246,7 +246,7 @@ export const healthFile = (paths: RuntimePaths): string => path.join(paths.state
 export const lifecycleEventsFile = (paths: RuntimePaths): string => path.join(paths.state, "lifecycle-events.jsonl");
 
 const portablePathToken = (value: string, fieldName: string): string => {
-	if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(value)) {
+	if (!isRuntimeProfileName(value)) {
 		throw new Error(`${fieldName} must be a portable path token`);
 	}
 	return value;

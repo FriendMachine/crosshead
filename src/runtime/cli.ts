@@ -19,10 +19,17 @@ import { handoffFromCli } from "./cli/handoff";
 import { memoryFromCli, workspaceFromCli } from "./cli/memory";
 import { messagesFromCli } from "./cli/messages";
 import { publicFromCli } from "./cli/public";
-import { quickstartFromCli } from "./cli/quickstart";
+import { shouldGuideQuickstart, quickstartFromCli } from "./cli/quickstart";
 import { buildRuntimeBillingRemediation, formatRuntimeBillingRemediation } from "./billing-remediation";
 import { HostedOnlyBotsRequestError } from "./hosted-client";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
+import { resolveCrossheadProfile } from "./runtime-env";
+import { parseArgs } from "./adapter-utils";
+import { scopedQuickstartFromCli, uninstallWorkspaceHostFromCli, workspaceHooksFromCli } from "./cli/workspace";
+import { runOnlyBotsCodexHookCli } from "./codex-hook";
+import { runOnlyBotsClaudeCodeHookCli } from "./claude-code-hook";
+import { reportHookFailure } from "./hook-runtime";
+import { runCheckpointPageCommand } from "./checkpoint-pages";
 
 const renderOnlyBotsCtlCliError = (
 	argv: string[],
@@ -79,11 +86,20 @@ export const runOnlyBotsCtlCli = async (
 ): Promise<void> => {
 	assertSecureNodeRuntimeVersion();
 	const command = argv[0];
-	const rest = argv.slice(1);
+	let rest = argv.slice(1);
 	const extension = command ? extensions.commands?.[command] : undefined;
 	if (extension) {
 		process.stdout.write(`${await extension(rest)}\n`);
 		return;
+	}
+	const profileCommands = new Set([
+		"setup", "keygen", "status", "doctor", "memory", "messages", "billing", "public", "context",
+		"agent", "lineage", "passport", "workspace", "handoff", "sign-challenge", "sign-deletion-challenge", "organization", "quickstart", "onboard",
+	]);
+	const profile = resolveCrossheadProfile();
+	if (profile && command && profileCommands.has(command) &&
+		!rest.some((arg) => arg === "--profile" || arg.startsWith("--profile="))) {
+		rest = [...rest, "--profile", profile];
 	}
 	const cliScriptPath = extensions.cliScriptPath ?? path.resolve(__filename);
 	const daemonScriptPath = extensions.daemonScriptPath ?? path.resolve(__dirname, "daemon.js");
@@ -144,7 +160,7 @@ export const runOnlyBotsCtlCli = async (
 			output = await eventsFromCli(rest);
 			break;
 		case "workspace":
-			output = await workspaceFromCli(rest);
+			output = await (rest[0] === "link" ? workspaceFromCli(rest) : workspaceHooksFromCli(rest));
 			break;
 		case "memory":
 			output = await memoryFromCli(rest);
@@ -198,16 +214,35 @@ export const runOnlyBotsCtlCli = async (
 			output = await capabilitiesFromCli(rest);
 			break;
 		case "quickstart":
-		case "onboard":
-			output = await quickstartFromCli(rest, {
+		case "onboard": {
+			const { flags } = parseArgs(rest);
+			const guided = shouldGuideQuickstart(argv.slice(1), Boolean(process.stdin.isTTY && process.stderr.isTTY));
+			const scoped = guided || flags.scope !== undefined;
+			const scripts = {
 				cliScriptPath,
 				daemonScriptPath,
 				codexBridgeScriptPath,
 				codexHookScriptPath,
 				claudeCodeBridgeScriptPath,
 				claudeCodeHookScriptPath,
-			});
+			};
+			output = scoped ? await scopedQuickstartFromCli(flags, scripts, guided) : await quickstartFromCli(rest, scripts);
 			break;
+		}
+		case "checkpoint-page": {
+			const { positionals, flags } = parseArgs([command, ...rest]);
+			const host = flags.runtime;
+			if (host !== "codex" && host !== "claude-code") throw new Error("Choose --runtime codex or claude-code");
+			runCheckpointPageCommand(host, positionals, flags);
+			return;
+		}
+		case "host-hook": {
+			const [host, ...args] = rest;
+			if (host !== "codex" && host !== "claude-code") throw new Error("Unknown Crosshead hook host");
+			const runHook = host === "codex" ? runOnlyBotsCodexHookCli : runOnlyBotsClaudeCodeHookCli;
+			await runHook(args).catch((error: unknown) => reportHookFailure(host, args[0], error));
+			return;
+		}
 		case "start":
 			output = await startFromCli(rest);
 			break;
@@ -229,11 +264,11 @@ export const runOnlyBotsCtlCli = async (
 				break;
 			}
 			if (rest[0] === "codex") {
-				output = await uninstallCodexFromCli(rest.slice(1));
+				output = await uninstallWorkspaceHostFromCli("codex", rest.slice(1)) ?? await uninstallCodexFromCli(rest.slice(1));
 				break;
 			}
 			if (rest[0] === "claude-code") {
-				output = await uninstallClaudeCodeFromCli(rest.slice(1));
+				output = await uninstallWorkspaceHostFromCli("claude-code", rest.slice(1)) ?? await uninstallClaudeCodeFromCli(rest.slice(1));
 				break;
 			}
 			if (rest[0] === "pi") {
@@ -259,7 +294,9 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead install claude-code [--home <path>] [--claude-home <path>] [--workspace-root <path>] [--profile <name>] [--version <version>] [--claude-bin <path>] [--hook-mode auto|plugin|settings]",
 				"crosshead install pi [--home <path>] [--profile <name>] [--version <version>]  # embedded hosts without shell wiring",
 				"crosshead install omp [--home <path>] [--profile <name>] [--workspace-root <path>] [--omp-bin <path>] [--no-envrc]  # Pi-compatible OMP project wiring",
-				"crosshead quickstart --api-base <url> [--home <path>] [--profile <name>] [--adapter codex|claude-code|pi|omp|hermes|opencode|none] [--workspace-root <path>] [--hook-mode auto|plugin|settings] [--omp-bin <path>] [--create-checkout] [--json]",
+				"crosshead quickstart  # guided project setup",
+				"crosshead quickstart --scope project|all|manual [--adapter codex|claude-code|both] [--workspace-root <path>] [--profile <name>] [--api-base <url>] [--source-excerpts on|off] [--dry-run] [--json]",
+				"crosshead quickstart --adapter pi|omp|hermes|opencode|none [--api-base <url>] [--profile <name>] [--json]",
 				capabilityHelpLine,
 		"crosshead keygen [--json]",
 		"crosshead keygen --setup --profile <name> --api-base <url> [--home <path>] [--memory-mode assist] [--workspace-scope repo|workspace|global] [--json]",
@@ -278,6 +315,10 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead update [adapter] [--home <path>] [--channel stable|beta|canary] [--version <version>]",
 				"crosshead rollback [adapter] --to <version> [--home <path>]",
 				"crosshead doctor [--home <path>] [--workspace-root <path>] [--json]",
+				"crosshead workspace add --workspace-root <path> --adapter codex|claude-code|both --profile <name> [--source-excerpts on|off] [--replace-user-hooks] [--dry-run] [--json]",
+				"crosshead workspace remove --workspace-root <path> [--adapter codex|claude-code|both] [--dry-run] [--json]",
+				"crosshead workspace repair [--dry-run] [--json] [--home <path>]",
+				"crosshead workspace list|check [--workspace-root <path>] [--json]",
 				"crosshead logs [--home <path>] [--lines 50]",
 				"crosshead events [--home <path>] [--lines 50] [--json]",
 				"crosshead workspace link --name <shared-label> --workspace-root <path> [--home <path>] [--profile <name>]",

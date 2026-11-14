@@ -20,7 +20,8 @@ import {
   writePluginSetupNotice,
 } from "./host-plugin-mode";
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
-import { writeJsonFile } from "./runtime-persistence";
+import { loadProfile, resolveRuntimePaths, writeJsonFile } from "./runtime-persistence";
+import { readWorkspacePolicyForHook, recordWorkspaceHookStart, workspaceHookForInvocation, workspaceHookStateFile } from "./workspace-hooks";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
 
 type HookTurnState = {
@@ -119,8 +120,7 @@ const normalizeHookTurnState = (
 const hookTurnKey = (sessionId: string | null, turnId: string | null): string | null =>
   sessionId || turnId ? `${sessionId ?? "-"}:${turnId ?? "-"}` : null;
 
-const loadHookState = (runtimeHome: string, workspaceRoot: string, workspaceId: string): HookState => {
-  const filePath = hookStateFile(runtimeHome);
+const loadHookState = (filePath: string, workspaceRoot: string, workspaceId: string): HookState => {
   if (!existsSync(filePath)) {
     return defaultHookState(workspaceRoot, workspaceId);
   }
@@ -159,8 +159,8 @@ const loadHookState = (runtimeHome: string, workspaceRoot: string, workspaceId: 
   }
 };
 
-const saveHookState = (runtimeHome: string, state: HookState): void => {
-  writeJsonFile(hookStateFile(runtimeHome), state);
+const saveHookState = (stateFile: string, state: HookState): void => {
+  writeJsonFile(stateFile, state);
 };
 
 const selectHookTurnState = (state: HookState, sessionId: string | null, turnId: string | null): HookTurnState => {
@@ -192,17 +192,17 @@ const selectHookTurnState = (state: HookState, sessionId: string | null, turnId:
   return state;
 };
 
-const saveHookTurnState = (runtimeHome: string, state: HookState, turn: HookTurnState): void => {
+const saveHookTurnState = (stateFile: string, state: HookState, turn: HookTurnState): void => {
   const activeTurns = { ...state.activeTurns };
   const key = hookTurnKey(turn.sessionId, turn.turnId);
   if (key) {
     activeTurns[key] = turn;
   }
-  saveHookState(runtimeHome, { ...state, ...turn, activeTurns });
+  saveHookState(stateFile, { ...state, ...turn, activeTurns });
 };
 
 const clearHookTurnState = (
-  runtimeHome: string,
+  stateFile: string,
   state: HookState,
   sessionId: string | null,
   turnId: string | null,
@@ -224,7 +224,7 @@ const clearHookTurnState = (
     lastContextReadAt: fallback.lastContextReadAt,
     updatedAt: nowIso(),
   };
-  saveHookState(runtimeHome, { ...next, activeTurns });
+  saveHookState(stateFile, { ...next, activeTurns });
 };
 
 const getNestedValue = (payload: Record<string, unknown> | null, dottedKey: string): unknown => {
@@ -286,7 +286,8 @@ const resolvePathCandidate = (value: string): string => (path.isAbsolute(value) 
 
 const resolveHookWorkspaceRoot = (
   payload: Record<string, unknown> | null,
-  flags: Record<string, string | boolean>
+  flags: Record<string, string | boolean>,
+  useEnvironment = true
 ): string => {
   const candidate =
     pickFlagString(flags, ["workspace-root", "workspaceRoot"]) ??
@@ -302,7 +303,7 @@ const resolveHookWorkspaceRoot = (
       "payload.workspaceRoot",
       "payload.cwd",
     ]) ??
-    pickEnvString(["ONLYBOTS_WORKSPACE_ROOT", "BENCH_WORKSPACE"]);
+    (useEnvironment ? pickEnvString(["ONLYBOTS_WORKSPACE_ROOT", "BENCH_WORKSPACE"]) : null);
   return candidate ? resolvePathCandidate(candidate) : process.cwd();
 };
 
@@ -372,19 +373,34 @@ export const runOnlyBotsClaudeCodeHookCli = async (
   const { positionals, flags } = parseArgs(argv);
   const eventName = positionals[0] ?? "help";
   const normalizedEventName = eventName.toLowerCase();
-  const runtimeHome = resolveRuntimeHome(typeof flags.home === "string" ? flags.home : undefined);
-  const viaPlugin = isPluginHookInvocation(flags);
-  const hostHome =
-    typeof flags["claude-home"] === "string" ? flags["claude-home"] : viaPlugin ? resolvePluginHostHome("claude-code", runtimeHome) : undefined;
   const isToolFailure = normalizedEventName === "posttoolusefailure" || normalizedEventName === "post_tool_use_failure";
   const isPostToolUse = isToolFailure || normalizedEventName === "posttooluse" || normalizedEventName === "post_tool_use";
-  // This hook runs after every matching tool call. With evidence capture off
-  // (the default) it has nothing to record, so leave before any other work.
-  if (isPostToolUse && !taskEvidenceCaptureEnabled()) return;
+  if (isPostToolUse && (flags["source-excerpts"] === "off" ||
+      (!flags.binding && !taskEvidenceCaptureEnabled()))) return;
+  const runtimeHome = resolveRuntimeHome(typeof flags.home === "string" ? flags.home : undefined);
+  const viaPlugin = isPluginHookInvocation(flags);
+  const paths = resolveRuntimePaths(runtimeHome);
+  const policy = readWorkspacePolicyForHook(paths, normalizedEventName, flags.binding);
+  if (policy === false) return;
+  // Ignore retired settings and plugin registrations before reading the chat payload.
+  if (policy && !policy.bindings.some((binding) => binding.host === "claude-code" && binding.id === flags.binding)) return;
+  const selectedBinding = policy?.bindings.find((binding) => binding.id === flags.binding);
+  if (isPostToolUse && !(selectedBinding?.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return;
   const payload = readStdinJson(stdinOverride);
-  const workspaceRoot = resolveHookWorkspaceRoot(payload, flags);
-  const workspaceId = resolveHookWorkspaceId(payload, flags, workspaceRoot);
-  if (eventName !== "help") {
+  const scoped = workspaceHookForInvocation(policy, "claude-code", flags.binding, resolveHookWorkspaceRoot(payload, {}, false));
+  if (scoped === null) return;
+  const hostHome = scoped?.binding.hostHome ??
+    (typeof flags["claude-home"] === "string" ? flags["claude-home"] : viaPlugin ? resolvePluginHostHome("claude-code", runtimeHome) : undefined);
+  const workspaceRoot = scoped?.root ?? resolveHookWorkspaceRoot(payload, flags);
+  const workspaceId = scoped ? `repo:${workspaceRoot}` : resolveHookWorkspaceId(payload, flags, workspaceRoot);
+  let legacyUnscoped = false;
+  if (scoped) {
+    const profile = loadProfile(paths, scoped.binding.profile);
+    if (!profile) throw new Error(`Unknown Crosshead profile: ${scoped.binding.profile}`);
+    if (profile.memoryMode === "off") return;
+    legacyUnscoped = scoped.binding.legacyUnscoped === true && scoped.binding.legacyNpub === profile.npub;
+  }
+  if (!scoped && eventName !== "help") {
     let installedConfig: ReturnType<typeof loadClaudeCodeAdapterConfig> | null = null;
     try {
       installedConfig = loadClaudeCodeAdapterConfig(runtimeHome, hostHome);
@@ -398,6 +414,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       }
       return;
     }
+    if (loadProfile(paths, installedConfig.profileName)?.memoryMode === "off") return;
     if (viaPlugin) {
       try {
         recordPluginInvocation(runtimeHome, "claude-code", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null, claudeUserConfigDir());
@@ -418,11 +435,14 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     });
     if (decision === "skip-duplicate") return;
   }
-  const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
-    home: runtimeHome,
-    hostHome,
-  });
-  const state = loadHookState(runtimeHome, workspaceRoot, workspaceId);
+  const adapter = scoped
+    ? ClaudeCodeRuntimeAdapter.forWorkspace(runtimeHome, scoped.binding.hostHome, workspaceRoot, scoped.binding.profile, scoped.binding.sourceExcerpts, legacyUnscoped, scoped.binding.legacyBefore)
+    : ClaudeCodeRuntimeAdapter.fromInstalled({
+		home: runtimeHome,
+		hostHome,
+      });
+  const stateFile = scoped ? workspaceHookStateFile(paths, scoped.binding, workspaceRoot) : hookStateFile(runtimeHome);
+  const state = loadHookState(stateFile, workspaceRoot, workspaceId);
 
   if (eventName === "help") {
     process.stdout.write(
@@ -477,7 +497,12 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       hostHome,
       hostVersion: pickString(payload, ["claude_version", "claudeVersion", "client.version"]) ?? "claude-code-hook",
     });
-    saveHookState(runtimeHome, {
+    if (scoped) {
+      try {
+		recordWorkspaceHookStart(paths, scoped.binding, workspaceRoot, pickString(payload, ["source", "payload.source"]));
+      } catch { /* Diagnostics must not interrupt the host session. */ }
+    }
+    saveHookState(stateFile, {
       ...state,
       sessionId,
       workspaceRoot,
@@ -517,7 +542,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
 				taskEvidence: await adapter.captureTaskEvidence(pickString(payload, ["transcript_path", "transcriptPath", "conversation_path", "conversationPath"]), sessionId, turnWorkspaceRoot, turnState.lastContextReadAt, prompt),
 			},
 		});
-		saveHookTurnState(runtimeHome, state, {
+		saveHookTurnState(stateFile, state, {
 			...turnState,
 			sessionId,
 			turnId,
@@ -559,7 +584,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
 				goal: prompt,
 			},
 		});
-		saveHookTurnState(runtimeHome, state, {
+		saveHookTurnState(stateFile, state, {
 			...turnState,
 			sessionId,
 			turnId,
@@ -597,7 +622,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
         workspaceRoot: turnWorkspaceRoot,
         workspaceId: turnState.workspaceId,
         sessionId,
-        hostHome,
+		hostHome,
         hostVersion: pickString(payload, ["claude_version", "claudeVersion", "client.version"]) ?? "claude-code-hook",
       });
     }
@@ -615,7 +640,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       sessionStart: (prompt ?? "").trim() ? claimSessionStartContext(runtimeHome, "claude-code", turnState.workspaceId, sessionId) : false,
       transcript: prompt ? [{ role: "user", content: prompt }] : [],
     });
-    saveHookTurnState(runtimeHome, state, {
+    saveHookTurnState(stateFile, state, {
       sessionId,
       turnId,
       prompt,
@@ -693,7 +718,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
         packId,
         goal: prompt ?? undefined,
         summary,
-        hostHome,
+		hostHome,
         hostVersion,
         transcript,
 	taskEvidence,
@@ -707,7 +732,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
         packId,
         goal: prompt ?? undefined,
         summary,
-        hostHome,
+		hostHome,
         hostVersion,
         transcript,
 	taskEvidence,
@@ -736,7 +761,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       transcript,
       taskEvidence,
     });
-    clearHookTurnState(runtimeHome, state, sessionId, turnId, {
+    clearHookTurnState(stateFile, state, sessionId, turnId, {
       workspaceRoot: turnWorkspaceRoot,
       workspaceId: turnState.workspaceId,
       lastContextReadAt: turnState.lastContextReadAt,

@@ -8,8 +8,8 @@ export type DaemonKernelLock = { alive(): boolean; close(): Promise<void> };
  * loopback listener is a kernel-owned lock that also releases on SIGKILL.
  * A port collision fails closed; we never evict a listener or probe its data.
  * No protocol or credentials are served on this socket. */
-export const acquireLoopbackDaemonLock = async (home: string): Promise<DaemonKernelLock> => {
-	const port = 16384 + createHash("sha256").update(`onlybots-daemon:${home}`).digest().readUInt32BE(0) % 32768;
+export const acquireLoopbackDaemonLock = async (home: string, purpose = "daemon"): Promise<DaemonKernelLock> => {
+	const port = 16384 + createHash("sha256").update(`onlybots-${purpose}:${home}`).digest().readUInt32BE(0) % 32768;
 	const server = createServer(socket => socket.destroy());
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", () => reject(new Error(`Daemon home is already controlled or ownership port ${port} is occupied`)));
@@ -28,4 +28,19 @@ export const acquireDaemonKernelLock = async (home: string, state: string): Prom
 	if (process.platform === "darwin") return acquireLoopbackDaemonLock(home);
 	const suffix = createHash("sha256").update("onlybots-local-runtime-daemon").digest("hex").slice(0, 24);
 	return acquireLocalHostedBridge(state, suffix);
+};
+
+/** Linux abstract sockets need no external lock program or stale socket cleanup. */
+export const acquireWorkspaceSetupKernelLock = async (home: string): Promise<DaemonKernelLock> => {
+	if (process.platform !== "linux") return acquireLoopbackDaemonLock(home, "workspace-setup");
+	const server = createServer(socket => socket.destroy());
+	const address = "\0crosshead-workspace-setup:" + createHash("sha256").update(home).digest("hex");
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", () => reject(new Error("A workspace setup is already in progress for this runtime.")));
+		server.listen({ path: address, exclusive: true }, resolve);
+	});
+	return { alive: () => server.listening, close: async () => {
+		if (!server.listening) return;
+		await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+	} };
 };

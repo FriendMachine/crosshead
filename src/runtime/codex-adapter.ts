@@ -1,3 +1,4 @@
+import { readWorkspaceHookPolicy, refreshWorkspaceHooks } from "./workspace-hooks";
 import { accessSync, chmodSync, constants, existsSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
@@ -56,7 +57,7 @@ import {
   type HostAdapterTurnPrepareRequest,
   type HostAdapterTurnPrepareResult,
 } from "./host-adapter-base";
-import { resolveCodexHostHome } from "./runtime-env";
+import { resolveCodexHostHome, resolveCrossheadProfile } from "./runtime-env";
 import { PLUGIN_DISPATCH_CAPABILITY, renderHostHookGroups, type HostHookEvent } from "./host-hook-spec";
 import {
   countMatchingHookCommands,
@@ -95,6 +96,10 @@ export type CodexAdapterConfig = {
   hostHome: string;
   codexBinary: string;
   profileName: string;
+  sourceExcerpts?: boolean;
+  workspaceOnly?: boolean;
+  legacyUnscoped?: boolean;
+  legacyBefore?: string;
   skillName: string;
   /** Absent in configs written before host plugins; treated as "settings". */
   hookMode?: HostHookMode;
@@ -122,6 +127,8 @@ export type CodexAdapterPaths = {
 };
 
 export type CodexAdapterInstallOptions = {
+  /** Release updates refresh both hosts together after reinstalling their wrappers. */
+  deferWorkspaceHookRefresh?: boolean;
   home?: string;
   hostHome?: string;
   codexBinary?: string;
@@ -262,7 +269,7 @@ const buildEphemeralCodexAdapterConfig = (runtimeHomeInput?: string, hostHomeInp
     runtimeHome: runtimeLayout.home,
     hostHome: resolveCodexHome(hostHomeInput),
     codexBinary: (process.env.CROSSHEAD_CODEX_BINARY ?? process.env.ONLYBOTS_CODEX_BINARY) ?? "codex",
-    profileName: (process.env.CROSSHEAD_PROFILE ?? process.env.ONLYBOTS_PROFILE) ?? configuredProfileName ?? "default",
+    profileName: resolveCrossheadProfile() ?? configuredProfileName ?? "default",
     skillName: "crosshead-runtime",
     installedAt: timestamp,
     updatedAt: timestamp,
@@ -647,6 +654,7 @@ export const codexLegacyHooksFile = (hostHome: string): string => hooksFile(host
 
 export const installCodexAdapter = async (options: CodexAdapterInstallOptions): Promise<CodexAdapterInstallResult> => {
   const runtimeLayout = ensureRuntimeHomeLayout(options.home);
+  const scopedPolicy = readWorkspaceHookPolicy(runtimeLayout);
   const hostHome = resolveCodexHome(options.hostHome);
   const previousConfig = existsSync(configFile(hostHome))
     ? (() => {
@@ -670,8 +678,8 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
   // dispatch rule lets the installer hooks capture and the plugin defer.
   const legacyPresent = codexHooksFileHasLegacyHooks(hooksFile(hostHome), runtimeLayout.home);
   const pluginObserved = pluginInvocationMatches(readPluginInvocation(runtimeLayout.home, "codex"), hostHome);
-  const migrateLegacy = hookMode === "plugin" && legacyPresent && pluginObserved;
-  const writeLegacy = hookMode === "settings" && resolution.writeLegacyHooks;
+  const migrateLegacy = !scopedPolicy && hookMode === "plugin" && legacyPresent && pluginObserved;
+  const writeLegacy = !scopedPolicy && hookMode === "settings" && resolution.writeLegacyHooks;
   const hookModeNote =
     resolution.note ??
     (hookMode === "plugin" && legacyPresent && !pluginObserved
@@ -698,15 +706,17 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     hookModeRequest: resolution.request,
   });
 
-  writeManagedFile(
-    adapterPaths.skillFile,
-    renderCodexSkillMarkdown(config, adapterPaths.wrapperFile),
-    hostHome
-  );
-  // Retire only adapter-owned legacy skill copies; leave operator-authored skills intact.
-  for (const name of ["onlybots-bootstrap", "onlybots-runtime"]) {
-    const legacy = path.join(hostHome, "skills", name, "SKILL.md");
-    if (isManagedContent(legacy)) rmSync(legacy);
+  if (!scopedPolicy) {
+    writeManagedFile(
+      adapterPaths.skillFile,
+      renderCodexSkillMarkdown(config, adapterPaths.wrapperFile),
+      hostHome
+    );
+    // Retire only adapter-owned legacy skill copies; leave operator-authored skills intact.
+    for (const name of ["onlybots-bootstrap", "onlybots-runtime"]) {
+      const legacy = path.join(hostHome, "skills", name, "SKILL.md");
+      if (isManagedContent(legacy)) rmSync(legacy);
+    }
   }
   writeManagedFile(
     adapterPaths.configFile,
@@ -757,6 +767,8 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     installedAt: nowIso(),
     updatedAt: nowIso(),
   });
+
+  if (scopedPolicy && !options.deferWorkspaceHookRefresh) await refreshWorkspaceHooks(runtimeLayout.home);
 
   return {
     adapter: existingRecord,
@@ -820,13 +832,11 @@ export const loadCodexAdapterConfig = (
   if (parsed.marker !== CODEX_MANAGED_CONFIG_MARKER) {
     throw new Error("Codex adapter config is not managed by Crosshead");
   }
-  if (runtimeHomeInput && parsed.runtimeHome !== resolveRuntimeHome(runtimeHomeInput)) {
-    return {
-      ...parsed,
-      runtimeHome: resolveRuntimeHome(runtimeHomeInput),
-    };
-  }
-  return parsed;
+  return {
+    ...parsed,
+    runtimeHome: runtimeHomeInput ? resolveRuntimeHome(runtimeHomeInput) : parsed.runtimeHome,
+    profileName: parsed.profileName,
+  };
 };
 
 const CODEX_ADAPTER_IDENTITY: HostAdapterIdentity = {
@@ -858,6 +868,17 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       }),
       config
     );
+  }
+
+  static forWorkspace(home: string, hostHome: string, profileName: string, sourceExcerpts: boolean, legacyUnscoped = false, legacyBefore?: string): CodexRuntimeAdapter {
+    return new CodexRuntimeAdapter(new LocalRuntimeClient({ home, timeoutMs: 30_000 }), {
+      ...buildEphemeralCodexAdapterConfig(home, hostHome),
+      profileName,
+      sourceExcerpts,
+      workspaceOnly: true,
+      legacyUnscoped,
+      legacyBefore,
+    });
   }
 
   protected async attachWorkspace(input: {

@@ -19,6 +19,9 @@ export const resolveDefaultRuntimeHome = (userHome: string): string => {
 // and the plugin launcher (`${CROSSHEAD_HOME:-...}`).
 const envValue = (name: string): string | undefined => process.env[name] || undefined;
 
+export const resolveCrossheadProfile = (profile?: string): string | undefined =>
+  profile ?? envValue("CROSSHEAD_PROFILE") ?? envValue("ONLYBOTS_PROFILE");
+
 export const resolveCrossheadHome = (home?: string): string =>
   path.resolve(home ?? envValue("CROSSHEAD_HOME") ?? envValue("CROSSHEAD_RUNTIME_HOME") ?? envValue("ONLYBOTS_HOME") ?? envValue("ONLYBOTS_RUNTIME_HOME") ?? resolveDefaultRuntimeHome(os.homedir()));
 
@@ -33,3 +36,6 @@ export const resolveClaudeCodeBinaryPath = (binary?: string): string =>
 
 /** @deprecated Use resolveCrossheadHome. */
 export const resolveOnlyBotsHome = resolveCrossheadHome;
+
+export const isRuntimeProfileName = (value: unknown): value is string =>
+  typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(value);
