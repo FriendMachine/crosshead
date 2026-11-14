@@ -56,7 +56,7 @@ import {
   type HostAdapterTurnPrepareRequest,
   type HostAdapterTurnPrepareResult,
 } from "./host-adapter-base";
-import { resolveCodexHostHome } from "./runtime-env";
+import { resolveCodexHostHome, resolveCrossheadProfile } from "./runtime-env";
 import { PLUGIN_DISPATCH_CAPABILITY, renderHostHookGroups, type HostHookEvent } from "./host-hook-spec";
 import {
   countMatchingHookCommands,
@@ -95,6 +95,8 @@ export type CodexAdapterConfig = {
   hostHome: string;
   codexBinary: string;
   profileName: string;
+  sourceExcerpts?: boolean;
+  workspaceOnly?: boolean;
   skillName: string;
   /** Absent in configs written before host plugins; treated as "settings". */
   hookMode?: HostHookMode;
@@ -262,7 +264,7 @@ const buildEphemeralCodexAdapterConfig = (runtimeHomeInput?: string, hostHomeInp
     runtimeHome: runtimeLayout.home,
     hostHome: resolveCodexHome(hostHomeInput),
     codexBinary: (process.env.CROSSHEAD_CODEX_BINARY ?? process.env.ONLYBOTS_CODEX_BINARY) ?? "codex",
-    profileName: (process.env.CROSSHEAD_PROFILE ?? process.env.ONLYBOTS_PROFILE) ?? configuredProfileName ?? "default",
+    profileName: resolveCrossheadProfile() ?? configuredProfileName ?? "default",
     skillName: "crosshead-runtime",
     installedAt: timestamp,
     updatedAt: timestamp,
@@ -820,13 +822,11 @@ export const loadCodexAdapterConfig = (
   if (parsed.marker !== CODEX_MANAGED_CONFIG_MARKER) {
     throw new Error("Codex adapter config is not managed by Crosshead");
   }
-  if (runtimeHomeInput && parsed.runtimeHome !== resolveRuntimeHome(runtimeHomeInput)) {
-    return {
-      ...parsed,
-      runtimeHome: resolveRuntimeHome(runtimeHomeInput),
-    };
-  }
-  return parsed;
+  return {
+    ...parsed,
+    runtimeHome: runtimeHomeInput ? resolveRuntimeHome(runtimeHomeInput) : parsed.runtimeHome,
+    profileName: resolveCrossheadProfile() ?? parsed.profileName,
+  };
 };
 
 const CODEX_ADAPTER_IDENTITY: HostAdapterIdentity = {
@@ -858,6 +858,15 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       }),
       config
     );
+  }
+
+  static forWorkspace(home: string, hostHome: string, profileName: string, sourceExcerpts: boolean): CodexRuntimeAdapter {
+    return new CodexRuntimeAdapter(new LocalRuntimeClient({ home, timeoutMs: 30_000 }), {
+      ...buildEphemeralCodexAdapterConfig(home, hostHome),
+      profileName,
+      sourceExcerpts,
+      workspaceOnly: true,
+    });
   }
 
   protected async attachWorkspace(input: {

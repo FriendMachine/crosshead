@@ -173,6 +173,7 @@ import {
 	writeRuntimeLog,
 } from "./runtime-persistence";
 import { nowIso } from "./adapter-utils";
+import { applyWorkspaceHookPlan, planWorkspaceHooks, readWorkspaceHookPolicy, withWorkspaceSetupLock } from "./workspace-hooks";
 import {
 	cloneOrganizationalWorkerReadiness,
 	normalizeOrganizationalWorkerReadiness,
@@ -457,6 +458,7 @@ export type SetupRuntimeProfileOptions = {
 	workspaceScope?: "repo" | "workspace" | "global";
 	features?: Partial<RuntimeProfile["features"]>;
 	makeDefault?: boolean;
+	createOnly?: boolean;
 };
 
 type GeneratedRuntimeIdentity = {
@@ -1286,7 +1288,14 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 	}
 	const daemon = readDaemonOwnershipState(paths);
 	if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-	rmSync(canonicalHome, { recursive: true, force: true });
+	if (readWorkspaceHookPolicy(paths)) {
+		await withWorkspaceSetupLock(paths, async () => {
+			applyWorkspaceHookPlan(planWorkspaceHooks({ home: paths.home, scope: "manual", targets: [], cleanup: true }));
+			rmSync(canonicalHome, { recursive: true, force: true });
+		});
+	} else {
+		rmSync(canonicalHome, { recursive: true, force: true });
+	}
 	if (resolvedHome !== canonicalHome) {
 		try { if (lstatSync(resolvedHome).isSymbolicLink()) rmSync(resolvedHome, { force: true }); }
 		catch { /* The alias may disappear with its target. */ }
@@ -1311,6 +1320,7 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	}
 	const paths = ensureRuntimeHomeLayout(options.home);
 	writeRuntimeInstallMarker(paths);
+	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} already exists`);
 	const secret = loadSecret(paths, options.profileName);
 	const localOnlyProfile = isLocalOnlyRuntimeProfile({ apiBase: options.apiBase });
 	const session = localOnlyProfile
@@ -1340,6 +1350,7 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 		createdAt: loadProfile(paths, options.profileName)?.createdAt ?? nowIso(),
 		updatedAt: nowIso(),
 	};
+	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} was created during setup`);
 	saveProfile(paths, profile);
 	saveSecret(paths, options.profileName, {
 		nsec: options.nsec,
@@ -3256,7 +3267,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		});
 		const profile = loadProfile(this.paths, resolvedProfileName);
 		if (profile && isLocalOnlyRuntimeProfile(profile)) {
-			return readLocalHotMemory(this.paths.state, scope);
+			return readLocalHotMemory(this.paths.state, scope, profile);
 		}
 		if (profile && hotSyncEnabled()) {
 			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
@@ -3292,7 +3303,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			// No hosted index exists for this profile. Answer from local hot memory.
 			const query = typeof payload.query === "string" ? payload.query : "";
 			const workspaceId = typeof payload.local_workspace_id === "string" ? payload.local_workspace_id : null;
-			const results = searchHotCheckpoints(readLocalHotMemory(this.paths.state, "all"), query, Number(payload.top_k) || 10, workspaceId);
+			const results = searchHotCheckpoints(readLocalHotMemory(this.paths.state, "all", profile), query, Number(payload.top_k) || 10, workspaceId);
 			return { scope: "local_hot_memory", query, count: results.length, results };
 		}
 		delete payload.local_workspace_id;

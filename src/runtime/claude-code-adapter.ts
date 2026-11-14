@@ -58,7 +58,7 @@ import {
   type HostAdapterTurnPrepareRequest,
   type HostAdapterTurnPrepareResult,
 } from "./host-adapter-base";
-import { resolveClaudeCodeBinaryPath, resolveClaudeCodeHostHome } from "./runtime-env";
+import { resolveClaudeCodeBinaryPath, resolveClaudeCodeHostHome, resolveCrossheadProfile } from "./runtime-env";
 import { PLUGIN_DISPATCH_CAPABILITY, renderHostHookGroups, type HostHookEvent } from "./host-hook-spec";
 import {
   claudeLoadedSettingsFiles,
@@ -95,6 +95,8 @@ export type ClaudeCodeAdapterConfig = {
   hostHome: string;
   workspaceRoot: string;
   profileName: string;
+  sourceExcerpts?: boolean;
+  workspaceOnly?: boolean;
   claudeBinary: string;
   /** Absent in configs written before host plugins; treated as "settings". */
   hookMode?: HostHookMode;
@@ -784,13 +786,11 @@ export const loadClaudeCodeAdapterConfig = (
   if (parsed.marker !== CLAUDE_CODE_MANAGED_CONFIG_MARKER) {
     throw new Error("Claude Code adapter config is not managed by Crosshead");
   }
-  if (runtimeHomeInput && parsed.runtimeHome !== resolveRuntimeHome(runtimeHomeInput)) {
-    return {
-      ...parsed,
-      runtimeHome: resolveRuntimeHome(runtimeHomeInput),
-    };
-  }
-  return parsed;
+  return {
+    ...parsed,
+    runtimeHome: runtimeHomeInput ? resolveRuntimeHome(runtimeHomeInput) : parsed.runtimeHome,
+    profileName: resolveCrossheadProfile() ?? parsed.profileName,
+  };
 };
 
 const CLAUDE_CODE_ADAPTER_IDENTITY: HostAdapterIdentity = {
@@ -820,6 +820,18 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       }),
       config
     );
+  }
+
+  static forWorkspace(home: string, hostHome: string, workspaceRoot: string, profileName: string, sourceExcerpts: boolean): ClaudeCodeRuntimeAdapter {
+    return new ClaudeCodeRuntimeAdapter(new LocalRuntimeClient({ home, timeoutMs: 30_000 }), {
+      ...buildClaudeCodeAdapterConfig({
+		runtimeHome: home, hostHome, workspaceRoot, profileName,
+		adapterVersion: ONLYBOTS_CLAUDE_CODE_ADAPTER_VERSION, claudeBinary: "claude",
+		hookMode: "settings", hookModeRequest: null,
+      }),
+      sourceExcerpts,
+      workspaceOnly: true,
+    });
   }
 
   protected async attachWorkspace(input: {

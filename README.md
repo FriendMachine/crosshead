@@ -27,26 +27,53 @@ Then start a session and run `/crosshead:setup` in Claude Code, or type
 `$crosshead:setup` in Codex. Only you can start setup; the model does not run
 it on its own. Until setup has run, each session starts with one line saying
 Crosshead isn't set up; nothing else happens and the session is never blocked.
-Setup asks for your consent, runs the installer below, and connects the host
-with `crosshead quickstart --adapter claude-code|codex --hook-mode plugin`.
-Codex runs plugin hooks only after you trust them in `/hooks`. The plugin
-launcher needs a POSIX shell; Windows is not supported.
+Setup asks where Crosshead should run and previews the directories, profiles,
+and files before applying the setup. In Codex, review the new project hooks
+in `/hooks`. The plugin launcher needs a POSIX shell.
 
 The plugins are thin. They contain the lifecycle hooks, the setup skill and a
 small launcher that runs the installed runtime's hook entrypoints. They do not
 bundle, download or update the runtime, so one runtime, daemon and identity
 stays shared by every host. See [host plugins](docs/HOST-PLUGINS.md).
 
-### Other hosts and scripts: installer
+### Choose where Crosshead runs
 
 ```bash
 curl -fsSL https://crosshead.sh/install | bash
-crosshead quickstart --api-base https://crosshead.sh --adapter claude-code --workspace-root .
+crosshead quickstart
 ```
 
-`--adapter` also takes `codex`, `pi`, `omp`, `hermes` and `opencode`. Without
-the plugin, `crosshead install claude-code|codex` registers the hooks in
-`.claude/settings.json` or `$CODEX_HOME/hooks.json` itself.
+Quickstart recommends the current project. Add more directories, opt into all
+projects, or choose manual commands only. Each directory can use Codex, Claude
+Code, or both, with an existing or new profile. Project hooks use their selected
+profile at startup and resume, including when the launcher skips `direnv`.
+
+For scripts and agents, preview the same setup as JSON:
+
+```sh
+crosshead quickstart --scope project --workspace-root . --adapter both --profile work --dry-run --json
+```
+
+Use an existing profile name or pass `--api-base https://crosshead.sh` to create
+one. Apply by removing `--dry-run`. After starting a session, use
+`crosshead workspace check` to see the configured profile and observed startup
+and resume. Run the same check in an unselected directory to inspect its scope.
+
+```sh
+crosshead workspace add --workspace-root ../other-project --adapter codex --profile work
+crosshead workspace list
+crosshead workspace remove --workspace-root ../other-project
+```
+
+Project setup writes `.codex/hooks.json` and `.claude/settings.local.json` for
+the selected hosts. Keep the generated entries local to this machine. Existing
+user-wide Crosshead hook commands for this runtime are listed in the preview
+when setup replaces them. The runtime skips old Crosshead plugin and hook
+registrations after scoped setup. Review and restart host sessions after a
+scope change. Source excerpts are off for new bindings unless you choose
+`--source-excerpts on`. Checkpoints can still contain prompts and summaries.
+
+Other hosts use `crosshead quickstart --adapter pi|omp|hermes|opencode`.
 
 The installer downloads one release tarball, checks its SHA-256 against the
 installer script, installs three npm dependencies (`@noble/curves`,
@@ -102,8 +129,9 @@ a fresh session after choosing either setting.
   memory mode (`crosshead memory mode`).
 - Hot-memory documents are signed by the local identity before upload and are
   ignored on read if the signature, identity, or scope does not verify. Bounded
-  source-file excerpts are captured by default; set
-  `CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=0` when that disclosure is not intended.
+  source-file capture follows each scoped binding's source excerpt choice. Legacy
+  installs capture excerpts by default and accept
+  `CROSSHEAD_CAPTURE_SOURCE_EVIDENCE=0` to opt out.
 - Paid recall (warm and cold memory) is selected and assembled by the hosted
   service. This client sends the turn's goal and workspace scope, but no hosted
   response field is injected into an agent prompt. Only locally signature-
@@ -114,6 +142,17 @@ a fresh session after choosing either setting.
   the handoff service.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
   runtime is doing. Local state lives in `~/.crosshead/state/`.
+
+Set `CROSSHEAD_PROFILE` for explicit CLI commands or older adapter setups.
+`ONLYBOTS_PROFILE` is the legacy alias. Explicit CLI `--profile` takes precedence.
+Scoped hooks use the profile selected during setup. Use
+`crosshead memory mode off --profile <name>` to stop automatic memory hooks for
+that profile, or `crosshead workspace remove` to detach a project.
+
+Local-only checkpoints are stored per profile. Older flat snapshots in the
+runtime's `state/local-hot-memory/*.json` lack a profile owner. Review those files
+directly to recover saved findings. Automatic recall uses checkpoints with an
+identified profile and workspace in scoped setup.
 
 `crosshead uninstall` removes the runtime. Uninstall the plugin
 (`claude plugin uninstall crosshead@crosshead`, `codex plugin remove

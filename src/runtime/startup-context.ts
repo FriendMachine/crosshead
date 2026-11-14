@@ -16,6 +16,8 @@ type RuntimeStartupContextInput = {
   runtime: RuntimeStartupRuntime;
   profileName: string;
   mode: RuntimeLifecycleMemoryMode;
+  sourceExcerpts?: boolean;
+  workspaceId?: string;
   status: RuntimeStatus | null;
   manifest: ContextPackManifest | null;
   inbox: RuntimeInboxHudState | null;
@@ -653,11 +655,12 @@ const formatInjectedContextLine = (manifest: ContextPackManifest | null): string
 };
 
 export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): string => {
+  if (input.mode === "off") return "";
   // A fresh store still needs a capture contract. Otherwise the agent may invent
   // a repository memory file or omit facts that are absent from its final answer.
   // Native hooks capture findings plus bounded observed workspace reads.
   const captureGuidance = input.runtime !== "pi" && (input.mode === "auto" || input.mode === "assist")
-    ? `Crosshead hooks automatically capture your final response${input.runtime === "hermes" || input.runtime === "opencode" ? "" : " and bounded workspace file-read evidence"} as a continuity checkpoint. When handing off unfinished work, include the exact discovered requirements: input/output types and units, boundary rules, decisions and rejected alternatives, verification, and next steps. Distinguish observed facts from assumptions. No manual hook invocation or repository memory file is needed. Continuity does not authorize file changes; obey the user's read-only and other task constraints.`
+    ? `Crosshead hooks automatically capture your final response${input.sourceExcerpts ? " and bounded workspace file-read evidence" : ""} as a continuity checkpoint. When handing off unfinished work, include the exact discovered requirements: input/output types and units, boundary rules, decisions and rejected alternatives, verification, and next steps. Distinguish observed facts from assumptions. No manual hook invocation or repository memory file is needed. Continuity does not authorize file changes; obey the user's read-only and other task constraints.`
     : null;
   const manifest = input.manifest;
   const trimmedContext = input.injectedContext.trim();
@@ -713,7 +716,7 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
     formatHealthLine(input.status),
     formatLifecycleLine(input.actions, manifest),
     manifest ? formatLayerLine("Hot memory", manifest.hotMemory) : hasHotMemoryFallback
-      ? input.hotContextText || renderHotCheckpoints(selectHotCheckpoints(input.hotMemorySnapshot, input.goal ?? null)) || formatFreeHotMemorySnapshotLine(input.hotMemorySnapshot)
+      ? input.hotContextText || renderHotCheckpoints(selectHotCheckpoints(input.hotMemorySnapshot, input.goal ?? null, input.workspaceId)) || formatFreeHotMemorySnapshotLine(input.hotMemorySnapshot)
       : null,
     formatWarmLine(manifest),
     manifest && (manifest.layeredContext.available > 0 || manifest.layeredContext.injected > 0)

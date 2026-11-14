@@ -135,6 +135,14 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 			},
 			profileName
 		);
+		if (result.scope === "local_hot_memory") {
+			if (flags.json || flags.debug) return JSON.stringify(result, null, 2);
+			const matches = Array.isArray(result.results) ? result.results as Array<Record<string, unknown>> : [];
+			return [
+				`Local hot memory · ${matches.length} matches`,
+				...matches.map((entry) => `${entry.source ?? entry.kind}: ${entry.text}`),
+			].join("\n");
+		}
 		const presentation = buildMemorySearchPresentation(
 			query,
 			typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10,

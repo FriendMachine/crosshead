@@ -20,6 +20,14 @@ describe("native hook capture contract", () => {
     expect(renderRuntimeStartupContext({ ...empty, actions: [], warnings: [], runtime: "codex", mode })).toBe("");
   });
 
+  it("suppresses previously saved memory and HUD output when memory is off", () => {
+    expect(renderRuntimeStartupContext({
+      ...empty, runtime: "codex", mode: "off", actions: [], warnings: ["Saved warning"],
+      injectedContext: "A previously saved private finding",
+      hotMemorySnapshot: { scopes: [{ scope: "codex", content: "Saved checkpoint" }] },
+    })).toBe("");
+  });
+
   it("keeps prior findings and capture guidance together", () => {
     const context = renderRuntimeStartupContext({
       ...empty, actions: [], warnings: [], runtime: "codex", mode: "auto",

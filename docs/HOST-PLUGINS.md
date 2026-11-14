@@ -53,18 +53,21 @@ installer-written hooks keep working without duplicates.
 
 The launcher is POSIX `sh`. Windows is not supported.
 
-The setup skill explains what it is about to do, asks for consent, runs the
-digest-checked installer, and then runs:
+The setup skill asks where Crosshead should run, which profile to use and
+whether to include source excerpts. It previews the selected configuration:
 
 ```sh
-crosshead quickstart --api-base https://crosshead.sh --adapter claude-code --workspace-root . --hook-mode plugin
-crosshead quickstart --api-base https://crosshead.sh --adapter codex --workspace-root . --hook-mode plugin
+crosshead quickstart --scope project --adapter claude-code --workspace-root . --profile work --dry-run --json
+crosshead quickstart --scope project --adapter codex --workspace-root . --profile work --dry-run --json
 ```
 
-`--hook-mode plugin` writes the adapter configuration and wrappers but no host
-hooks. Codex additionally requires you to trust the plugin hooks in `/hooks`;
-a new plugin version needs a new review. The plugins have no MCP server and
-ask for no credentials. The Codex marketplace entry still carries
+Apply the preview without `--dry-run`. Add `--api-base` if you choose a new
+profile. The scoped runtime dispatches from its project hooks. It skips
+legacy and plugin hook invocations. In Codex, trust the new hooks in
+`/hooks`, then start a fresh session. `crosshead workspace check` and
+`crosshead doctor` distinguish configured hooks from observed startup and
+resume. The plugins have no MCP server and ask for no credentials.
+The Codex marketplace entry still carries
 `policy.authentication: "ON_INSTALL"` because Codex requires both policy fields
 on every entry and documents no other value.
 
@@ -99,6 +102,10 @@ host's own plugin directory. Plugin files are not part of the install tarball
 or the npm package.
 
 ## Hook modes, migration and doctor
+
+The following legacy modes apply to installations that have yet to choose
+a workspace scope. Use `crosshead quickstart` to preview moving to project,
+all-project, or manual scope.
 
 `crosshead install claude-code|codex` takes `--hook-mode auto|plugin|settings`
 (default `auto`, or the explicit mode of the previous install, so

@@ -12,7 +12,7 @@
       "name": "crosshead",
       "source": "./plugins/claude-code",
       "description": "Persistent memory across coding agents. Hooks connect this host to the locally installed Crosshead runtime, shared with Claude Code, Codex, Hermes, OpenCode and Pi.",
-      "version": "1.1.0"
+      "version": "1.2.0"
     }
   ]
 }

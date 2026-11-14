@@ -20,7 +20,12 @@ export const isLocalOnlyRuntimeProfile = (profile: RuntimeProfileLike): boolean 
   }
 };
 
-const localHotMemoryDir = (stateDir: string): string => path.join(stateDir, LOCAL_HOT_MEMORY_DIR);
+type HotMemoryOwner = { name: string; npub: string };
+
+const localHotMemoryDir = (stateDir: string, owner?: HotMemoryOwner): string =>
+  owner
+    ? path.join(stateDir, LOCAL_HOT_MEMORY_DIR, "profiles", createHash("sha256").update(JSON.stringify([owner.name, owner.npub])).digest("hex"))
+    : path.join(stateDir, LOCAL_HOT_MEMORY_DIR);
 
 const normalizeHotScope = (scope?: string | null): string => {
   const trimmed = typeof scope === "string" ? scope.trim() : "";
@@ -31,8 +36,8 @@ const normalizeHotScope = (scope?: string | null): string => {
 
 const safeScopeFileName = (scope: string): string => `${encodeURIComponent(scope)}.json`;
 
-const localHotMemoryFile = (stateDir: string, scope?: string | null): string =>
-  path.join(localHotMemoryDir(stateDir), safeScopeFileName(normalizeHotScope(scope)));
+const localHotMemoryFile = (directory: string, scope?: string | null): string =>
+  path.join(directory, safeScopeFileName(normalizeHotScope(scope)));
 
 const etagFor = (content: string): string => createHash("sha256").update(content).digest("base64url");
 
@@ -44,8 +49,8 @@ const scopeFromFileName = (fileName: string): string => {
   }
 };
 
-const readScopeFile = (stateDir: string, fileName: string): Record<string, unknown> | null => {
-  const filePath = path.join(localHotMemoryDir(stateDir), fileName);
+const readScopeFile = (directory: string, fileName: string): Record<string, unknown> | null => {
+  const filePath = path.join(directory, fileName);
   if (!existsSync(filePath) || !fileName.endsWith(".json")) {
     return null;
   }
@@ -64,13 +69,13 @@ const readScopeFile = (stateDir: string, fileName: string): Record<string, unkno
   }
 };
 
-export const readLocalHotMemory = (stateDir: string, scope?: string | null): Record<string, unknown> => {
+export const readLocalHotMemory = (stateDir: string, scope?: string | null, owner?: HotMemoryOwner): Record<string, unknown> => {
+  const directory = localHotMemoryDir(stateDir, owner);
   const normalizedScope = normalizeHotScope(scope);
   if (normalizedScope === HOT_SCOPE_ALL) {
-    const directory = localHotMemoryDir(stateDir);
     const scopes = existsSync(directory)
       ? readdirSync(directory)
-          .map((fileName) => readScopeFile(stateDir, fileName))
+		  .map((fileName) => readScopeFile(directory, fileName))
           .filter((entry): entry is Record<string, unknown> => entry !== null)
       : [];
     return {
@@ -79,7 +84,7 @@ export const readLocalHotMemory = (stateDir: string, scope?: string | null): Rec
     };
   }
 
-  const filePath = localHotMemoryFile(stateDir, normalizedScope);
+  const filePath = localHotMemoryFile(directory, normalizedScope);
   if (!existsSync(filePath)) {
     return {
       scope: normalizedScope,
@@ -100,10 +105,10 @@ export const readLocalHotMemory = (stateDir: string, scope?: string | null): Rec
   };
 };
 
-export const writeLocalHotMemory = (stateDir: string, content: string, scope?: string | null): Record<string, unknown> => {
+export const writeLocalHotMemory = (stateDir: string, content: string, scope?: string | null, owner?: HotMemoryOwner): Record<string, unknown> => {
   const normalizedScope = normalizeHotScope(scope);
   if (normalizedScope === HOT_SCOPE_ALL) throw new Error("Hot-memory scope all is read-only");
-  const filePath = localHotMemoryFile(stateDir, normalizedScope);
+  const filePath = localHotMemoryFile(localHotMemoryDir(stateDir, owner), normalizedScope);
   writeManagedFile(filePath, content, stateDir);
-  return readLocalHotMemory(stateDir, normalizedScope);
+  return readLocalHotMemory(stateDir, normalizedScope, owner);
 };

@@ -33,6 +33,8 @@ export type HostAdapterBaseConfig = {
   adapterVersion: string;
   /** Runtime home holding this host's bridge wrapper under bin/. */
   runtimeHome?: string;
+  sourceExcerpts?: boolean;
+  workspaceOnly?: boolean;
 };
 
 export type HostAdapterTranscriptEntry = {
@@ -219,7 +221,8 @@ const emptyHotMemorySnapshot = (): Record<string, unknown> => ({ scope: "all", s
 
 export const filterHotMemorySnapshotForWorkspace = (
   hotMemory: Record<string, unknown> | null,
-  workspaceId: string
+  workspaceId: string,
+  workspaceOnly = false
 ): Record<string, unknown> | null => {
   if (!hotMemory) {
     return null;
@@ -230,14 +233,14 @@ export const filterHotMemorySnapshotForWorkspace = (
       return null;
     }
     const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(hotMemory));
-    return entryWorkspaceId && entryWorkspaceId !== workspaceId ? null : hotMemory;
+    return entryWorkspaceId === workspaceId || (!workspaceOnly && !entryWorkspaceId) ? hotMemory : null;
   }
   const scopes = scopedEntries.filter((entry) => {
     if (!hasHotMemoryEntryContent(entry)) {
       return false;
     }
     const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(entry));
-    return !entryWorkspaceId || entryWorkspaceId === workspaceId;
+    return entryWorkspaceId === workspaceId || (!workspaceOnly && !entryWorkspaceId);
   });
   if (scopes.length === 0) {
     return null;
@@ -268,9 +271,9 @@ export abstract class HostRuntimeAdapterBase {
   protected abstract readonly config: HostAdapterBaseConfig;
 
   async captureTaskEvidence(file: string | null, sessionId: string, workspaceRoot: string, since?: string | null, goal?: string | null): Promise<TaskEvidence | undefined> {
-    // Exact workspace excerpts can contain credentials even after filtering.
-    // Capture is therefore explicit opt-in, never a side effect of assist/auto.
-    if (!taskEvidenceCaptureEnabled()) return undefined;
+    // Scoped setup stores the capture choice independently of memory mode.
+    // Legacy installs continue using their environment capture policy.
+    if (!(this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return undefined;
     // Check the current profile at capture time, including a mode change during
     // this turn. Never inspect tool output when automatic memory is disabled.
     const status = await this.client.status(this.config.profileName).catch(() => null);
@@ -282,6 +285,12 @@ export abstract class HostRuntimeAdapterBase {
   protected bridgeCommand(): string | null {
     const wrapper = { "claude-code": "crosshead-claude-code", codex: "crosshead-codex" }[this.identity.runtimeId as string];
     if (!wrapper || !this.config.runtimeHome) return null;
+    if (this.config.workspaceOnly) {
+      const cli = path.join(this.config.runtimeHome, "bin", "crosshead");
+      return existsSync(cli)
+	? `${shellQuote(cli)} checkpoint-page%PAGE% --runtime ${this.identity.runtimeId} --home ${shellQuote(this.config.runtimeHome)}`
+	: null;
+    }
     // Plugin-only installs may have no wrapper; never name a command that is not there.
     const file = path.join(this.config.runtimeHome, "bin", wrapper);
     if (!existsSync(file)) return null;
@@ -300,7 +309,7 @@ export abstract class HostRuntimeAdapterBase {
   protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean): string | undefined {
     const command = this.bridgeCommand();
     if (!command || !this.config.runtimeHome) return undefined;
-    const selected = selectHotCheckpoints(snapshot, prompt);
+    const selected = selectHotCheckpoints(snapshot, prompt, this.config.workspaceOnly ? workspaceId : undefined);
     if (!selected.length) return undefined;
     const full = renderHotCheckpoints(selected, HOT_FULL_RENDER_LIMIT);
     const inline = sessionStart ? inlineCheckpointPages(this.identity.runtimeId) : 0;
@@ -322,7 +331,7 @@ export abstract class HostRuntimeAdapterBase {
    * anything was recorded.
    */
   async recordToolEvidence(input: HostAdapterToolEvidenceRequest): Promise<boolean> {
-    if (!taskEvidenceCaptureEnabled()) return false;
+    if (!(this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return false;
     const taskEvidence = evidenceFromToolCall(input.toolName, input.toolInput, input.toolResponse, input.workspaceRoot, nowIso(), input.failed === true);
     if (!taskEvidence.sources.length) return false;
     const profileName = input.profileName ?? this.config.profileName;
@@ -388,7 +397,7 @@ export abstract class HostRuntimeAdapterBase {
       hostVersion: input.hostVersion,
     });
     const rawPreTurnHotMemory = await this.client.readHotMemory(profileName, "all").catch(() => null);
-    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId);
+    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId, this.config.workspaceOnly);
     const response = await this.client.emitEvent({
       runtime: this.identity.runtimeId,
       profileName,
@@ -421,7 +430,7 @@ export abstract class HostRuntimeAdapterBase {
     const contextPack =
       response.contextPack && typeof response.contextPack === "object" && !Array.isArray(response.contextPack)
         ? response.contextPack
-        : null;
+	: null;
     const packId = contextPack && typeof contextPack.packId === "string" ? contextPack.packId : null;
     const freshness = buildRuntimeStartupFreshness({
       runtime: this.identity.runtimeId,
@@ -439,6 +448,8 @@ export abstract class HostRuntimeAdapterBase {
       runtime: this.identity.runtimeId,
       profileName,
       mode: response.mode,
+      sourceExcerpts: this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled(),
+      workspaceId: this.config.workspaceOnly ? workspaceId : undefined,
       status: null,
       manifest: null,
       inbox: null,
