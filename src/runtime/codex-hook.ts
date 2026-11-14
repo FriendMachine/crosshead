@@ -20,7 +20,7 @@ import { claimSessionStartContext, releaseSessionStartContext } from "./hook-ses
 import { taskEvidenceCaptureEnabled } from "./task-evidence";
 import { readLastAssistantMessage } from "./hook-transcript";
 import { loadProfile, resolveRuntimePaths, writeJsonFile } from "./runtime-persistence";
-import { readWorkspaceHookPolicy, recordWorkspaceHookStart, workspaceHookForInvocation, workspaceHookStateFile } from "./workspace-hooks";
+import { readWorkspacePolicyForHook, recordWorkspaceHookStart, workspaceHookForInvocation, workspaceHookStateFile } from "./workspace-hooks";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
 
 type HookTurnState = {
@@ -374,14 +374,17 @@ export const runOnlyBotsCodexHookCli = async (
   const { positionals, flags } = parseArgs(argv);
   const eventName = positionals[0] ?? "help";
   const normalizedEventName = eventName.toLowerCase();
+  const isToolFailure = normalizedEventName === "posttoolusefailure" || normalizedEventName === "post_tool_use_failure";
+  const isPostToolUse = isToolFailure || normalizedEventName === "posttooluse" || normalizedEventName === "post_tool_use";
+  if (isPostToolUse && (flags["source-excerpts"] === "off" ||
+      (!flags.binding && !taskEvidenceCaptureEnabled()))) return;
   const runtimeHome = resolveRuntimeHome(typeof flags.home === "string" ? flags.home : undefined);
   const viaPlugin = isPluginHookInvocation(flags);
   const paths = resolveRuntimePaths(runtimeHome);
-  const policy = readWorkspaceHookPolicy(paths);
+  const policy = readWorkspacePolicyForHook(paths, normalizedEventName, flags.binding);
+  if (policy === false) return;
   // Ignore retired settings and plugin registrations before reading the chat payload.
   if (policy && !policy.bindings.some((binding) => binding.host === "codex" && binding.id === flags.binding)) return;
-  const isToolFailure = normalizedEventName === "posttoolusefailure" || normalizedEventName === "post_tool_use_failure";
-  const isPostToolUse = isToolFailure || normalizedEventName === "posttooluse" || normalizedEventName === "post_tool_use";
   const selectedBinding = policy?.bindings.find((binding) => binding.id === flags.binding);
   if (isPostToolUse && !(selectedBinding?.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return;
   const payload = readStdinJson(stdinOverride);
@@ -391,10 +394,12 @@ export const runOnlyBotsCodexHookCli = async (
     (typeof flags["codex-home"] === "string" ? flags["codex-home"] : viaPlugin ? resolvePluginHostHome("codex", runtimeHome) : undefined);
   const workspaceRoot = scoped?.root ?? resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = scoped ? `repo:${workspaceRoot}` : resolveHookWorkspaceId(payload, flags, workspaceRoot);
+  let legacyUnscoped = false;
   if (scoped) {
     const profile = loadProfile(paths, scoped.binding.profile);
     if (!profile) throw new Error(`Unknown Crosshead profile: ${scoped.binding.profile}`);
     if (profile.memoryMode === "off") return;
+    legacyUnscoped = scoped.binding.legacyUnscoped === true && scoped.binding.legacyNpub === profile.npub;
   }
   const allowEphemeralConfig =
     flags["allow-ephemeral-config"] === true ||
@@ -439,7 +444,7 @@ export const runOnlyBotsCodexHookCli = async (
     if (decision === "skip-duplicate") return;
   }
   const adapter = scoped
-    ? CodexRuntimeAdapter.forWorkspace(runtimeHome, scoped.binding.hostHome, scoped.binding.profile, scoped.binding.sourceExcerpts)
+    ? CodexRuntimeAdapter.forWorkspace(runtimeHome, scoped.binding.hostHome, scoped.binding.profile, scoped.binding.sourceExcerpts, legacyUnscoped, scoped.binding.legacyBefore)
     : CodexRuntimeAdapter.fromInstalled({
 		home: runtimeHome,
 		hostHome,

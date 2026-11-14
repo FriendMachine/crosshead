@@ -1,3 +1,4 @@
+import { readWorkspaceHookPolicy, refreshWorkspaceHooks } from "./workspace-hooks";
 import { accessSync, chmodSync, constants, existsSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
@@ -97,6 +98,8 @@ export type ClaudeCodeAdapterConfig = {
   profileName: string;
   sourceExcerpts?: boolean;
   workspaceOnly?: boolean;
+  legacyUnscoped?: boolean;
+  legacyBefore?: string;
   claudeBinary: string;
   /** Absent in configs written before host plugins; treated as "settings". */
   hookMode?: HostHookMode;
@@ -623,6 +626,7 @@ export const installClaudeCodeAdapter = async (
   options: ClaudeCodeAdapterInstallOptions
 ): Promise<ClaudeCodeAdapterInstallResult> => {
   const runtimeLayout = ensureRuntimeHomeLayout(options.home);
+  const scopedPolicy = readWorkspaceHookPolicy(runtimeLayout);
   const hostHome = resolveClaudeCodeHome(options.hostHome);
   const workspaceRoot = resolveClaudeWorkspaceRoot(options.workspaceRoot, runtimeLayout.home);
   const adapterPaths = resolveClaudeCodeAdapterPaths(runtimeLayout.home, hostHome, workspaceRoot);
@@ -663,14 +667,14 @@ export const installClaudeCodeAdapter = async (
     (root, index, all): root is string => typeof root === "string" && all.indexOf(root) === index
   );
   const migrationTargets =
-    hookMode === "plugin"
+    !scopedPolicy && hookMode === "plugin"
       ? legacyRoots
           .map((root) => ({ root, filePath: projectSettingsFile(root) }))
           .filter(({ filePath }) => countLegacyClaudeHookCommands(filePath, runtimeLayout.home) > 0)
       : [];
   // Check every host file this install changes before writing any of them. A
   // symlinked settings file is refused rather than followed or half-migrated.
-  if (hookMode === "settings" && resolution.writeLegacyHooks) assertManagedFilePath(adapterPaths.projectSettingsFile, workspaceRoot);
+  if (!scopedPolicy && hookMode === "settings" && resolution.writeLegacyHooks) assertManagedFilePath(adapterPaths.projectSettingsFile, workspaceRoot);
   for (const { root, filePath } of migrationTargets) {
     try {
       assertManagedFilePath(filePath, root);
@@ -690,7 +694,7 @@ export const installClaudeCodeAdapter = async (
   for (const { root, filePath } of migrationTargets) {
     if (removeLegacyClaudeHooks(filePath, root, runtimeLayout.home)) migratedFiles.push(filePath);
   }
-  if (hookMode === "settings" && resolution.writeLegacyHooks) {
+  if (!scopedPolicy && hookMode === "settings" && resolution.writeLegacyHooks) {
     writeManagedFile(
       adapterPaths.projectSettingsFile,
       renderClaudeSettingsConfig(readClaudeSettingsConfig(adapterPaths.projectSettingsFile), adapterPaths, config),
@@ -727,6 +731,8 @@ export const installClaudeCodeAdapter = async (
     installedAt: nowIso(),
     updatedAt: nowIso(),
   });
+
+  if (scopedPolicy) await refreshWorkspaceHooks(runtimeLayout.home);
 
   return {
     adapter: existingRecord,
@@ -789,7 +795,7 @@ export const loadClaudeCodeAdapterConfig = (
   return {
     ...parsed,
     runtimeHome: runtimeHomeInput ? resolveRuntimeHome(runtimeHomeInput) : parsed.runtimeHome,
-    profileName: resolveCrossheadProfile() ?? parsed.profileName,
+    profileName: parsed.profileName,
   };
 };
 
@@ -822,7 +828,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
     );
   }
 
-  static forWorkspace(home: string, hostHome: string, workspaceRoot: string, profileName: string, sourceExcerpts: boolean): ClaudeCodeRuntimeAdapter {
+  static forWorkspace(home: string, hostHome: string, workspaceRoot: string, profileName: string, sourceExcerpts: boolean, legacyUnscoped = false, legacyBefore?: string): ClaudeCodeRuntimeAdapter {
     return new ClaudeCodeRuntimeAdapter(new LocalRuntimeClient({ home, timeoutMs: 30_000 }), {
       ...buildClaudeCodeAdapterConfig({
 		runtimeHome: home, hostHome, workspaceRoot, profileName,
@@ -831,6 +837,8 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       }),
       sourceExcerpts,
       workspaceOnly: true,
+      legacyUnscoped,
+      legacyBefore,
     });
   }
 

@@ -65,8 +65,10 @@ crosshead workspace list
 crosshead workspace remove --workspace-root ../other-project
 ```
 
-Project setup writes `.codex/hooks.json` and `.claude/settings.local.json` for
-the selected hosts. Keep the generated entries local to this machine. Existing
+Project setup writes local hook settings for each selected host. Codex settings
+are excluded locally through Git's info/exclude file. When a repository already
+tracks its Codex hooks, Crosshead uses a directory-restricted user registration
+and preserves the tracked file. Claude Code uses settings.local.json. Existing
 user-wide Crosshead hook commands for this runtime are listed in the preview
 when setup replaces them. The runtime skips old Crosshead plugin and hook
 registrations after scoped setup. Review and restart host sessions after a
@@ -143,16 +145,20 @@ a fresh session after choosing either setting.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
   runtime is doing. Local state lives in `~/.crosshead/state/`.
 
-Set `CROSSHEAD_PROFILE` for explicit CLI commands or older adapter setups.
+Set `CROSSHEAD_PROFILE` for explicit CLI commands. Legacy hooks retain their
+installed profile.
 `ONLYBOTS_PROFILE` is the legacy alias. Explicit CLI `--profile` takes precedence.
 Scoped hooks use the profile selected during setup. Use
 `crosshead memory mode off --profile <name>` to stop automatic memory hooks for
 that profile, or `crosshead workspace remove` to detach a project.
 
-Local-only checkpoints are stored per profile. Older flat snapshots in the
-runtime's `state/local-hot-memory/*.json` lack a profile owner. Review those files
-directly to recover saved findings. Automatic recall uses checkpoints with an
-identified profile and workspace in scoped setup.
+Local-only checkpoints are stored per profile. A legacy flat store remains
+readable for its sole existing local-only profile, whose identity is pinned
+before creating another profile. If several profiles already shared an unowned
+store, review its `state/local-hot-memory/*.json` files to establish ownership.
+Scoped setup retains matching subdirectory and symlink history. Its preview
+shows adoption of earlier unscoped checkpoints when one project is selected
+for an existing profile. Later unscoped captures require an explicit workspace.
 
 `crosshead uninstall` removes the runtime. Uninstall the plugin
 (`claude plugin uninstall crosshead@crosshead`, `codex plugin remove

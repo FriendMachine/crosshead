@@ -29,7 +29,7 @@ describe("project profile selection", () => {
   it.each([
     ["codex", "__onlybots_codex_adapter__", loadCodexAdapterConfig],
     ["claude-code", "__onlybots_claude_code_adapter__", loadClaudeCodeAdapterConfig],
-  ] as const)("selects the environment profile for installed %s hooks without rewriting saved config", (host, marker, load) => {
+  ] as const)("preserves the installed %s hook profile despite leftover environment variables", (host, marker, load) => {
     const root = mkdtempSync(path.join(os.tmpdir(), "crosshead-profile-"));
     roots.push(root);
     mkdirSync(path.join(root, "onlybots"));
@@ -38,22 +38,28 @@ describe("project profile selection", () => {
     writeFileSync(file, saved);
     vi.stubEnv("CROSSHEAD_PROFILE", "crosshead");
     vi.stubEnv("ONLYBOTS_PROFILE", "legacy");
-    expect(load(undefined, root)).toMatchObject({ profileName: "crosshead", runtimeHome: "/saved-runtime" });
-    expect(load("/explicit-runtime", root)).toMatchObject({ profileName: "crosshead", runtimeHome: "/explicit-runtime" });
+    expect(load(undefined, root)).toMatchObject({ profileName: "default", runtimeHome: "/saved-runtime" });
+    expect(load("/explicit-runtime", root)).toMatchObject({ profileName: "default", runtimeHome: "/explicit-runtime" });
     vi.stubEnv("CROSSHEAD_PROFILE", "");
-    expect(load(undefined, root).profileName).toBe("legacy");
+    expect(load(undefined, root).profileName).toBe("default");
     vi.stubEnv("ONLYBOTS_PROFILE", "");
     expect(load(undefined, root).profileName).toBe("default");
     expect(readFileSync(file, "utf8")).toBe(saved);
   });
 
-  it("passes the environment profile through the CLI while preserving an explicit --profile", async () => {
+  it("leaves extension argv untouched and recognizes explicit profile forms", async () => {
     vi.stubEnv("CROSSHEAD_PROFILE", "crosshead");
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const probe = vi.fn(async () => "ok");
     await runOnlyBotsCtlCli(["probe"], { commands: { probe } });
-    expect(probe).toHaveBeenLastCalledWith(["--profile", "crosshead"]);
+    expect(probe).toHaveBeenLastCalledWith([]);
     await runOnlyBotsCtlCli(["probe", "--profile", "explicit"], { commands: { probe } });
     expect(probe).toHaveBeenLastCalledWith(["--profile", "explicit"]);
+    await runOnlyBotsCtlCli(["probe", "--profile=explicit"], { commands: { probe } });
+    expect(probe).toHaveBeenLastCalledWith(["--profile=explicit"]);
+    const output = vi.mocked(process.stdout.write);
+    output.mockClear();
+    await runOnlyBotsCtlCli([]);
+    expect(String(output.mock.calls.at(-1)?.[0])).toContain("Crosshead CLI");
   });
 });

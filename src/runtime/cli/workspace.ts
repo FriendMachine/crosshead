@@ -3,11 +3,14 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs, shellQuote } from "../adapter-utils";
 import type { HookHost } from "../host-hook-spec";
-import { loadProfile, loadRuntimeConfig, resolveRuntimePaths } from "../runtime-persistence";
+import { loadAdapterRecord, loadProfile, loadRuntimeConfig, resolveRuntimePaths } from "../runtime-persistence";
 import {
   applyWorkspaceHookPlan, assertWorkspacePlanCurrent, inspectWorkspaceHooks, planWorkspaceHooks, readWorkspaceHookPolicy, summarizeWorkspaceHookPlan,
-  withWorkspaceSetupLock, workspaceProjectRoot, type HookScope, type WorkspaceHookTarget,
+  withWorkspaceSetupLock, workspaceBindingStatus, workspaceProjectRoot, type HookScope, type WorkspaceHookTarget,
 } from "../workspace-hooks";
+import { isRuntimeProfileName } from "../runtime-env";
+import { uninstallCodexFromCli } from "../codex-adapter";
+import { uninstallClaudeCodeFromCli } from "../claude-code-adapter";
 import { installCoreFromCli, keygenFromCli } from "./core";
 import { ensureQuickstartDaemon, type QuickstartCliPaths } from "./quickstart";
 
@@ -38,6 +41,8 @@ const homeArgs = (home?: string): string[] => home ? ["--home", home] : [];
 const describePlan = (plan: ReturnType<typeof summarizeWorkspaceHookPlan>): string => [
   `Crosshead scope: ${plan.scope === "project" ? "selected projects" : plan.scope === "all" ? "all projects" : "manual commands only"}`,
   ...plan.bindings.map((binding) => `  ${binding.root ?? "Every directory"} · ${binding.host} · profile ${binding.profile} · source excerpts ${binding.sourceExcerpts ? "on" : "off"}`),
+  ...plan.bindings.filter(binding => binding.legacyUnscoped).map(binding =>
+    `  Retain earlier unscoped checkpoints for profile ${binding.profile} in ${binding.root ?? "the selected workspace"}`),
   ...(plan.replacesUserHooksIn.length ? ["Replaces earlier Crosshead hooks in", ...plan.replacesUserHooksIn.map((file) => `  ${file}`)] : []),
   ...(plan.files.length ? ["Files to update", ...plan.files.map((file) => `  ${file}`)] : ["Hook settings already match"]),
 ].join("\n");
@@ -46,10 +51,7 @@ export const formatWorkspaceHookInspection = (inspection: ReturnType<typeof insp
   if (inspection.scope === "legacy") return "Crosshead uses the existing host setup. Run crosshead quickstart to choose a scope.";
   if (inspection.bindings.length === 0) return "No automatic Crosshead hooks apply here.";
   return inspection.bindings.map((binding) => {
-    const status = !binding.configured ? "hook settings missing or changed" :
-      !binding.memoryMode ? "profile missing" : binding.memoryMode === "off" ? "memory off" :
-      binding.startup || binding.resume ? "observed in host" :
-      !inspection.workspace && !binding.root ? "configured; check from a project" : "configured; waiting for host";
+    const status = workspaceBindingStatus(binding, inspection.workspace);
     return [
       `${binding.host} · ${binding.root ?? "all projects"} · profile ${binding.profile} · ${status}`,
       `  ${binding.file}`,
@@ -76,7 +78,7 @@ export const workspaceHooksFromCli = async (argv: string[]): Promise<string> => 
   const hosts = selectedHosts(str(flags, "adapter") ?? (command === "remove" ? "both" : ""));
   const paths = resolveRuntimePaths(options.home);
   const profile = str(flags, "profile") ?? loadRuntimeConfig(paths).defaultProfile;
-  if (command === "add" && (!profile || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(profile) || !loadProfile(paths, profile))) {
+  if (command === "add" && (!profile || !isRuntimeProfileName(profile) || !loadProfile(paths, profile))) {
     throw new Error("Choose an existing --profile, or run crosshead quickstart to create one.");
   }
   const current = inspectWorkspaceHooks(options.home);
@@ -106,14 +108,23 @@ export const uninstallWorkspaceHostFromCli = async (host: HookHost, argv: string
   await withWorkspaceSetupLock(paths, async () => {
     const policy = readWorkspaceHookPolicy(paths);
     if (!policy) throw new Error("Workspace scope changed during uninstall. Run the command again.");
+    const homes = new Set(policy.bindings.filter(binding => binding.host === host).map(binding => binding.hostHome));
+    const recordedHome = loadAdapterRecord(paths, host)?.hostHome;
+    if (recordedHome) homes.add(recordedHome);
+    const explicitHome = host === "codex" ? options.codexHome : options.claudeHome;
+    if (explicitHome) homes.add(explicitHome);
     const plan = planWorkspaceHooks({
       ...options,
       scope: policy.bindings.every((binding) => binding.host === host) ? "manual" : policy.scope,
       targets: [], removeHost: host, cleanup: true,
     });
     applyWorkspaceHookPlan(plan);
+    const uninstall = host === "codex" ? uninstallCodexFromCli : uninstallClaudeCodeFromCli;
+    const homeFlag = host === "codex" ? "--codex-home" : "--claude-home";
+    if (homes.size === 0) await uninstall(argv);
+    else for (const home of homes) await uninstall([...argv, homeFlag, home]);
   });
-  return `Detached automatic Crosshead hooks for ${host}.`;
+  return `Uninstalled Crosshead for ${host}.`;
 };
 
 const guidedSetup = async (flags: Flags, fallbackProfile: string, profiles: string[]) => {
@@ -166,7 +177,7 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
       profile: fallbackProfile, sourceExcerpts: sourceExcerpts(flags),
     }];
     const names = [...new Set(targets.map((target) => target.profile))];
-    if (names.some((name) => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name))) throw new Error("Profile names must use letters, numbers, dots, underscores or hyphens.");
+    if (names.some((name) => !isRuntimeProfileName(name))) throw new Error("Profile names must use 1–128 letters, numbers, dots, underscores, plus signs or hyphens.");
     const profileSnapshot = (name: string) => {
       const profile = loadProfile(paths, name);
       return profile ? JSON.stringify([profile.npub, profile.apiBase, profile.memoryMode, profile.workspaceScope]) : null;

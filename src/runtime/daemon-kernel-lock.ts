@@ -8,8 +8,8 @@ export type DaemonKernelLock = { alive(): boolean; close(): Promise<void> };
  * loopback listener is a kernel-owned lock that also releases on SIGKILL.
  * A port collision fails closed; we never evict a listener or probe its data.
  * No protocol or credentials are served on this socket. */
-export const acquireLoopbackDaemonLock = async (home: string): Promise<DaemonKernelLock> => {
-	const port = 16384 + createHash("sha256").update(`onlybots-daemon:${home}`).digest().readUInt32BE(0) % 32768;
+export const acquireLoopbackDaemonLock = async (home: string, purpose = "daemon"): Promise<DaemonKernelLock> => {
+	const port = 16384 + createHash("sha256").update(`onlybots-${purpose}:${home}`).digest().readUInt32BE(0) % 32768;
 	const server = createServer(socket => socket.destroy());
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", () => reject(new Error(`Daemon home is already controlled or ownership port ${port} is occupied`)));

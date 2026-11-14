@@ -5,7 +5,7 @@ import { billingFromCli } from "./billing";
 import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy } from "../runtime-auto-update";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 import { inspectHostHookRegistrations } from "../host-hook-doctor";
-import { inspectWorkspaceHooks } from "../workspace-hooks";
+import { inspectWorkspaceHooks, workspaceBindingStatus } from "../workspace-hooks";
 
 export const installCoreFromCli = async (argv: string[], cliScriptPath: string, daemonScriptPath: string): Promise<string> => {
 	const { flags } = parseArgs(argv);
@@ -214,9 +214,7 @@ export const doctorFromCli = async (argv: string[]): Promise<string> => {
 			? workspaceHooks.bindings.map((binding) => ({
 				id: `${binding.host.replace("-", "_")}_hooks`,
 				ok: binding.configured && binding.memoryMode !== null,
-				message: `profile=${binding.profile}; ${!binding.configured ? "hook settings missing or changed" :
-					binding.memoryMode === null ? "profile missing" : binding.memoryMode === "off" ? "memory off" :
-					binding.startup || binding.resume ? "observed in host" : "configured; waiting for host"}. ${binding.file}`,
+				message: `profile=${binding.profile}; ${workspaceBindingStatus(binding, workspaceHooks.workspace)}. ${binding.file}`,
 			}))
 			: [{ id: "workspace_hooks", ok: true, message: "No automatic Crosshead hooks apply in this directory." }];
 	const checks = [...daemonReport.checks, ...hookChecks];

@@ -27,6 +27,43 @@ const localHotMemoryDir = (stateDir: string, owner?: HotMemoryOwner): string =>
     ? path.join(stateDir, LOCAL_HOT_MEMORY_DIR, "profiles", createHash("sha256").update(JSON.stringify([owner.name, owner.npub])).digest("hex"))
     : path.join(stateDir, LOCAL_HOT_MEMORY_DIR);
 
+const legacyOwnerFile = (stateDir: string): string => path.join(stateDir, "legacy-local-hot-owner.json");
+
+/** Before namespacing, a flat store was shared by the runtime's local-only profiles.
+ * Adopt it only for its sole existing local profile, and pin that identity before
+ * another profile can be created. Old bytes remain available for recovery. */
+const legacyOwner = (stateDir: string): HotMemoryOwner | null => {
+  const pinned = legacyOwnerFile(stateDir);
+  if (existsSync(pinned)) {
+    try {
+      const owner = JSON.parse(readFileSync(pinned, "utf8")) as HotMemoryOwner;
+      return typeof owner.name === "string" && typeof owner.npub === "string" ? owner : null;
+    } catch { return null; }
+  }
+  const profiles = path.join(path.dirname(stateDir), "config", "profiles");
+  if (!existsSync(profiles)) return null;
+  const local = readdirSync(profiles).filter(name => name.endsWith(".json")).flatMap(name => {
+    try {
+      const profile = JSON.parse(readFileSync(path.join(profiles, name), "utf8"));
+      return typeof profile.name === "string" && typeof profile.npub === "string" && isLocalOnlyRuntimeProfile(profile) ? [profile as HotMemoryOwner] : [];
+    } catch { return []; }
+  });
+  return local.length === 1 ? { name: local[0]!.name, npub: local[0]!.npub } : null;
+};
+
+export const preserveLegacyLocalHotOwner = (stateDir: string): void => {
+  if (existsSync(legacyOwnerFile(stateDir))) return;
+  const directory = localHotMemoryDir(stateDir);
+  if (!existsSync(directory) || !readdirSync(directory).some(name => name.endsWith(".json"))) return;
+  const owner = legacyOwner(stateDir);
+  writeManagedFile(legacyOwnerFile(stateDir), JSON.stringify(owner ?? { ambiguous: true }), stateDir);
+};
+
+const canReadLegacy = (stateDir: string, owner: HotMemoryOwner): boolean => {
+  const legacy = legacyOwner(stateDir);
+  return legacy?.name === owner.name && legacy.npub === owner.npub;
+};
+
 const normalizeHotScope = (scope?: string | null): string => {
   const trimmed = typeof scope === "string" ? scope.trim() : "";
   const normalized = trimmed.length > 0 ? trimmed : SHARED_HOT_SCOPE;
@@ -78,14 +115,17 @@ export const readLocalHotMemory = (stateDir: string, scope?: string | null, owne
 		  .map((fileName) => readScopeFile(directory, fileName))
           .filter((entry): entry is Record<string, unknown> => entry !== null)
       : [];
-    return {
-      scope: HOT_SCOPE_ALL,
-      scopes,
-    };
+    if (owner && canReadLegacy(stateDir, owner)) {
+      const legacy = readLocalHotMemory(stateDir, HOT_SCOPE_ALL).scopes as Array<Record<string, unknown>>;
+      const ownedScopes = new Set(scopes.map(entry => entry.scope));
+      scopes.push(...legacy.map(entry => ownedScopes.has(entry.scope) ? { ...entry, scope: `legacy:${entry.scope}` } : entry));
+    }
+    return { scope: HOT_SCOPE_ALL, scopes };
   }
 
   const filePath = localHotMemoryFile(directory, normalizedScope);
   if (!existsSync(filePath)) {
+    if (owner && canReadLegacy(stateDir, owner)) return readLocalHotMemory(stateDir, normalizedScope);
     return {
       scope: normalizedScope,
       content: "",
@@ -106,6 +146,7 @@ export const readLocalHotMemory = (stateDir: string, scope?: string | null, owne
 };
 
 export const writeLocalHotMemory = (stateDir: string, content: string, scope?: string | null, owner?: HotMemoryOwner): Record<string, unknown> => {
+  if (owner) preserveLegacyLocalHotOwner(stateDir);
   const normalizedScope = normalizeHotScope(scope);
   if (normalizedScope === HOT_SCOPE_ALL) throw new Error("Hot-memory scope all is read-only");
   const filePath = localHotMemoryFile(localHotMemoryDir(stateDir, owner), normalizedScope);

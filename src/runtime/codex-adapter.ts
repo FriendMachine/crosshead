@@ -1,3 +1,4 @@
+import { readWorkspaceHookPolicy, refreshWorkspaceHooks } from "./workspace-hooks";
 import { accessSync, chmodSync, constants, existsSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
@@ -97,6 +98,8 @@ export type CodexAdapterConfig = {
   profileName: string;
   sourceExcerpts?: boolean;
   workspaceOnly?: boolean;
+  legacyUnscoped?: boolean;
+  legacyBefore?: string;
   skillName: string;
   /** Absent in configs written before host plugins; treated as "settings". */
   hookMode?: HostHookMode;
@@ -649,6 +652,7 @@ export const codexLegacyHooksFile = (hostHome: string): string => hooksFile(host
 
 export const installCodexAdapter = async (options: CodexAdapterInstallOptions): Promise<CodexAdapterInstallResult> => {
   const runtimeLayout = ensureRuntimeHomeLayout(options.home);
+  const scopedPolicy = readWorkspaceHookPolicy(runtimeLayout);
   const hostHome = resolveCodexHome(options.hostHome);
   const previousConfig = existsSync(configFile(hostHome))
     ? (() => {
@@ -672,8 +676,8 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
   // dispatch rule lets the installer hooks capture and the plugin defer.
   const legacyPresent = codexHooksFileHasLegacyHooks(hooksFile(hostHome), runtimeLayout.home);
   const pluginObserved = pluginInvocationMatches(readPluginInvocation(runtimeLayout.home, "codex"), hostHome);
-  const migrateLegacy = hookMode === "plugin" && legacyPresent && pluginObserved;
-  const writeLegacy = hookMode === "settings" && resolution.writeLegacyHooks;
+  const migrateLegacy = !scopedPolicy && hookMode === "plugin" && legacyPresent && pluginObserved;
+  const writeLegacy = !scopedPolicy && hookMode === "settings" && resolution.writeLegacyHooks;
   const hookModeNote =
     resolution.note ??
     (hookMode === "plugin" && legacyPresent && !pluginObserved
@@ -700,15 +704,17 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     hookModeRequest: resolution.request,
   });
 
-  writeManagedFile(
-    adapterPaths.skillFile,
-    renderCodexSkillMarkdown(config, adapterPaths.wrapperFile),
-    hostHome
-  );
-  // Retire only adapter-owned legacy skill copies; leave operator-authored skills intact.
-  for (const name of ["onlybots-bootstrap", "onlybots-runtime"]) {
-    const legacy = path.join(hostHome, "skills", name, "SKILL.md");
-    if (isManagedContent(legacy)) rmSync(legacy);
+  if (!scopedPolicy) {
+    writeManagedFile(
+      adapterPaths.skillFile,
+      renderCodexSkillMarkdown(config, adapterPaths.wrapperFile),
+      hostHome
+    );
+    // Retire only adapter-owned legacy skill copies; leave operator-authored skills intact.
+    for (const name of ["onlybots-bootstrap", "onlybots-runtime"]) {
+      const legacy = path.join(hostHome, "skills", name, "SKILL.md");
+      if (isManagedContent(legacy)) rmSync(legacy);
+    }
   }
   writeManagedFile(
     adapterPaths.configFile,
@@ -759,6 +765,8 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     installedAt: nowIso(),
     updatedAt: nowIso(),
   });
+
+  if (scopedPolicy) await refreshWorkspaceHooks(runtimeLayout.home);
 
   return {
     adapter: existingRecord,
@@ -825,7 +833,7 @@ export const loadCodexAdapterConfig = (
   return {
     ...parsed,
     runtimeHome: runtimeHomeInput ? resolveRuntimeHome(runtimeHomeInput) : parsed.runtimeHome,
-    profileName: resolveCrossheadProfile() ?? parsed.profileName,
+    profileName: parsed.profileName,
   };
 };
 
@@ -860,12 +868,14 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     );
   }
 
-  static forWorkspace(home: string, hostHome: string, profileName: string, sourceExcerpts: boolean): CodexRuntimeAdapter {
+  static forWorkspace(home: string, hostHome: string, profileName: string, sourceExcerpts: boolean, legacyUnscoped = false, legacyBefore?: string): CodexRuntimeAdapter {
     return new CodexRuntimeAdapter(new LocalRuntimeClient({ home, timeoutMs: 30_000 }), {
       ...buildEphemeralCodexAdapterConfig(home, hostHome),
       profileName,
       sourceExcerpts,
       workspaceOnly: true,
+      legacyUnscoped,
+      legacyBefore,
     });
   }
 

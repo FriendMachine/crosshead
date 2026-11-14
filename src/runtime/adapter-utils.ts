@@ -99,6 +99,11 @@ export const parseArgs = (args: string[]): { positionals: string[]; flags: Recor
       positionals.push(value);
       continue;
     }
+    const equals = value.indexOf("=");
+    if (equals > 2) {
+      flags[value.slice(2, equals)] = value.slice(equals + 1);
+      continue;
+    }
     const key = value.slice(2);
     const next = args[index + 1];
     if (!next || next.startsWith("--")) {

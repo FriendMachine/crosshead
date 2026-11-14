@@ -85,14 +85,21 @@ export const runOnlyBotsCtlCli = async (
 	extensions: OnlyBotsCtlCliExtensions = {}
 ): Promise<void> => {
 	assertSecureNodeRuntimeVersion();
-	const profile = resolveCrossheadProfile();
-	if (profile && !argv.includes("--profile")) argv = [...argv, "--profile", profile];
 	const command = argv[0];
-	const rest = argv.slice(1);
+	let rest = argv.slice(1);
 	const extension = command ? extensions.commands?.[command] : undefined;
 	if (extension) {
 		process.stdout.write(`${await extension(rest)}\n`);
 		return;
+	}
+	const profileCommands = new Set([
+		"setup", "keygen", "status", "doctor", "memory", "messages", "billing", "public", "context",
+		"agent", "lineage", "passport", "workspace", "handoff", "sign-challenge", "sign-deletion-challenge", "organization", "quickstart", "onboard",
+	]);
+	const profile = resolveCrossheadProfile();
+	if (profile && command && profileCommands.has(command) &&
+		!rest.some((arg) => arg === "--profile" || arg.startsWith("--profile="))) {
+		rest = [...rest, "--profile", profile];
 	}
 	const cliScriptPath = extensions.cliScriptPath ?? path.resolve(__filename);
 	const daemonScriptPath = extensions.daemonScriptPath ?? path.resolve(__dirname, "daemon.js");
@@ -212,8 +219,7 @@ export const runOnlyBotsCtlCli = async (
 			const adapter = flags.adapter ?? flags.host;
 			const guided = !adapter && !flags.scope && !flags["hook-mode"] && !flags.json && !flags["dry-run"] &&
 				Boolean(process.stdin.isTTY && process.stderr.isTTY);
-			const scoped = guided || flags.scope !== undefined || flags["dry-run"] !== undefined || (!flags["hook-mode"] &&
-				(adapter === "codex" || adapter === "claude-code" || adapter === "both"));
+			const scoped = guided || flags.scope !== undefined;
 			const scripts = {
 				cliScriptPath,
 				daemonScriptPath,

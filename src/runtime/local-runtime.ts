@@ -29,7 +29,7 @@ import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./o
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
 import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
-import { isLocalOnlyRuntimeProfile, readLocalHotMemory } from "./local-hot-memory";
+import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { searchHotCheckpoints } from "./hot-continuity";
 import {
 	RuntimeLifecycleManager,
@@ -173,7 +173,7 @@ import {
 	writeRuntimeLog,
 } from "./runtime-persistence";
 import { nowIso } from "./adapter-utils";
-import { applyWorkspaceHookPlan, planWorkspaceHooks, readWorkspaceHookPolicy, withWorkspaceSetupLock } from "./workspace-hooks";
+import { applyWorkspaceHookPlan, planWorkspaceHooks, readWorkspaceHookPolicy, refreshWorkspaceHooks, withWorkspaceSetupLock } from "./workspace-hooks";
 import {
 	cloneOrganizationalWorkerReadiness,
 	normalizeOrganizationalWorkerReadiness,
@@ -1350,6 +1350,7 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 		createdAt: loadProfile(paths, options.profileName)?.createdAt ?? nowIso(),
 		updatedAt: nowIso(),
 	};
+	preserveLegacyLocalHotOwner(paths.state);
 	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} was created during setup`);
 	saveProfile(paths, profile);
 	saveSecret(paths, options.profileName, {
@@ -1649,7 +1650,7 @@ export const inspectPublishedRuntimeRelease = async (home?: string): Promise<{ i
 	return { installed: inspectInstalledRuntimeRelease(paths).releaseId, available: parseInstallerReleaseMetadata(script).releaseId };
 };
 
-const reapplyManagedRuntimeRelease = async (
+export const reapplyManagedRuntimeRelease = async (
 	paths: RuntimePaths,
 	release: DownloadedRuntimeRelease,
 	specs: ManagedAdapterReinstallSpec[]
@@ -1660,6 +1661,9 @@ const reapplyManagedRuntimeRelease = async (
 	if (specs.some(spec => spec.name === "hermes" || spec.name === "opencode") && !existsSync(path.join(release.releaseRoot, "dist", "runtime", "native-host-adapter.js"))) {
 		throw new Error("Target release does not support installed Hermes/OpenCode plugins; uninstall those adapters before downgrading");
 	}
+	const workspacePolicy = readWorkspaceHookPolicy(paths);
+	const workspaceModule = path.join(release.releaseRoot, "dist", "runtime", "workspace-hooks.js");
+	if (workspacePolicy && !existsSync(workspaceModule)) throw new Error("This release does not support the configured workspace hooks.");
 	const config = loadRuntimeConfig(paths);
 	const nextRuntime = require(release.localRuntimeModulePath) as {
 		installRuntimeCore: typeof installRuntimeCore;
@@ -1730,6 +1734,11 @@ const reapplyManagedRuntimeRelease = async (
 			name: "pi",
 			version: result.adapter.version,
 		});
+	}
+
+	if (workspacePolicy) {
+		const scoped = require(workspaceModule) as { refreshWorkspaceHooks: typeof refreshWorkspaceHooks };
+		await scoped.refreshWorkspaceHooks(paths.home);
 	}
 
 	return {

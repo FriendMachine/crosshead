@@ -1,3 +1,4 @@
+import { workspaceProjectRoot } from "./workspace-hooks";
 import { existsSync } from "fs";
 import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
 import { workspaceHotScope } from "./workspace-hot-memory";
@@ -35,6 +36,8 @@ export type HostAdapterBaseConfig = {
   runtimeHome?: string;
   sourceExcerpts?: boolean;
   workspaceOnly?: boolean;
+  legacyUnscoped?: boolean;
+  legacyBefore?: string;
 };
 
 export type HostAdapterTranscriptEntry = {
@@ -222,10 +225,35 @@ const emptyHotMemorySnapshot = (): Record<string, unknown> => ({ scope: "all", s
 export const filterHotMemorySnapshotForWorkspace = (
   hotMemory: Record<string, unknown> | null,
   workspaceId: string,
-  workspaceOnly = false
+  workspaceOnly = false,
+  legacyUnscoped = false,
+  legacyBefore?: string
 ): Record<string, unknown> | null => {
   if (!hotMemory) {
     return null;
+  }
+  if (workspaceOnly && workspaceId.startsWith("repo:")) {
+    const target = workspaceId.slice(5);
+    const equivalent = (id: string | null, observedAt?: unknown): boolean => {
+      if (id === workspaceId) return true;
+      if (!id) return legacyUnscoped && Boolean(legacyBefore) && typeof observedAt === "string" &&
+	Date.parse(observedAt) <= Date.parse(legacyBefore!);
+      if (!id.startsWith("repo:") || !path.isAbsolute(id.slice(5))) return false;
+      try { return workspaceProjectRoot(id.slice(5)) === target; } catch { return false; }
+    };
+    const normalize = (entry: Record<string, unknown>): Record<string, unknown> | null => {
+      const content = parseHotMemoryEntryContent(entry);
+      if (!content || !equivalent(getWorkspaceId(content), entry.updated_at ?? content.updatedAt ?? content.occurredAt)) return null;
+      const checkpoints = Array.isArray(content.continuityCheckpoints)
+	? content.continuityCheckpoints.filter(isRecord).filter(checkpoint => equivalent(getWorkspaceId(checkpoint), checkpoint.occurredAt ?? entry.updated_at ?? content.updatedAt))
+	  .map(checkpoint => ({ ...checkpoint, workspaceId })) : undefined;
+      return { ...entry, content: JSON.stringify({ ...content, workspaceId,
+	...(checkpoints ? { continuityCheckpoints: checkpoints } : {}) }) };
+    };
+    hotMemory = Array.isArray(hotMemory.scopes)
+      ? { ...hotMemory, scopes: hotMemory.scopes.filter(isRecord).map(normalize).filter(isRecord) }
+      : normalize(hotMemory);
+    if (!hotMemory) return null;
   }
   const scopedEntries = Array.isArray(hotMemory.scopes) ? hotMemory.scopes.filter(isRecord) : null;
   if (!scopedEntries) {
@@ -397,7 +425,7 @@ export abstract class HostRuntimeAdapterBase {
       hostVersion: input.hostVersion,
     });
     const rawPreTurnHotMemory = await this.client.readHotMemory(profileName, "all").catch(() => null);
-    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId, this.config.workspaceOnly);
+    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId, this.config.workspaceOnly, this.config.legacyUnscoped, this.config.legacyBefore);
     const response = await this.client.emitEvent({
       runtime: this.identity.runtimeId,
       profileName,
