@@ -59,7 +59,7 @@ import {
   type HostAdapterTurnPrepareRequest,
   type HostAdapterTurnPrepareResult,
 } from "./host-adapter-base";
-import { resolveClaudeCodeBinaryPath, resolveClaudeCodeHostHome, resolveCrossheadProfile } from "./runtime-env";
+import { resolveClaudeCodeBinaryPath, resolveClaudeCodeHostHome } from "./runtime-env";
 import { PLUGIN_DISPATCH_CAPABILITY, renderHostHookGroups, type HostHookEvent } from "./host-hook-spec";
 import {
   claudeLoadedSettingsFiles,
@@ -123,6 +123,8 @@ export type ClaudeCodeAdapterPaths = {
 };
 
 export type ClaudeCodeAdapterInstallOptions = {
+  /** Release updates refresh both hosts together after reinstalling their wrappers. */
+  deferWorkspaceHookRefresh?: boolean;
   home?: string;
   hostHome?: string;
   workspaceRoot?: string;
@@ -732,7 +734,7 @@ export const installClaudeCodeAdapter = async (
     updatedAt: nowIso(),
   });
 
-  if (scopedPolicy) await refreshWorkspaceHooks(runtimeLayout.home);
+  if (scopedPolicy && !options.deferWorkspaceHookRefresh) await refreshWorkspaceHooks(runtimeLayout.home);
 
   return {
     adapter: existingRecord,

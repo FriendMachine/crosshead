@@ -127,6 +127,8 @@ export type CodexAdapterPaths = {
 };
 
 export type CodexAdapterInstallOptions = {
+  /** Release updates refresh both hosts together after reinstalling their wrappers. */
+  deferWorkspaceHookRefresh?: boolean;
   home?: string;
   hostHome?: string;
   codexBinary?: string;
@@ -766,7 +768,7 @@ export const installCodexAdapter = async (options: CodexAdapterInstallOptions): 
     updatedAt: nowIso(),
   });
 
-  if (scopedPolicy) await refreshWorkspaceHooks(runtimeLayout.home);
+  if (scopedPolicy && !options.deferWorkspaceHookRefresh) await refreshWorkspaceHooks(runtimeLayout.home);
 
   return {
     adapter: existingRecord,

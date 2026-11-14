@@ -19,7 +19,7 @@ import { handoffFromCli } from "./cli/handoff";
 import { memoryFromCli, workspaceFromCli } from "./cli/memory";
 import { messagesFromCli } from "./cli/messages";
 import { publicFromCli } from "./cli/public";
-import { quickstartFromCli } from "./cli/quickstart";
+import { shouldGuideQuickstart, quickstartFromCli } from "./cli/quickstart";
 import { buildRuntimeBillingRemediation, formatRuntimeBillingRemediation } from "./billing-remediation";
 import { HostedOnlyBotsRequestError } from "./hosted-client";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -216,9 +216,7 @@ export const runOnlyBotsCtlCli = async (
 		case "quickstart":
 		case "onboard": {
 			const { flags } = parseArgs(rest);
-			const adapter = flags.adapter ?? flags.host;
-			const guided = !adapter && !flags.scope && !flags["hook-mode"] && !flags.json && !flags["dry-run"] &&
-				Boolean(process.stdin.isTTY && process.stderr.isTTY);
+			const guided = shouldGuideQuickstart(argv.slice(1), Boolean(process.stdin.isTTY && process.stderr.isTTY));
 			const scoped = guided || flags.scope !== undefined;
 			const scripts = {
 				cliScriptPath,
@@ -317,8 +315,9 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead update [adapter] [--home <path>] [--channel stable|beta|canary] [--version <version>]",
 				"crosshead rollback [adapter] --to <version> [--home <path>]",
 				"crosshead doctor [--home <path>] [--workspace-root <path>] [--json]",
-				"crosshead workspace add --workspace-root <path> --adapter codex|claude-code|both --profile <name> [--source-excerpts on|off] [--dry-run] [--json]",
+				"crosshead workspace add --workspace-root <path> --adapter codex|claude-code|both --profile <name> [--source-excerpts on|off] [--replace-user-hooks] [--dry-run] [--json]",
 				"crosshead workspace remove --workspace-root <path> [--adapter codex|claude-code|both] [--dry-run] [--json]",
+				"crosshead workspace repair [--dry-run] [--json] [--home <path>]",
 				"crosshead workspace list|check [--workspace-root <path>] [--json]",
 				"crosshead logs [--home <path>] [--lines 50]",
 				"crosshead events [--home <path>] [--lines 50] [--json]",

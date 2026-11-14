@@ -1,3 +1,5 @@
+import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
+import { workspaceHotScope } from "./workspace-hot-memory";
 import { createHash } from "crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import path from "path";
@@ -118,7 +120,7 @@ export const readLocalHotMemory = (stateDir: string, scope?: string | null, owne
     if (owner && canReadLegacy(stateDir, owner)) {
       const legacy = readLocalHotMemory(stateDir, HOT_SCOPE_ALL).scopes as Array<Record<string, unknown>>;
       const ownedScopes = new Set(scopes.map(entry => entry.scope));
-      scopes.push(...legacy.map(entry => ownedScopes.has(entry.scope) ? { ...entry, scope: `legacy:${entry.scope}` } : entry));
+      scopes.push(...legacy.filter(entry => !ownedScopes.has(entry.scope)));
     }
     return { scope: HOT_SCOPE_ALL, scopes };
   }
@@ -152,4 +154,56 @@ export const writeLocalHotMemory = (stateDir: string, content: string, scope?: s
   const filePath = localHotMemoryFile(localHotMemoryDir(stateDir, owner), normalizedScope);
   writeManagedFile(filePath, content, stateDir);
   return readLocalHotMemory(stateDir, normalizedScope, owner);
+};
+
+/** Fingerprint the complete source set, including newly arrived partitions. */
+export const localHotMemoryAdoptionFingerprint = (stateDir: string, owner: HotMemoryOwner): string => {
+  const directories = [localHotMemoryDir(stateDir), localHotMemoryDir(stateDir, owner)];
+  const source = directories.map(directory => existsSync(directory)
+    ? readdirSync(directory).filter(name => name.endsWith(".json")).sort().map(name => {
+      const file = path.join(directory, name);
+      return [name, statSync(file).mtime.toISOString(), createHash("sha256").update(readFileSync(file)).digest("hex")];
+    }) : []);
+  const marker = legacyOwnerFile(stateDir);
+  return createHash("sha256").update(JSON.stringify([source, existsSync(marker) ? readFileSync(marker, "utf8") : null])).digest("hex");
+};
+
+/** Copy eligible history into current workspace partitions before the first new session.
+ * Original flat archives remain untouched and cease being a fallback after replacement. */
+export const planLocalHotMemoryAdoption = (
+  stateDir: string, owner: HotMemoryOwner, workspaceId: string, unscoped: boolean, before?: string
+) => {
+  const fingerprint = localHotMemoryAdoptionFingerprint(stateDir, owner);
+  const raw = readLocalHotMemory(stateDir, "all", owner);
+  const entries = (raw.scopes ?? []) as Array<Record<string, unknown>>;
+  const tagged = entries.map(entry => {
+    const owned = localHotMemoryFile(localHotMemoryDir(stateDir, owner), String(entry.scope));
+    const source = existsSync(owned) ? owned : localHotMemoryFile(localHotMemoryDir(stateDir), String(entry.scope));
+    return { ...entry, adoptionSource: source, adoptionBefore: String(entry.content ?? "") };
+  });
+  const snapshot = filterHotMemorySnapshotForWorkspace({ ...raw, scopes: tagged }, workspaceId, true, unscoped, before);
+  const sources = new Map<string, { file: string; before: string }>();
+  const planned = new Map<string, { file: string; content: string; time: number }>();
+  for (const entry of (snapshot?.scopes ?? []) as Array<Record<string, unknown>>) {
+    const content = String(entry.content ?? "");
+    let state: Record<string, unknown>;
+    try { state = JSON.parse(content); } catch { continue; }
+    const runtime = typeof state.runtime === "string" ? state.runtime : null;
+    const scopes = new Set([String(entry.scope), ...(runtime ? [workspaceHotScope(runtime, workspaceId)!] : [])]);
+    const time = Date.parse(String(state.updatedAt ?? entry.updated_at)) || 0;
+    for (const scope of scopes) {
+      const file = localHotMemoryFile(localHotMemoryDir(stateDir, owner), normalizeHotScope(scope));
+      if (existsSync(file)) continue;
+      if (!planned.has(file) || time > planned.get(file)!.time) {
+	planned.set(file, { file, content, time });
+	const source = String(entry.adoptionSource);
+	sources.set(source, { file: source, before: String(entry.adoptionBefore) });
+      }
+    }
+  }
+  if (planned.size && !existsSync(legacyOwnerFile(stateDir)) && canReadLegacy(stateDir, owner)) {
+    const file = legacyOwnerFile(stateDir);
+    planned.set(file, { file, content: JSON.stringify({ name: owner.name, npub: owner.npub }), time: 0 });
+  }
+  return { files: [...planned.values()].map(({ file, content }) => ({ file, content })), sources: [...sources.values()], snapshot: { stateDir, owner: { name: owner.name, npub: owner.npub }, fingerprint } };
 };

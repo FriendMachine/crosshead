@@ -29,3 +29,18 @@ export const acquireDaemonKernelLock = async (home: string, state: string): Prom
 	const suffix = createHash("sha256").update("onlybots-local-runtime-daemon").digest("hex").slice(0, 24);
 	return acquireLocalHostedBridge(state, suffix);
 };
+
+/** Linux abstract sockets need no external lock program or stale socket cleanup. */
+export const acquireWorkspaceSetupKernelLock = async (home: string): Promise<DaemonKernelLock> => {
+	if (process.platform !== "linux") return acquireLoopbackDaemonLock(home, "workspace-setup");
+	const server = createServer(socket => socket.destroy());
+	const address = "\0crosshead-workspace-setup:" + createHash("sha256").update(home).digest("hex");
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", () => reject(new Error("A workspace setup is already in progress for this runtime.")));
+		server.listen({ path: address, exclusive: true }, resolve);
+	});
+	return { alive: () => server.listening, close: async () => {
+		if (!server.listening) return;
+		await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+	} };
+};

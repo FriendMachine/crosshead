@@ -65,6 +65,14 @@ crosshead workspace list
 crosshead workspace remove --workspace-root ../other-project
 ```
 
+A bare `crosshead quickstart` in a terminal opens the setup wizard. Existing
+argument-based quickstart commands retain their legacy behavior; use an explicit
+`--scope` to select project, all-project, or manual setup from scripts.
+
+The first `workspace add` on a legacy installation previews the change from
+user-wide coverage and asks before applying it. For noninteractive use, review
+`--dry-run` and pass `--replace-user-hooks` to acknowledge that coverage change.
+
 Project setup writes local hook settings for each selected host. Codex settings
 are excluded locally through Git's info/exclude file. When a repository already
 tracks its Codex hooks, Crosshead uses a directory-restricted user registration
@@ -158,7 +166,24 @@ before creating another profile. If several profiles already shared an unowned
 store, review its `state/local-hot-memory/*.json` files to establish ownership.
 Scoped setup retains matching subdirectory and symlink history. Its preview
 shows adoption of earlier unscoped checkpoints when one project is selected
-for an existing profile. Later unscoped captures require an explicit workspace.
+for an existing profile. Eligible local history is copied into current workspace
+partitions before a new session writes them. Once a scope is replaced, its flat
+archive stays available for recovery and no longer participates in recall.
+Later unscoped captures require an explicit workspace.
+
+If workspace settings are damaged, `crosshead workspace list`, `workspace check`,
+and `doctor` report the problem while automatic memory stays paused. Run:
+
+```sh
+crosshead workspace repair --dry-run
+crosshead workspace repair
+crosshead quickstart --scope project --adapter both --profile work
+```
+
+Repair preserves the exact damaged policy in a private adjacent backup and sets
+manual scope. It keeps memory files and host settings intact. Review the new
+setup before enabling automatic hooks again. `doctor` also reports missing
+project directories without dropping the remaining runtime diagnostics.
 
 `crosshead uninstall` removes the runtime. Uninstall the plugin
 (`claude plugin uninstall crosshead@crosshead`, `codex plugin remove

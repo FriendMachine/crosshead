@@ -208,7 +208,9 @@ export const doctorFromCli = async (argv: string[]): Promise<string> => {
 	const workspaceRoot =
 		typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.env.CLAUDE_PROJECT_DIR || process.cwd();
 	const workspaceHooks = inspectWorkspaceHooks(home, workspaceRoot);
-	const hookChecks = workspaceHooks.scope === "legacy"
+	const hookChecks = workspaceHooks.error || workspaceHooks.workspaceError
+		? [{ id: "workspace_hooks", ok: false, message: [workspaceHooks.error, workspaceHooks.workspaceError].filter(Boolean).join("; ") }]
+		: workspaceHooks.scope === "legacy"
 		? inspectHostHookRegistrations(home, workspaceRoot)
 		: workspaceHooks.bindings.length
 			? workspaceHooks.bindings.map((binding) => ({

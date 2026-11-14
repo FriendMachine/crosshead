@@ -1692,6 +1692,7 @@ export const reapplyManagedRuntimeRelease = async (
 			};
 			const result = await nextCodex.installCodexAdapter({
 				home: paths.home,
+				deferWorkspaceHookRefresh: true,
 				hostHome: spec.hostHome ?? undefined,
 				profileName: spec.profileName,
 				codexBinary: spec.codexBinary ?? undefined,
@@ -1710,6 +1711,7 @@ export const reapplyManagedRuntimeRelease = async (
 			};
 			const result = await nextClaude.installClaudeCodeAdapter({
 				home: paths.home,
+				deferWorkspaceHookRefresh: true,
 				hostHome: spec.hostHome ?? undefined,
 				workspaceRoot: spec.workspaceRoot ?? undefined,
 				profileName: spec.profileName,

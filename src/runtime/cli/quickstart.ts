@@ -308,3 +308,6 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 	};
 	return flags.json ? JSON.stringify(result, null, 2) : formatQuickstart(result);
 };
+
+/** Only an argument-free invocation opts into the terminal onboarding wizard. */
+export const shouldGuideQuickstart = (args: string[], terminal: boolean): boolean => terminal && args.length === 0;

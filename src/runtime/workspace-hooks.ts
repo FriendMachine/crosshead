@@ -1,13 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import { assertManagedFilePath, shellQuote, writeManagedFile } from "./adapter-utils";
 import { HOST_HOOK_EVENTS, PLUGIN_DISPATCH_CAPABILITY, renderHostHookGroups, type HookHost } from "./host-hook-spec";
 import { homedir } from "node:os";
-import { acquireLocalHostedBridge } from "./local-hosted-bridge";
-import { acquireLoopbackDaemonLock } from "./daemon-kernel-lock";
+import { acquireWorkspaceSetupKernelLock } from "./daemon-kernel-lock";
+import { workspaceDirectoryPath as directoryPath, workspaceRepositoryRoot as repositoryRoot, workspaceProjectRoot } from "./workspace-identity";
+export { workspaceProjectRoot } from "./workspace-identity";
 import { loadProfile, resolveRuntimePaths, type RuntimePaths } from "./runtime-persistence";
+import { isLocalOnlyRuntimeProfile, localHotMemoryAdoptionFingerprint, planLocalHotMemoryAdoption } from "./local-hot-memory";
 import { isRuntimeProfileName, resolveClaudeCodeHostHome, resolveCodexHostHome } from "./runtime-env";
 
 export type HookScope = "project" | "all" | "manual";
@@ -56,39 +58,14 @@ export const readWorkspaceHookPolicy = (paths: RuntimePaths): HookPolicy | null 
   const text = readText(file);
   if (text === null) return null;
   let data: unknown;
-  try { data = JSON.parse(text); } catch { throw new Error(`Invalid Crosshead workspace hook settings in ${file}`); }
+  try { data = JSON.parse(text); } catch { throw new Error(`Invalid Crosshead workspace hook settings in ${file}. Run crosshead workspace repair --home ${shellQuote(paths.home)} to preserve the damaged file and pause automatic hooks.`); }
   if (!object(data) || data.version !== 1 || !Array.isArray(data.bindings) || !data.bindings.every(isBinding) ||
       (data.scope !== "project" && data.scope !== "all" && data.scope !== "manual") ||
       (data.scope === "manual" && data.bindings.length > 0) ||
       data.bindings.some((binding) => (binding.root === null) !== (data.scope === "all"))) {
-    throw new Error("Invalid Crosshead workspace hook settings. Run crosshead workspace list to inspect the configuration.");
+    throw new Error(`Invalid Crosshead workspace hook settings in ${file}. Run crosshead workspace repair --home ${shellQuote(paths.home)} to preserve the damaged file and pause automatic hooks.`);
   }
   return { version: 1, scope: data.scope, bindings: data.bindings };
-};
-
-const repositoryRoot = (directory: string): string | null => {
-  for (let current = directory;; current = path.dirname(current)) {
-    const git = path.join(current, ".git");
-    if (existsSync(path.join(git, "HEAD"))) return current;
-    try {
-      const info = statSync(git);
-      if (info.isFile() && info.size <= 4096 && readText(git)?.startsWith("gitdir: ")) return current;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (path.dirname(current) === current) return null;
-  }
-};
-
-const directoryPath = (directory: string): string => {
-  const resolved = realpathSync(directory);
-  if (!statSync(resolved).isDirectory()) throw new Error(`Expected a directory: ${directory}`);
-  return resolved;
-};
-
-export const workspaceProjectRoot = (directory: string): string => {
-  const resolved = directoryPath(directory);
-  return repositoryRoot(resolved) ?? resolved;
 };
 
 const appliesIn = (binding: WorkspaceHookBinding, directory: string): boolean => {
@@ -140,7 +117,7 @@ const hostHome = (host: HookHost, options: { codexHome?: string; claudeHome?: st
   host === "codex" ? resolveCodexHostHome(options.codexHome) : resolveClaudeCodeHostHome(options.claudeHome);
 
 const hookPrefix = (paths: RuntimePaths, host: HookHost): string =>
-  `${shellQuote(path.join(paths.bin, "crosshead"))} host-hook ${host} `;
+  `${shellQuote(path.join(realHome(paths.home), "bin", "crosshead"))} host-hook ${host} `;
 
 const invokesLegacyHook = (command: string, wrapper: string, runtimeHomes: string[], host: HookHost): boolean => {
   const executable = [shellQuote(wrapper), wrapper].find((token) => command.startsWith(`${token} `));
@@ -161,9 +138,26 @@ const invokesLegacyHook = (command: string, wrapper: string, runtimeHomes: strin
   }));
 };
 
-const bindingCommands = (paths: RuntimePaths, binding: WorkspaceHookBinding) =>
+const bindingCommands = (paths: RuntimePaths, binding: WorkspaceHookBinding, includeDisabled = false) =>
   renderHostHookGroups(binding.host, (event) =>
-    `${hookPrefix(paths, binding.host)}${event} --home ${shellQuote(paths.home)} --binding ${binding.id} --source-excerpts ${binding.sourceExcerpts ? "on" : "off"}`);
+    `${hookPrefix(paths, binding.host)}${event} --home ${shellQuote(realHome(paths.home))} --binding ${binding.id} --source-excerpts ${binding.sourceExcerpts ? "on" : "off"}`)
+    .filter(([event]) => includeDisabled || binding.sourceExcerpts || (event !== "PostToolUse" && event !== "PostToolUseFailure"));
+
+const invokesScopedHook = (command: string, paths: RuntimePaths, host: HookHost): boolean => {
+  // Accept only the exact generated shell form, with both paths resolving to
+  // this runtime. This also recognizes earlier installs through a home symlink.
+  const quoted = "'(?:[^']|'\"'\"')*'";
+  const events = HOST_HOOK_EVENTS.map(({ event }) => event).join("|");
+  const match = new RegExp(`^(${quoted}) host-hook ${host} (${events}) --home (${quoted}) --binding [a-f0-9-]{36}( --source-excerpts (on|off))?$`).exec(command);
+  if (!match) return false;
+  const unquote = (token: string) => token.slice(1, -1).replace(/'"'"'/g, "'");
+  const executable = unquote(match[1]!), home = unquote(match[3]!);
+  if (shellQuote(executable) !== match[1] || shellQuote(home) !== match[3] || !path.isAbsolute(home) || !path.isAbsolute(executable)) return false;
+  try {
+    return realpathSync(home) === realpathSync(paths.home) &&
+      realpathSync(executable) === realpathSync(path.join(paths.bin, "crosshead"));
+  } catch { return false; }
+};
 
 const settings = (file: string, text: string | null): Settings => {
   if (text === null) return {};
@@ -211,13 +205,18 @@ export const workspaceHookStateFile = (paths: RuntimePaths, binding: WorkspaceHo
 
 export const inspectWorkspaceHooks = (home?: string, directory?: string) => {
   const paths = resolveRuntimePaths(home);
-  const policy = readWorkspaceHookPolicy(paths);
-  const resolved = directory ? directoryPath(directory) : null;
-  const bindings = (policy?.bindings ?? []).filter((binding) => !resolved ||
+  let policy: HookPolicy | null = null;
+  let error: string | null = null;
+  let workspaceError: string | null = null;
+  let resolved: string | null = null;
+  try { policy = readWorkspaceHookPolicy(paths); } catch (caught) { error = String((caught as Error).message); }
+  try { resolved = directory ? directoryPath(directory) : null; }
+  catch { workspaceError = `Workspace directory is unavailable: ${directory}`; }
+  const bindings = (workspaceError ? [] : policy?.bindings ?? []).filter((binding) => !resolved ||
     workspaceHookForInvocation(policy, binding.host, binding.id, resolved) !== null);
   return {
-    scope: policy?.scope ?? "legacy",
-    workspace: resolved,
+    scope: error ? "invalid" as const : policy?.scope ?? "legacy",
+    error, workspaceError, workspace: resolved,
     bindings: bindings.map((binding) => {
       const file = hookFile(binding);
       let configured = false;
@@ -309,6 +308,8 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
   }
 
   const edits = new Map<string, Edit>();
+  const guards: Array<{ file: string; root: string; before: string }> = [];
+  const sourceSnapshots: Array<ReturnType<typeof planLocalHotMemoryAdoption>["snapshot"]> = [];
   const settingsFiles = new Map<string, { root: string; host: HookHost }>();
   for (const binding of [...(previous?.bindings ?? []), ...policy.bindings]) {
     settingsFiles.set(hookFile(binding), { root: binding.root && binding.registration !== "user" ? binding.root : binding.hostHome, host: binding.host });
@@ -334,12 +335,12 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
     const original = JSON.stringify(data);
     const owned = new Set([...(previous?.bindings ?? []), ...next]
       .filter((binding) => hookFile(binding) === file)
-      .flatMap((binding) => bindingCommands(paths, binding).flatMap(([, group]) => {
+      .flatMap((binding) => bindingCommands(paths, binding, true).flatMap(([, group]) => {
 	const command = group.hooks[0]!.command;
 	return [command, command.replace(/ --source-excerpts (on|off)$/, "")];
       })));
     removeCommands(data, (command) => {
-      if (owned.has(command)) return true;
+      if (owned.has(command) || invokesScopedHook(command, paths, host)) return true;
       const legacy = ["crosshead", "onlybots"].some((name) => runtimeHomes.some((home) =>
 	invokesLegacyHook(command, path.join(home, "bin", `${name}-${host}-hook`), runtimeHomes, host)));
       if (legacy && !retired.includes(file)) retired.push(file);
@@ -383,12 +384,28 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
       if (before !== after) edits.set(file, { file, root: paths.home, before, after, executable: true });
     }
   }
+  // Adopt eligible history once, before SessionStart can replace the runtime alias.
+  // The migration is part of the same preview and guarded settings plan.
+  const adopted = new Set<string>();
+  for (const binding of policy.bindings) {
+    const profile = loadProfile(paths, binding.profile);
+    if (!binding.root || !profile || !isLocalOnlyRuntimeProfile(profile) || previous?.bindings.some(entry => entry.id === binding.id)) continue;
+    const key = JSON.stringify([binding.profile, binding.root]);
+    if (adopted.has(key)) continue;
+    adopted.add(key);
+    const adoption = planLocalHotMemoryAdoption(paths.state, profile, `repo:${binding.root}`, binding.legacyUnscoped === true, binding.legacyBefore);
+    for (const item of adoption.files) {
+      if (!edits.has(item.file)) edits.set(item.file, { file: item.file, root: paths.home, before: null, after: item.content });
+    }
+    guards.push(...adoption.sources.map(source => ({ ...source, root: paths.home })));
+    sourceSnapshots.push(adoption.snapshot);
+  }
   const file = policyFile(paths);
   const before = readText(file);
   const after = `${JSON.stringify(policy, null, 2)}\n`;
   if (before !== after) edits.set(file, { file, root: paths.home, before, after });
   for (const edit of edits.values()) assertManagedFilePath(edit.file, edit.root);
-  return { paths, policy, edits: [...edits.values()], retired };
+  return { paths, policy, edits: [...edits.values()], guards, sourceSnapshots, retired };
 };
 
 const realHome = (home: string): string => {
@@ -405,17 +422,20 @@ export const summarizeWorkspaceHookPlan = (plan: WorkspaceHookPlan) => ({
 });
 
 export const assertWorkspacePlanCurrent = (plan: WorkspaceHookPlan): void => {
-  for (const edit of plan.edits) {
+  for (const edit of [...plan.edits, ...plan.guards]) {
     assertManagedFilePath(edit.file, edit.root);
     if (readText(edit.file) !== edit.before) throw new Error(`Settings changed since preview: ${edit.file}. Run setup again.`);
+  }
+  for (const snapshot of plan.sourceSnapshots) {
+    if (localHotMemoryAdoptionFingerprint(snapshot.stateDir, snapshot.owner) !== snapshot.fingerprint) {
+      throw new Error("Local memory changed since preview. Run setup again.");
+    }
   }
 };
 
 export const withWorkspaceSetupLock = async <T>(paths: RuntimePaths, operation: () => Promise<T>): Promise<T> => {
   mkdirSync(paths.config, { recursive: true, mode: 0o700 });
-  const lock = process.platform === "darwin"
-    ? await acquireLoopbackDaemonLock(realpathSync(paths.home), "workspace-setup")
-    : await acquireLocalHostedBridge(paths.config, createHash("sha256").update("crosshead-workspace-setup").digest("hex").slice(0, 24));
+  const lock = await acquireWorkspaceSetupKernelLock(realpathSync(paths.home));
   try { return await operation(); }
   finally { await lock.close(); }
 };
@@ -475,4 +495,26 @@ export const refreshWorkspaceHooks = async (home: string): Promise<void> => {
     if (!policy) return;
     applyWorkspaceHookPlan(planWorkspaceHooks({ home, scope: policy.scope, targets: [], refresh: true }));
   });
+};
+
+/** Recovery keeps the exact damaged bytes and leaves all automatic hooks paused. */
+export const repairWorkspaceHookPolicy = async (home?: string, dryRun = false) => {
+  const paths = resolveRuntimePaths(home);
+  const repair = () => {
+    const file = policyFile(paths);
+    assertManagedFilePath(file, paths.home);
+    try {
+      const policy = readWorkspaceHookPolicy(paths);
+      return { applied: false, backup: null as string | null, scope: policy?.scope ?? "legacy", message: "Workspace settings do not need repair." };
+    } catch {
+      const original = readFileSync(file);
+      const backup = `${file}.invalid-${randomUUID()}.json`;
+      if (!dryRun) {
+	writeManagedFile(backup, original, paths.home);
+	writeManagedFile(file, JSON.stringify({ version: 1, scope: "manual", bindings: [] }, null, 2) + "\n", paths.home);
+      }
+      return { applied: !dryRun, backup, scope: "manual", message: "Automatic hooks are paused. Run crosshead quickstart --scope project to review and configure selected projects again." };
+    }
+  };
+  return dryRun ? repair() : withWorkspaceSetupLock(paths, async () => repair());
 };

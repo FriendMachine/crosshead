@@ -94,11 +94,7 @@ it("previews and verifies the installed hooks across two projects and profiles",
     invoke(hook(aCodex, "UserPromptSubmit"), subdirectory, { session_id: "a-codex", turn_id: "one", prompt: "Repair the queue" });
     const eventFile = path.join(home, "state/lifecycle-events.jsonl");
     const beforeTool = readFileSync(eventFile, "utf8");
-    invoke(hook(aCodex, "PostToolUse"), subdirectory, {
-      session_id: "a-codex", turn_id: "one", tool_name: "Read",
-      tool_input: { file_path: path.join(projectA, "rules.md") },
-      tool_response: { type: "text", file: { filePath: path.join(projectA, "rules.md"), content: "Source excerpts are disabled for this binding." } },
-    });
+    expect(readJson(aCodex).hooks.PostToolUse).toBeUndefined();
     expect(readFileSync(eventFile, "utf8")).toBe(beforeTool);
     const finding = "Keep the queue ordered by the original receipt ID.";
     invoke(hook(aCodex, "Stop"), subdirectory, { session_id: "a-codex", turn_id: "one", summary: finding });

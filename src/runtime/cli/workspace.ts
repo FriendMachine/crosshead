@@ -5,7 +5,7 @@ import { parseArgs, shellQuote } from "../adapter-utils";
 import type { HookHost } from "../host-hook-spec";
 import { loadAdapterRecord, loadProfile, loadRuntimeConfig, resolveRuntimePaths } from "../runtime-persistence";
 import {
-  applyWorkspaceHookPlan, assertWorkspacePlanCurrent, inspectWorkspaceHooks, planWorkspaceHooks, readWorkspaceHookPolicy, summarizeWorkspaceHookPlan,
+  applyWorkspaceHookPlan, assertWorkspacePlanCurrent, inspectWorkspaceHooks, planWorkspaceHooks, readWorkspaceHookPolicy, repairWorkspaceHookPolicy, summarizeWorkspaceHookPlan,
   withWorkspaceSetupLock, workspaceBindingStatus, workspaceProjectRoot, type HookScope, type WorkspaceHookTarget,
 } from "../workspace-hooks";
 import { isRuntimeProfileName } from "../runtime-env";
@@ -37,6 +37,10 @@ const planOptions = (flags: Flags) => ({
   home: str(flags, "home"), codexHome: str(flags, "codex-home"), claudeHome: str(flags, "claude-home"),
 });
 const homeArgs = (home?: string): string[] => home ? ["--home", home] : [];
+const profileSnapshot = (paths: ReturnType<typeof resolveRuntimePaths>, name: string): string | null => {
+  const profile = loadProfile(paths, name);
+  return profile ? JSON.stringify([profile.npub, profile.apiBase, profile.memoryMode, profile.workspaceScope]) : null;
+};
 
 const describePlan = (plan: ReturnType<typeof summarizeWorkspaceHookPlan>): string => [
   `Crosshead scope: ${plan.scope === "project" ? "selected projects" : plan.scope === "all" ? "all projects" : "manual commands only"}`,
@@ -48,6 +52,7 @@ const describePlan = (plan: ReturnType<typeof summarizeWorkspaceHookPlan>): stri
 ].join("\n");
 
 export const formatWorkspaceHookInspection = (inspection: ReturnType<typeof inspectWorkspaceHooks>): string => {
+  if (inspection.error || inspection.workspaceError) return [inspection.error, inspection.workspaceError].filter(Boolean).join("\n");
   if (inspection.scope === "legacy") return "Crosshead uses the existing host setup. Run crosshead quickstart to choose a scope.";
   if (inspection.bindings.length === 0) return "No automatic Crosshead hooks apply here.";
   return inspection.bindings.map((binding) => {
@@ -70,18 +75,24 @@ export const workspaceHooksFromCli = async (argv: string[]): Promise<string> => 
   const command = positionals[0];
   const options = planOptions(flags);
   const directory = str(flags, "workspace-root") ?? process.cwd();
+  if (command === "repair") {
+    const result = await repairWorkspaceHookPolicy(options.home, enabled(flags, "dry-run"));
+    return flags.json ? JSON.stringify(result, null, 2) : [result.backup ? `${result.applied ? "Preserved damaged settings at" : "Would preserve damaged settings at"} ${result.backup}` : "", result.message].filter(Boolean).join("\n");
+  }
   if (command === "list" || command === "check") {
     const inspection = inspectWorkspaceHooks(options.home, command === "check" ? directory : undefined);
     return flags.json ? JSON.stringify(inspection, null, 2) : formatWorkspaceHookInspection(inspection);
   }
-  if (command !== "add" && command !== "remove") throw new Error("Choose workspace add, remove, list, check, or link");
+  if (command !== "add" && command !== "remove") throw new Error("Choose workspace add, remove, list, check, repair, or link");
   const hosts = selectedHosts(str(flags, "adapter") ?? (command === "remove" ? "both" : ""));
   const paths = resolveRuntimePaths(options.home);
   const profile = str(flags, "profile") ?? loadRuntimeConfig(paths).defaultProfile;
   if (command === "add" && (!profile || !isRuntimeProfileName(profile) || !loadProfile(paths, profile))) {
     throw new Error("Choose an existing --profile, or run crosshead quickstart to create one.");
   }
+  const selectedProfileBefore = profile ? profileSnapshot(paths, profile) : null;
   const current = inspectWorkspaceHooks(options.home);
+  if (current.error) throw new Error(current.error);
   if (command === "add" && current.scope === "all") {
     throw new Error("All-project hooks are active. Use crosshead quickstart --scope project to preview changing scope.");
   }
@@ -95,8 +106,20 @@ export const workspaceHooksFromCli = async (argv: string[]): Promise<string> => 
   });
   const preview = summarizeWorkspaceHookPlan(plan);
   if (enabled(flags, "dry-run")) return flags.json ? JSON.stringify({ applied: false, ...preview }, null, 2) : describePlan(preview);
+  if (command === "add" && current.scope === "legacy" && !enabled(flags, "replace-user-hooks")) {
+    const message = describePlan(preview) + "\nThis changes legacy user-wide coverage to selected projects.";
+    if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error(message + " Review --dry-run first, then pass --replace-user-hooks or use crosshead quickstart --scope project.");
+    const terminal = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      process.stderr.write(message + "\n");
+      if (!/^y(es)?$/i.test((await terminal.question("Replace user-wide coverage? [no] ")).trim())) return "Setup cancelled.";
+    } finally { terminal.close(); }
+  }
   if (!existsSync(path.join(paths.bin, "crosshead"))) throw new Error("Install the Crosshead CLI first with crosshead install.");
-  await withWorkspaceSetupLock(paths, async () => applyWorkspaceHookPlan(plan));
+  await withWorkspaceSetupLock(paths, async () => {
+    if (command === "add" && profileSnapshot(paths, profile!) !== selectedProfileBefore) throw new Error("Profile changed since preview. Run workspace add again.");
+    applyWorkspaceHookPlan(plan);
+  });
   const inspection = inspectWorkspaceHooks(options.home, existsSync(directory) ? directory : undefined);
   return flags.json ? JSON.stringify({ applied: true, ...inspection }, null, 2) : formatWorkspaceHookInspection(inspection);
 };
@@ -178,11 +201,7 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
     }];
     const names = [...new Set(targets.map((target) => target.profile))];
     if (names.some((name) => !isRuntimeProfileName(name))) throw new Error("Profile names must use 1–128 letters, numbers, dots, underscores, plus signs or hyphens.");
-    const profileSnapshot = (name: string) => {
-      const profile = loadProfile(paths, name);
-      return profile ? JSON.stringify([profile.npub, profile.apiBase, profile.memoryMode, profile.workspaceScope]) : null;
-    };
-    const profilesBefore = new Map(names.map((name) => [name, profileSnapshot(name)]));
+    const profilesBefore = new Map(names.map((name) => [name, profileSnapshot(paths, name)]));
     const newProfiles = names.filter((name) => profilesBefore.get(name) === null);
     const apiBase = str(flags, "api-base") ?? str(flags, "apiBase") ?? (guided ? "https://crosshead.sh" : undefined);
     if (newProfiles.length > 0 && !apiBase) throw new Error("Supply --api-base <url> to create a new profile.");
@@ -211,7 +230,7 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
     if (flow && !await flow.confirm(runtimePlan + profilePlan + describePlan(preview))) return "Setup cancelled.";
     const daemon = await withWorkspaceSetupLock(paths, async () => {
       assertWorkspacePlanCurrent(plan);
-      if (names.some((name) => profileSnapshot(name) !== profilesBefore.get(name))) {
+      if (names.some((name) => profileSnapshot(paths, name) !== profilesBefore.get(name))) {
 	throw new Error("A selected profile changed since preview. Run setup again to review it.");
       }
       const args = homeArgs(options.home);
