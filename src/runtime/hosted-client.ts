@@ -246,6 +246,54 @@ export class HostedOnlyBotsRequestError extends Error {
   }
 }
 
+export type FetchCause = { code: string | null; message: string };
+export const fetchCauses = (error: unknown, depth = 0): FetchCause[] => {
+	if (!error || typeof error !== "object" || depth > 4) return [];
+	const record = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+	return [
+		{ code: typeof record.code === "string" ? record.code : null, message: typeof record.message === "string" ? record.message : "" },
+		...fetchCauses(record.cause, depth + 1),
+		...(Array.isArray(record.errors) ? record.errors.flatMap((entry) => fetchCauses(entry, depth + 1)) : []),
+	];
+};
+// An egress proxy that refuses the tunnel (a sandbox allowlist, a corporate proxy) is the network
+// saying "not from here", the same as a refused connection.
+export const PROXY_REFUSAL = /Proxy response \((\d{3})\) !== 200 when HTTP Tunneling/;
+
+const FETCH_CODE_LABELS: Record<string, string> = {
+	ENOTFOUND: "host name not found",
+	EAI_AGAIN: "DNS lookup unavailable",
+	EAI_FAIL: "DNS lookup failed",
+	ECONNREFUSED: "connection refused",
+	ECONNRESET: "connection reset",
+	ETIMEDOUT: "connection timed out",
+	UND_ERR_CONNECT_TIMEOUT: "connection timed out",
+	ENETUNREACH: "network unreachable",
+	EHOSTUNREACH: "host unreachable",
+	EPERM: "connection not permitted",
+	EACCES: "connection not permitted",
+	UND_ERR_SOCKET: "connection closed by the other side",
+};
+// Fixed strings that undici itself produces; anything else may carry text from the other end.
+const FIXED_FETCH_MESSAGES = new Set(["unexpected redirect", "bad port"]);
+const SAFE_FETCH_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * A one-line, locally safe description of why a fetch failed. Only error codes, undici's own
+ * fixed messages and a proxy's status are used: free-text cause messages can carry text chosen by
+ * the remote end (for example the names in a mismatched TLS certificate).
+ */
+export const describeFetchFailure = (error: unknown): string => {
+	if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return "timed out";
+	const causes = error instanceof Error ? fetchCauses(error.cause) : [];
+	const proxy = causes.map((cause) => PROXY_REFUSAL.exec(cause.message)).find(Boolean);
+	if (proxy) return `proxy answered HTTP ${proxy[1]}`;
+	const code = causes.map((cause) => cause.code).filter((value): value is string => Boolean(value && SAFE_FETCH_CODE.test(value))).at(-1);
+	if (code) return FETCH_CODE_LABELS[code] ? `${FETCH_CODE_LABELS[code]} (${code})` : code;
+	const fixed = causes.map((cause) => cause.message.trim()).find((message) => FIXED_FETCH_MESSAGES.has(message));
+	return fixed ?? "network request failed";
+};
+
 /**
  * Classify a failed hosted request for local diagnostics without copying its
  * message, URL, headers or body: a timeout, an HTTP status/code, or an error name.

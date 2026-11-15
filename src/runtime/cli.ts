@@ -300,6 +300,7 @@ export const runOnlyBotsCtlCli = async (
 				capabilityHelpLine,
 		"crosshead keygen [--json]",
 		"crosshead keygen --setup --profile <name> --api-base <url> [--home <path>] [--memory-mode assist] [--workspace-scope repo|workspace|global] [--json]",
+		"  (--api-base http://127.0.0.1:0 creates a local-only profile; an unreachable service defers sign-in instead of failing setup)",
 				"crosshead setup --profile <name> --api-base <url> --npub <npub> --nsec <nsec> [--memory-mode assist]",
 				"crosshead start [--home <path>] [--port <port>]",
 				"crosshead stop [--home <path>]",
