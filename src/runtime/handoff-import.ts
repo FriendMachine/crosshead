@@ -56,13 +56,20 @@ export const handoffAgeRejection = (createdAt: string, now: Date = new Date(), m
 };
 
 /**
- * Stable ids for saving one capsule into one workspace. The event id makes a repeated import a
- * no-op in the daemon; the turn id makes the hot entry replace, not duplicate, an earlier save.
+ * Ids for saving one capsule into one workspace for one profile. The turn id is stable, so a
+ * repeated import replaces the earlier hot entry instead of adding another. The event id is new
+ * each time: the daemon skips event ids it has seen, and an import refused by memory mode must
+ * still save when retried after the mode changes.
  */
-export const handoffImportIds = (capsuleId: string, workspaceId: string, runtime: string): { eventId: string; turnId: string } => {
-  const digest = createHash("sha256").update(JSON.stringify([capsuleId, workspaceId, runtime])).digest("hex").slice(0, 40);
-  return { eventId: `handoff-import-${digest}`, turnId: `handoff-${digest}` };
+export const handoffImportIds = (
+  capsuleId: string, workspaceId: string, runtime: string, profileName: string, now: number = Date.now()
+): { eventId: string; turnId: string } => {
+  const digest = createHash("sha256").update(JSON.stringify([capsuleId, workspaceId, runtime, profileName])).digest("hex").slice(0, 40);
+  return { eventId: `handoff-import-${digest}-${now.toString(36)}`, turnId: `${IMPORTED_HANDOFF_TURN_PREFIX}${digest}` };
 };
+
+/** Hot checkpoints saved by an import carry this turn id prefix, which syncs with every client. */
+export const IMPORTED_HANDOFF_TURN_PREFIX = "handoff-";
 
 /** The request line shown above the imported text: it is the capsule's task, attributed to its source. */
 export const importedHandoffGoal = (input: { sourceRuntime: string; objective: string; createdAt: string }): string =>

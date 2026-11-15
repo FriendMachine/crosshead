@@ -553,7 +553,7 @@ export abstract class HostRuntimeAdapterBase {
 
   /**
    * Saves an accepted handoff import to hot memory as an ordinary finding (not an explicit
-   * remember). The ids come from the capsule, so a repeated import is reported, not duplicated.
+   * remember). The turn id comes from the capsule, so a repeated import replaces the earlier entry.
    */
   async saveImportedHandoff(input: {
     profileName?: string;
@@ -564,7 +564,7 @@ export abstract class HostRuntimeAdapterBase {
     turnId: string;
     goal: string;
     content: string;
-  }): Promise<{ saved: boolean; duplicate: boolean }> {
+  }): Promise<{ saved: boolean }> {
     const response = await this.client.emitEvent({
       eventId: input.eventId,
       runtime: this.identity.runtimeId,
@@ -584,9 +584,8 @@ export abstract class HostRuntimeAdapterBase {
       },
     });
     const actions = Array.isArray(response?.actions) ? response.actions : [];
-    const duplicate = actions.some((action) => action?.type === "duplicate_event");
-    // Memory mode off or manual writes no hot memory, and a repeat writes nothing new; report what happened.
-    return { saved: actions.some((action) => action?.type === "hot_write"), duplicate };
+    // Memory mode off or manual writes no hot memory; report what actually happened.
+    return { saved: actions.some((action) => action?.type === "hot_write") };
   }
 
   async remember(input: HostAdapterRememberRequest): Promise<void> {

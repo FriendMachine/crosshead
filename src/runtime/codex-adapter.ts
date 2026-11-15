@@ -233,8 +233,6 @@ export type CodexAdapterHandoffImportResult = {
   record: HandoffStoredRecord | null;
   /** True when the handoff was saved to hot memory for the next session in the workspace. */
   savedToHotMemory?: boolean;
-  /** True when this capsule had already been saved to this workspace; nothing new was written. */
-  alreadyImported?: boolean;
 };
 
 
@@ -1308,7 +1306,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     // Printing the state is not delivery. Saving it to hot memory is what makes the next session
     // in this workspace start with it, on this machine or after sync. It is saved before the handoff
     // is acknowledged, so a failed save never leaves a record that says the import succeeded.
-    const ids = handoffImportIds(capsule.capsuleId, workspaceId, "codex");
+    const ids = handoffImportIds(capsule.capsuleId, workspaceId, "codex", input.profileName ?? this.config.profileName);
     const saved = await this.saveImportedHandoff({
       profileName: input.profileName,
       workspaceId,
@@ -1347,7 +1345,6 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       handoffId,
       accepted: true,
       savedToHotMemory: saved.saved,
-      ...(saved.duplicate ? { alreadyImported: true } : {}),
       verification,
       inspection,
       materialization,

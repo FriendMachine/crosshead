@@ -166,7 +166,7 @@ a fresh session after choosing either setting.
   you pass `--force`, and the file is readable only by you. Import saves the
   handoff to hot memory for the project that contains the current directory, so
   the next session there starts with it. Importing the same capsule again
-  changes nothing. Without `--target`, export addresses the other host (Codex
+  replaces the earlier copy instead of adding another. Without `--target`, export addresses the other host (Codex
   to Claude Code, or the reverse).
 - Import accepts a capsule signed by the profile's own key. A valid signature
   from any other key is rejected unless you pass `--allow-signer <npub>` for a

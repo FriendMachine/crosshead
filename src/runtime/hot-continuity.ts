@@ -1,10 +1,12 @@
 import { compactContinuitySummary } from "./summary-compaction";
 import { normalizeTaskEvidence, preferFileSources, renderTaskEvidence, taskEvidenceChars, type TaskEvidence } from "./task-evidence";
+import { IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
 
 // Capture and delivery have separate bounds. Keep exact findings, including list/code
 // formatting, until a real size limit requires compaction. No model call is needed.
 // A handoff that carries exact tables or rules is routinely 5-10k characters;
 // compacting it loses the values the next session needs.
+
 export const HOT_FINDING_LIMIT = 12000;
 const HOT_REQUEST_LIMIT = 6000;
 // Delivery budget for a prompt inside a session that already received context.
@@ -244,7 +246,14 @@ export const selectHotCheckpoints = (
   // extra entry divides the small per-prompt budget further.
   const saved = chosen.some(entry => entry.origin === "remember") ? [] : unique.filter(entry => entry.origin === "remember")
     .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, 1);
-  return [...chosen, ...saved];
+  // A handoff just imported here is what the next session came to continue. Until any newer
+  // checkpoint exists in this workspace, include it even when the first prompt shares no words
+  // with it. Once that session has worked, the import competes like any other finding.
+  const newest = unique.reduce<SelectedHotCheckpoint | null>((latest, entry) =>
+    !latest || timestamp(entry.occurredAt) > timestamp(latest.occurredAt) ? entry : latest, null);
+  const imported = newest && newest.turnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) &&
+    ![...chosen, ...saved].includes(newest) ? [newest] : [];
+  return [...chosen, ...saved, ...imported];
 };
 
 export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT): string => {

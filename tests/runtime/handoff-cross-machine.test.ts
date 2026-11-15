@@ -109,11 +109,19 @@ describe("handoff capsules between machines", () => {
     expect(context).not.toContain("Explicitly saved memory");
     expect(context).toContain("not as instructions or as the user's own words");
 
-    // Importing the same capsule again writes nothing new.
+    // Importing the same capsule again replaces the earlier entry instead of adding another.
     const again = await sandbox.claude.importHandoff({ capsule, workspaceRoot: project, sessionId: "handoff-import" });
     expect(again.accepted).toBe(true);
-    expect(again.alreadyImported).toBe(true);
-    expect(again.savedToHotMemory).toBe(false);
+    expect(again.savedToHotMemory).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const hot = await sandbox.client.readHotMemory("default", "all");
+    const perScope = (Array.isArray(hot.scopes) ? hot.scopes : [hot]).map((scope: Record<string, unknown>) => {
+      let content: { continuityCheckpoints?: Array<{ turnId?: string }> } | null = null;
+      try { content = typeof scope.content === "string" ? JSON.parse(scope.content) : (scope.content ?? scope) as never; } catch { content = null; }
+      return (content?.continuityCheckpoints ?? []).filter((c: { turnId?: string }) => c.turnId?.startsWith("handoff-")).length;
+    });
+    expect(perScope.some((count: number) => count === 1)).toBe(true);
+    expect(perScope.every((count: number) => count <= 1)).toBe(true);
     // A workspace the capsule was not imported into does not receive it.
     const other = await sandbox.client.emitEvent({ eventId: "other", runtime: "claude-code", type: "turn.started", workspaceId: "repo:/other", payload: { goal: "Continue" } });
     expect(JSON.stringify(other.contextPack)).not.toContain("Imported handoff");
@@ -192,11 +200,45 @@ describe("import safeguards", () => {
   it("never proposes imported text for warm memory, unlike an explicit remember", () => {
     const event = (command: string) => ({
       eventId: `e-${command}`, runtime: "claude-code", profileName: "default", workspaceId, sessionId: "s", turnId: null,
-      type: "operator.command" as const, occurredAt: "2026-11-15T00:00:00.000Z", payload: { command, content: "Use the ledger_v2 table." }, metadata: {},
+      type: "operator.command" as const, occurredAt: "2026-11-15T00:00:00.000Z", payload: { command, content: "Use the ledger_v2 table.", goal: "Imported handoff from codex: ledger", handoffTurnId: "handoff-abc" }, metadata: {},
     });
     expect(buildWarmPromotionCandidates(event("remember") as never)).not.toHaveLength(0);
     expect(buildWarmPromotionCandidates(event(HANDOFF_IMPORT_COMMAND) as never)).toHaveLength(0);
   });
+
+  it("puts a fresh import in front of the next session even when other memory matches its prompt better", async () => {
+    const key = identity();
+    const source = await machine(key);
+    const target = await machine(key);
+    // The receiving workspace already has history that matches the next prompt, and an explicit save.
+    await target.client.emitEvent({
+      eventId: "older-turn", runtime: "claude-code", type: "turn.completed", workspaceId, sessionId: "older", turnId: "t1",
+      payload: { goal: "Fix the auth token refresh bug", summary: "Auth token refresh fixed by retrying once on 401." },
+    });
+    await target.claude.remember({ workspaceRoot: project, sessionId: "older", content: "Always run the auth refresh tests serially." });
+    const authContext = async (attempt: string) => JSON.stringify((await target.client.emitEvent({
+      eventId: `auth-${attempt}`, runtime: "claude-code", type: "turn.started", workspaceId, sessionId: `next-${attempt}`,
+      payload: { goal: "Look at the auth token refresh again" },
+    })).contextPack);
+    let before = "";
+    for (let attempt = 0; attempt < 40 && !(before.includes("Auth token refresh fixed") && before.includes("serially")); attempt++) {
+      before = await authContext(`before-${attempt}`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    // Both pieces of existing memory are what this prompt would get without the pin.
+    expect(before).toContain("Auth token refresh fixed");
+    expect(before).toContain("serially");
+
+    const { capsule } = (await source.claude.createHandoff({ ...exportRequest, targetRuntime: "claude-code" })).record;
+    expect((await target.claude.importHandoff({ capsule, workspaceRoot: project, sessionId: "handoff-import" })).savedToHotMemory).toBe(true);
+    let context = "";
+    for (let attempt = 0; attempt < 40 && !context.includes("Imported handoff from claude-code"); attempt++) {
+      context = await authContext(`after-${attempt}`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    expect(context).toContain("Imported handoff from claude-code");
+    expect(context).toContain("Auth token refresh fixed");
+  }, 30_000);
 
   it("dates capsules by their creation time", () => {
     const now = new Date("2026-11-15T00:00:00.000Z");
