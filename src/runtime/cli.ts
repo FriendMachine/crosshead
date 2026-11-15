@@ -160,7 +160,7 @@ export const runOnlyBotsCtlCli = async (
 			output = await eventsFromCli(rest);
 			break;
 		case "workspace":
-			output = await (rest[0] === "link" ? workspaceFromCli(rest) : workspaceHooksFromCli(rest));
+			output = await (parseArgs(rest).positionals[0] === "link" ? workspaceFromCli(rest) : workspaceHooksFromCli(rest));
 			break;
 		case "memory":
 			output = await memoryFromCli(rest);

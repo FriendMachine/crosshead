@@ -172,7 +172,8 @@ import {
 	writeRuntimeInstallMarker,
 	writeRuntimeLog,
 } from "./runtime-persistence";
-import { nowIso } from "./adapter-utils";
+import { nowIso, parseArgs } from "./adapter-utils";
+export { parseArgs } from "./adapter-utils";
 import { applyWorkspaceHookPlan, planWorkspaceHooks, readWorkspaceHookPolicy, refreshWorkspaceHooks, withWorkspaceSetupLock } from "./workspace-hooks";
 import {
 	cloneOrganizationalWorkerReadiness,
@@ -762,27 +763,6 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 	},
 };
 
-export const parseArgs = (args: string[]): { positionals: string[]; flags: Record<string, string | boolean> } => {
-	const positionals: string[] = [];
-	const flags: Record<string, string | boolean> = {};
-	for (let index = 0; index < args.length; index += 1) {
-		const value = args[index]!;
-		if (!value.startsWith("--")) {
-			positionals.push(value);
-			continue;
-		}
-		const key = value.slice(2);
-		const next = args[index + 1];
-		if (!next || next.startsWith("--")) {
-			flags[key] = true;
-			continue;
-		}
-		flags[key] = next;
-		index += 1;
-	}
-	return { positionals, flags };
-};
-
 const normalizeBaseUrl = (value: string): string => {
 	const parsed = new URL(value);
 	if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
@@ -1214,6 +1194,7 @@ const writeWrapper = (filePath: string, scriptPath: string, home: string): void 
 };
 
 export const installRuntimeCore = async (options: InstallRuntimeCoreOptions = {}): Promise<RuntimePaths> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(options.home));
 	const paths = ensureRuntimeHomeLayout(options.home);
 	writeRuntimeInstallMarker(paths);
 	const config: RuntimeConfig = {
@@ -1286,14 +1267,16 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 		marker.canonicalHome !== canonicalHome) {
 		throw new Error(`Refusing to uninstall ${canonicalHome}: valid Crosshead installation marker is missing`);
 	}
+	const policy = readWorkspaceHookPolicy(paths);
 	const daemon = readDaemonOwnershipState(paths);
-	if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-	if (readWorkspaceHookPolicy(paths)) {
+	if (policy) {
 		await withWorkspaceSetupLock(paths, async () => {
 			applyWorkspaceHookPlan(planWorkspaceHooks({ home: paths.home, scope: "manual", targets: [], cleanup: true }));
+			if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
 			rmSync(canonicalHome, { recursive: true, force: true });
 		});
 	} else {
+		if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
 		rmSync(canonicalHome, { recursive: true, force: true });
 	}
 	if (resolvedHome !== canonicalHome) {
@@ -1807,6 +1790,7 @@ export const updateManagedRuntimeRelease = async (
 		restart?: boolean;
 	} = {}
 ): Promise<RuntimeReleaseUpdateResult> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const previousRelease = inspectInstalledRuntimeRelease(paths);
 	const specs = await collectManagedAdapterReinstallSpecs(paths);
@@ -1874,6 +1858,7 @@ export const updateRuntimeCatalogInstall = async (
 	coreVersion: string;
 	adapters: Array<{ name: RuntimeAdapterName; version: string }>;
 }> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const targetVersion = resolveCoreTargetVersion(channel, versionOverride);
 	await updateRuntimeCoreVersion(paths.home, channel, targetVersion);
@@ -1897,6 +1882,7 @@ export const updateRuntimeCatalogInstall = async (
 };
 
 const updateRuntimeCoreVersion = async (home: string, channel: RuntimeChannel, targetVersion: string): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	ensureCoreCompatibilityForTarget(paths, targetVersion);
 	recordInstalledStateSnapshots(paths, "update");
@@ -1916,6 +1902,7 @@ export const updateRuntimeAdapterVersion = async (
 	adapterName: RuntimeAdapterName,
 	targetVersion: string
 ): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	ensureAdapterCompatibilityForTarget(paths, adapterName, targetVersion);
 	recordInstalledStateSnapshots(paths, "update");
@@ -1930,6 +1917,7 @@ export const updateRuntimeAdapterVersion = async (
 };
 
 export const rollbackRuntimeCoreVersion = async (home: string, targetVersion: string): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const snapshot = loadCoreSnapshot(paths, targetVersion);
 	if (!snapshot) {
@@ -1949,6 +1937,7 @@ export const rollbackRuntimeCoreVersion = async (home: string, targetVersion: st
 };
 
 export const rollbackRuntimeAdapterVersion = async (home: string, adapterName: RuntimeAdapterName, targetVersion: string): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const snapshot = loadAdapterSnapshot(paths, adapterName, targetVersion);
 	if (!snapshot) {

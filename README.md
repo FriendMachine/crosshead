@@ -73,10 +73,14 @@ The first `workspace add` on a legacy installation previews the change from
 user-wide coverage and asks before applying it. For noninteractive use, review
 `--dry-run` and pass `--replace-user-hooks` to acknowledge that coverage change.
 
-Project setup writes local hook settings for each selected host. Codex settings
-are excluded locally through Git's info/exclude file. When a repository already
-tracks its Codex hooks, Crosshead uses a directory-restricted user registration
-and preserves the tracked file. Claude Code uses settings.local.json. Existing
+Project setup writes local hook settings for each selected host when Git can
+confirm they are untracked. Both `.codex/hooks.json` and
+`.claude/settings.local.json` are excluded through Git's local info/exclude file.
+Tracked team settings stay intact. Non-Git projects, missing Git, and failed Git
+checks use private user hook registrations restricted to the selected directory;
+setup does not edit `.gitignore`. This fallback requires a host home outside the
+selected projects; setup refuses a destination inside a project before creating
+profiles or changing hooks. Existing
 user-wide Crosshead hook commands for this runtime are listed in the preview
 when setup replaces them. The runtime skips old Crosshead plugin and hook
 registrations after scoped setup. Review and restart host sessions after a
@@ -158,12 +162,15 @@ installed profile.
 `ONLYBOTS_PROFILE` is the legacy alias. Explicit CLI `--profile` takes precedence.
 Scoped hooks use the profile selected during setup. Use
 `crosshead memory mode off --profile <name>` to stop automatic memory hooks for
-that profile, or `crosshead workspace remove` to detach a project.
+that profile. Other hosts retain a mode-off notice and administrative diagnostics
+without injecting recalled memory. Use `crosshead workspace remove` to detach a
+project.
 
 Local-only checkpoints are stored per profile. A legacy flat store remains
 readable for its sole existing local-only profile, whose identity is pinned
 before creating another profile. If several profiles already shared an unowned
-store, review its `state/local-hot-memory/*.json` files to establish ownership.
+store, or profile metadata cannot establish its owner, review the files in
+`state/local-hot-memory/*.json` to establish ownership.
 Scoped setup retains matching subdirectory and symlink history. Its preview
 shows adoption of earlier unscoped checkpoints when one project is selected
 for an existing profile. Eligible local history is copied into current workspace
@@ -179,6 +186,10 @@ crosshead workspace repair --dry-run
 crosshead workspace repair
 crosshead quickstart --scope project --adapter both --profile work
 ```
+
+Install, update, rollback, and uninstall validate workspace policy before
+changing installation files or stopping a daemon. A damaged policy requires
+explicit repair first; the running installation is left intact.
 
 Repair preserves the exact damaged policy in a private adjacent backup and sets
 manual scope. It keeps memory files and host settings intact. Review the new

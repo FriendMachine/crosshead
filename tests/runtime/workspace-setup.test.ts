@@ -50,6 +50,7 @@ it("previews and verifies the installed hooks across two projects and profiles",
     for (const project of [projectA, projectB, nestedRepo, outside]) {
       mkdirSync(path.join(project, ".git"), { recursive: true });
       writeFileSync(path.join(project, ".git/HEAD"), "ref: refs/heads/main\n");
+      expect(spawnSync("git", ["init", "-q", project]).status).toBe(0);
     }
     cli("keygen", "--setup", "--profile", "default", "--api-base", localEndpoint);
     const global = path.join(codexHome, "hooks.json");

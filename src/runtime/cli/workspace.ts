@@ -5,7 +5,7 @@ import { parseArgs, shellQuote } from "../adapter-utils";
 import type { HookHost } from "../host-hook-spec";
 import { loadAdapterRecord, loadProfile, loadRuntimeConfig, resolveRuntimePaths } from "../runtime-persistence";
 import {
-  applyWorkspaceHookPlan, assertWorkspacePlanCurrent, inspectWorkspaceHooks, planWorkspaceHooks, readWorkspaceHookPolicy, repairWorkspaceHookPolicy, summarizeWorkspaceHookPlan,
+  applyWorkspaceHookPlan, assertWorkspacePlanCurrent, inspectWorkspaceHooks, planWorkspaceHooks, prepareWorkspaceProfileCreation, readWorkspaceHookPolicy, repairWorkspaceHookPolicy, summarizeWorkspaceHookPlan,
   withWorkspaceSetupLock, workspaceBindingStatus, workspaceProjectRoot, type HookScope, type WorkspaceHookTarget,
 } from "../workspace-hooks";
 import { isRuntimeProfileName } from "../runtime-env";
@@ -215,7 +215,7 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
       }
     }
     if (flags["create-checkout"]) throw new Error("Run crosshead billing checkout separately after project setup.");
-    const plan = planWorkspaceHooks({ ...options, scope, targets: scope === "manual" ? [] : targets });
+    const plan = planWorkspaceHooks({ ...options, scope, targets: scope === "manual" ? [] : targets, createsProfiles: newProfiles.length > 0 });
     const executable = path.join(paths.bin, "crosshead");
     const installRuntime = !existsSync(executable) ||
       !readFileSync(executable, "utf8").includes(shellQuote(scripts.cliScriptPath)) ||
@@ -233,6 +233,7 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
       if (names.some((name) => profileSnapshot(paths, name) !== profilesBefore.get(name))) {
 	throw new Error("A selected profile changed since preview. Run setup again to review it.");
       }
+      if (newProfiles.length > 0) prepareWorkspaceProfileCreation(plan);
       const args = homeArgs(options.home);
       if (installRuntime) {
 	const channel = str(flags, "channel") ?? loadRuntimeConfig(paths).channel;
@@ -242,10 +243,10 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
 	await keygenFromCli([...args, "--setup", "--profile", name, "--api-base", apiBase!, "--memory-mode", mode,
 	  "--workspace-scope", "repo", "--no-default", "--create-only", "--json"]);
       }
+      applyWorkspaceHookPlan(plan);
       const result = enabled(flags, "no-start") ? null : await ensureQuickstartDaemon({
 	home: options.home, daemonScriptPath: scripts.daemonScriptPath, port: str(flags, "port"),
       });
-      applyWorkspaceHookPlan(plan);
       return result;
     });
     const inspection = inspectWorkspaceHooks(options.home);

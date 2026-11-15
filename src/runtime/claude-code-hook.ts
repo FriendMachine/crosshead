@@ -1,10 +1,10 @@
+import { resolveWorkspaceHookDispatch } from "./workspace-hook-dispatch";
 import { ensureHookRuntime, reportHookFailure } from "./hook-runtime";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 
 import { captureHotFinding } from "./hot-continuity";
 import { claimSessionStartContext, releaseSessionStartContext } from "./hook-session-context";
-import { taskEvidenceCaptureEnabled } from "./task-evidence";
 import { readLastAssistantMessage } from "./hook-transcript";
 
 import { ClaudeCodeRuntimeAdapter, findLegacyClaudeHookFiles, loadClaudeCodeAdapterConfig } from "./claude-code-adapter";
@@ -19,9 +19,9 @@ import {
   resolvePluginHostHome,
   writePluginSetupNotice,
 } from "./host-plugin-mode";
-import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
-import { loadProfile, resolveRuntimePaths, writeJsonFile } from "./runtime-persistence";
-import { readWorkspacePolicyForHook, recordWorkspaceHookStart, workspaceHookForInvocation, workspaceHookStateFile } from "./workspace-hooks";
+import { ensureRuntimeHomeLayout } from "./local-runtime";
+import { loadProfile, writeJsonFile } from "./runtime-persistence";
+import { recordWorkspaceHookStart, workspaceHookStateFile } from "./workspace-hooks";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
 
 type HookTurnState = {
@@ -373,33 +373,15 @@ export const runOnlyBotsClaudeCodeHookCli = async (
   const { positionals, flags } = parseArgs(argv);
   const eventName = positionals[0] ?? "help";
   const normalizedEventName = eventName.toLowerCase();
-  const isToolFailure = normalizedEventName === "posttoolusefailure" || normalizedEventName === "post_tool_use_failure";
-  const isPostToolUse = isToolFailure || normalizedEventName === "posttooluse" || normalizedEventName === "post_tool_use";
-  if (isPostToolUse && (flags["source-excerpts"] === "off" ||
-      (!flags.binding && !taskEvidenceCaptureEnabled()))) return;
-  const runtimeHome = resolveRuntimeHome(typeof flags.home === "string" ? flags.home : undefined);
+  const dispatch = resolveWorkspaceHookDispatch("claude-code", eventName, flags,
+    () => readStdinJson(stdinOverride), payload => resolveHookWorkspaceRoot(payload, {}, false));
+  if (!dispatch) return;
+  const { paths, runtimeHome, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure } = dispatch;
   const viaPlugin = isPluginHookInvocation(flags);
-  const paths = resolveRuntimePaths(runtimeHome);
-  const policy = readWorkspacePolicyForHook(paths, normalizedEventName, flags.binding);
-  if (policy === false) return;
-  // Ignore retired settings and plugin registrations before reading the chat payload.
-  if (policy && !policy.bindings.some((binding) => binding.host === "claude-code" && binding.id === flags.binding)) return;
-  const selectedBinding = policy?.bindings.find((binding) => binding.id === flags.binding);
-  if (isPostToolUse && !(selectedBinding?.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return;
-  const payload = readStdinJson(stdinOverride);
-  const scoped = workspaceHookForInvocation(policy, "claude-code", flags.binding, resolveHookWorkspaceRoot(payload, {}, false));
-  if (scoped === null) return;
   const hostHome = scoped?.binding.hostHome ??
     (typeof flags["claude-home"] === "string" ? flags["claude-home"] : viaPlugin ? resolvePluginHostHome("claude-code", runtimeHome) : undefined);
   const workspaceRoot = scoped?.root ?? resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = scoped ? `repo:${workspaceRoot}` : resolveHookWorkspaceId(payload, flags, workspaceRoot);
-  let legacyUnscoped = false;
-  if (scoped) {
-    const profile = loadProfile(paths, scoped.binding.profile);
-    if (!profile) throw new Error(`Unknown Crosshead profile: ${scoped.binding.profile}`);
-    if (profile.memoryMode === "off") return;
-    legacyUnscoped = scoped.binding.legacyUnscoped === true && scoped.binding.legacyNpub === profile.npub;
-  }
   if (!scoped && eventName !== "help") {
     let installedConfig: ReturnType<typeof loadClaudeCodeAdapterConfig> | null = null;
     try {

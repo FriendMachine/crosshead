@@ -655,7 +655,15 @@ const formatInjectedContextLine = (manifest: ContextPackManifest | null): string
 };
 
 export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): string => {
-  if (input.mode === "off") return "";
+  if (input.mode === "off") {
+    return [
+      `Crosshead attached: profile=${input.profileName} mode=off runtime=${input.runtime}`,
+      formatHealthLine(input.status), formatModeLine(input.mode),
+      formatInboxLine(input.inbox), formatInboxTopLine(input.inbox),
+      formatObligationsLine(input.obligations), formatObligationsTopLine(input.obligations),
+      input.warnings.length ? `Warnings: ${input.warnings.join(" | ")}` : null,
+    ].filter((line): line is string => Boolean(line)).join("\n");
+  }
   // A fresh store still needs a capture contract. Otherwise the agent may invent
   // a repository memory file or omit facts that are absent from its final answer.
   // Native hooks capture findings plus bounded observed workspace reads.

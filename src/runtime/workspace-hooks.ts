@@ -1,3 +1,4 @@
+import { isRuntimeProfileForBinding } from "./runtime-profile-validation";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
@@ -8,8 +9,8 @@ import { homedir } from "node:os";
 import { acquireWorkspaceSetupKernelLock } from "./daemon-kernel-lock";
 import { workspaceDirectoryPath as directoryPath, workspaceRepositoryRoot as repositoryRoot, workspaceProjectRoot } from "./workspace-identity";
 export { workspaceProjectRoot } from "./workspace-identity";
-import { loadProfile, resolveRuntimePaths, type RuntimePaths } from "./runtime-persistence";
-import { isLocalOnlyRuntimeProfile, localHotMemoryAdoptionFingerprint, planLocalHotMemoryAdoption } from "./local-hot-memory";
+import { loadProfile, profileFile, resolveRuntimePaths, type RuntimePaths } from "./runtime-persistence";
+import { isLocalOnlyRuntimeProfile, legacyOwnerFile, localHotMemoryAdoptionSnapshot, planLegacyLocalHotOwner, planLocalHotMemoryAdoption } from "./local-hot-memory";
 import { isRuntimeProfileName, resolveClaudeCodeHostHome, resolveCodexHostHome } from "./runtime-env";
 
 export type HookScope = "project" | "all" | "manual";
@@ -68,28 +69,30 @@ export const readWorkspaceHookPolicy = (paths: RuntimePaths): HookPolicy | null 
   return { version: 1, scope: data.scope, bindings: data.bindings };
 };
 
-const appliesIn = (binding: WorkspaceHookBinding, directory: string): boolean => {
+type InvocationLocation = { directory: string; repository: string | null };
+
+const appliesIn = (binding: WorkspaceHookBinding, directory: string, repo: string | null): boolean => {
   if (binding.root === null) return true;
   const relative = path.relative(binding.root, directory);
   if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return false;
-  const repo = repositoryRoot(directory);
   return repo === null || repo === binding.root;
 };
 
 /** undefined uses legacy dispatch; null skips the invocation, including stale hooks. */
 export const workspaceHookForInvocation = (
-  policy: HookPolicy | null, host: HookHost, id: string | boolean | undefined, directory: string
+  policy: HookPolicy | null, host: HookHost, id: string | boolean | undefined, directory: string, location?: InvocationLocation
 ): { binding: WorkspaceHookBinding; root: string } | null | undefined => {
   if (!policy) return id === undefined ? undefined : null;
   const binding = policy.bindings.find((entry) => entry.host === host && entry.id === id);
   if (!binding) return null;
   let resolved: string;
-  try { resolved = directoryPath(directory); } catch { return null; }
-  if (!appliesIn(binding, resolved)) return null;
+  try { resolved = location?.directory ?? directoryPath(directory); } catch { return null; }
+  const repo = location ? location.repository : repositoryRoot(resolved);
+  if (!appliesIn(binding, resolved, repo)) return null;
   // Within plain directories, the closest explicit binding wins.
   if (binding.root && policy.bindings.some((other) =>
-    other.host === host && other.root && other.root.length > binding.root!.length && appliesIn(other, resolved))) return null;
-  return { binding, root: binding.root ?? repositoryRoot(resolved) ?? resolved };
+    other.host === host && other.root && other.root.length > binding.root!.length && appliesIn(other, resolved, repo))) return null;
+  return { binding, root: binding.root ?? repo ?? resolved };
 };
 
 const hookFile = (binding: WorkspaceHookBinding): string =>
@@ -97,21 +100,31 @@ const hookFile = (binding: WorkspaceHookBinding): string =>
     ? path.join(binding.root, binding.host === "codex" ? ".codex/hooks.json" : ".claude/settings.local.json")
     : path.join(binding.hostHome, binding.host === "codex" ? "hooks.json" : "settings.json");
 
-const codexHookRegistration = (root: string): "project" | "user" => {
-  try {
-    execFileSync("git", ["-C", root, "ls-files", "--error-unmatch", "--", ".codex/hooks.json"], { stdio: "ignore", timeout: 2000 });
-    return "user";
-  } catch { return "project"; }
+const canonicalPlannedPath = (target: string): string => {
+  const suffix: string[] = [];
+  for (let current = path.resolve(target);; current = path.dirname(current)) {
+    try { return path.join(realpathSync(current), ...suffix); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(current) === current) throw error;
+      suffix.unshift(path.basename(current));
+    }
+  }
 };
 
-const projectIgnoreFile = (root: string): { file: string; root: string } => {
+const projectHookPath = (host: HookHost): string => host === "codex" ? ".codex/hooks.json" : ".claude/settings.local.json";
+const projectGitInfo = (root: string): { tracked: Set<string>; ignore: { file: string; root: string } } | null => {
   try {
-    const exclude = execFileSync("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).trim();
+    const tracked = execFileSync("git", ["-C", root, "ls-files", "-z", "--", ...hosts.map(projectHookPath)],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 });
+    const exclude = execFileSync("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).trim();
+    if (!exclude) return null;
     const file = path.resolve(root, exclude);
-    return { file, root: path.dirname(file) };
-  } catch { return { file: path.join(root, ".gitignore"), root }; }
+    return { tracked: new Set(tracked.split("\0").filter(Boolean)), ignore: { file, root: path.dirname(file) } };
+  } catch { return null; }
 };
-const localHookIgnore = "# Crosshead local hook settings\n/.codex/hooks.json\n";
+const localHookIgnore = (host: HookHost): string => `# Crosshead local ${host} hook settings\n/${projectHookPath(host)}\n`;
+const oldCodexHookIgnore = "# Crosshead local hook settings\n/.codex/hooks.json\n";
 
 const hostHome = (host: HookHost, options: { codexHome?: string; claudeHome?: string }): string =>
   host === "codex" ? resolveCodexHostHome(options.codexHome) : resolveClaudeCodeHostHome(options.claudeHome);
@@ -209,11 +222,15 @@ export const inspectWorkspaceHooks = (home?: string, directory?: string) => {
   let error: string | null = null;
   let workspaceError: string | null = null;
   let resolved: string | null = null;
+  let location: InvocationLocation | undefined;
   try { policy = readWorkspaceHookPolicy(paths); } catch (caught) { error = String((caught as Error).message); }
-  try { resolved = directory ? directoryPath(directory) : null; }
+  try {
+    resolved = directory ? directoryPath(directory) : null;
+    if (resolved) location = { directory: resolved, repository: repositoryRoot(resolved) };
+  }
   catch { workspaceError = `Workspace directory is unavailable: ${directory}`; }
   const bindings = (workspaceError ? [] : policy?.bindings ?? []).filter((binding) => !resolved ||
-    workspaceHookForInvocation(policy, binding.host, binding.id, resolved) !== null);
+    workspaceHookForInvocation(policy, binding.host, binding.id, resolved, location) !== null);
   return {
     scope: error ? "invalid" as const : policy?.scope ?? "legacy",
     error, workspaceError, workspace: resolved,
@@ -230,7 +247,7 @@ export const inspectWorkspaceHooks = (home?: string, directory?: string) => {
 	});
       } catch { /* Invalid or removed settings are reported as missing. */ }
       const observation = (source: "startup" | "resume") => {
-	const expectedRoot = binding.root ?? (resolved ? repositoryRoot(resolved) ?? resolved : null);
+	const expectedRoot = binding.root ?? (resolved ? location!.repository ?? resolved : null);
 	if (!expectedRoot) return null;
 	try {
 	  const receipt = JSON.parse(readText(receiptFile(paths, binding, expectedRoot, source)) ?? "null") as Settings | null;
@@ -238,9 +255,15 @@ export const inspectWorkspaceHooks = (home?: string, directory?: string) => {
 	    ? receipt : null;
 	} catch { return null; }
       };
+      let profile: ReturnType<typeof loadProfile> = null;
+      let profileState: "ready" | "missing" | "invalid" = "missing";
+      try {
+	profile = loadProfile(paths, binding.profile);
+	profileState = profile === null ? (existsSync(profileFile(paths, binding.profile)) ? "invalid" : "missing") : isRuntimeProfileForBinding(profile, binding.profile) ? "ready" : "invalid";
+      } catch { profileState = "invalid"; }
       return {
-	...binding, file, configured,
-	memoryMode: loadProfile(paths, binding.profile)?.memoryMode ?? null,
+	...binding, file, configured, profileState,
+	memoryMode: profileState === "ready" ? profile!.memoryMode : null,
 	startup: configured ? observation("startup") : null,
 	resume: configured ? observation("resume") : null,
       };
@@ -265,6 +288,7 @@ type PlanOptions = {
   removeHost?: HookHost;
   cleanup?: boolean;
   refresh?: boolean;
+  createsProfiles?: boolean;
 };
 
 export const planWorkspaceHooks = (options: PlanOptions) => {
@@ -281,6 +305,11 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
       binding.root !== root || !options.remove!.hosts.includes(binding.host));
   }
   const planned = new Set<string>();
+  const gitByRoot = new Map<string, ReturnType<typeof projectGitInfo>>();
+  const gitInfo = (root: string) => {
+    if (!gitByRoot.has(root)) gitByRoot.set(root, projectGitInfo(root));
+    return gitByRoot.get(root) ?? null;
+  };
   for (const target of options.targets) {
     if (!isRuntimeProfileName(target.profile)) throw new Error(`Invalid profile name: ${target.profile}`);
     const root = options.scope === "all" ? null : workspaceProjectRoot(target.directory);
@@ -293,7 +322,8 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
       planned.add(key);
       const existing = policy.bindings.find((binding) => binding.root === root && binding.host === host);
       const resolvedHome = hostHome(host, options);
-      const registration = host === "codex" && root ? codexHookRegistration(root) : "project";
+      const info = root ? gitInfo(root) : null;
+      const registration = root && (!info || info.tracked.has(projectHookPath(host))) ? "user" : "project";
       const selectedProfile = loadProfile(paths, target.profile);
       const inheritLegacy = existing?.profile === target.profile && existing.legacyNpub === selectedProfile?.npub;
       const legacyUnscoped = (inheritLegacy ? existing?.legacyUnscoped : undefined) ?? (!previous && root !== null && Boolean(selectedProfile) &&
@@ -307,13 +337,22 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
     }
   }
 
+  const projectRoots = [...new Set(policy.bindings.flatMap(binding => binding.root ? [canonicalPlannedPath(binding.root)] : []))];
+  for (const binding of policy.bindings) {
+    if (binding.registration !== "user" || !binding.root) continue;
+    const target = canonicalPlannedPath(hookFile(binding));
+    if (projectRoots.some(root => { const relative = path.relative(root, target); return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`)); })) {
+      throw new Error(`Choose ${binding.host === "codex" ? "--codex-home" : "--claude-home"} outside the selected projects: private user hook settings would be written inside a project.`);
+    }
+  }
+
   const edits = new Map<string, Edit>();
   const guards: Array<{ file: string; root: string; before: string }> = [];
   const sourceSnapshots: Array<ReturnType<typeof planLocalHotMemoryAdoption>["snapshot"]> = [];
   const settingsFiles = new Map<string, { root: string; host: HookHost }>();
   for (const binding of [...(previous?.bindings ?? []), ...policy.bindings]) {
     settingsFiles.set(hookFile(binding), { root: binding.root && binding.registration !== "user" ? binding.root : binding.hostHome, host: binding.host });
-    if (binding.root && binding.host === "claude-code") {
+    if (binding.root && binding.host === "claude-code" && binding.registration !== "user") {
       settingsFiles.set(path.join(binding.root, ".claude/settings.json"), { root: binding.root, host: binding.host });
     }
   }
@@ -358,18 +397,26 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
   }
 
   const projectBindings = [...(previous?.bindings ?? []), ...policy.bindings]
-    .filter((binding) => binding.host === "codex" && binding.root && binding.registration !== "user");
-  const ignoreFiles = new Map<string, { root: string; active: boolean }>();
-  for (const root of new Set(projectBindings.map((binding) => binding.root!))) {
-    const ignore = projectIgnoreFile(root);
-    const active = policy.bindings.some((binding) => binding.host === "codex" && binding.root === root && binding.registration !== "user");
-    ignoreFiles.set(ignore.file, { root: ignore.root, active: active || Boolean(ignoreFiles.get(ignore.file)?.active) });
+    .filter(binding => binding.root && binding.registration !== "user");
+  const ignoreFiles = new Map<string, { root: string; active: Map<HookHost, boolean> }>();
+  for (const binding of projectBindings) {
+    const info = gitInfo(binding.root!);
+    if (!info) continue;
+    const { file, root } = info.ignore;
+    const entry = ignoreFiles.get(file) ?? { root, active: new Map<HookHost, boolean>() };
+    const active = policy.bindings.some(current => current.host === binding.host && current.root === binding.root && current.registration !== "user");
+    entry.active.set(binding.host, active || Boolean(entry.active.get(binding.host)));
+    ignoreFiles.set(file, entry);
   }
   for (const [file, { root, active }] of ignoreFiles) {
     const before = readText(file);
     let after = before ?? "";
-    if (active && !after.split("\n").includes("/.codex/hooks.json")) after += (after && !after.endsWith("\n") ? "\n" : "") + localHookIgnore;
-    if (!active) after = after.replace(localHookIgnore, "");
+    for (const [host, enabled] of active) {
+      if (host === "codex") after = after.replace(oldCodexHookIgnore, "");
+      const block = localHookIgnore(host);
+      if (enabled && !after.split("\n").includes(`/${projectHookPath(host)}`)) after += (after && !after.endsWith("\n") ? "\n" : "") + block;
+      if (!enabled) after = after.replace(block, "");
+    }
     if (after !== (before ?? "")) edits.set(file, { file, root, before, after });
   }
 
@@ -400,12 +447,17 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
     guards.push(...adoption.sources.map(source => ({ ...source, root: paths.home })));
     sourceSnapshots.push(adoption.snapshot);
   }
+  if (options.createsProfiles) {
+    const pin = planLegacyLocalHotOwner(paths.state);
+    if (pin && !edits.has(pin.file)) edits.set(pin.file, { file: pin.file, root: paths.home, before: null, after: pin.content });
+  }
+  const ownerPin = edits.get(legacyOwnerFile(paths.state)) ?? null;
   const file = policyFile(paths);
   const before = readText(file);
   const after = `${JSON.stringify(policy, null, 2)}\n`;
   if (before !== after) edits.set(file, { file, root: paths.home, before, after });
   for (const edit of edits.values()) assertManagedFilePath(edit.file, edit.root);
-  return { paths, policy, edits: [...edits.values()], guards, sourceSnapshots, retired };
+  return { paths, policy, edits: [...edits.values()], guards, sourceSnapshots, ownerPin, retired };
 };
 
 const realHome = (home: string): string => {
@@ -427,10 +479,22 @@ export const assertWorkspacePlanCurrent = (plan: WorkspaceHookPlan): void => {
     if (readText(edit.file) !== edit.before) throw new Error(`Settings changed since preview: ${edit.file}. Run setup again.`);
   }
   for (const snapshot of plan.sourceSnapshots) {
-    if (localHotMemoryAdoptionFingerprint(snapshot.stateDir, snapshot.owner) !== snapshot.fingerprint) {
+    const current = localHotMemoryAdoptionSnapshot(snapshot.stateDir, snapshot.owner);
+    if (current.fingerprint !== snapshot.fingerprint || current.legacyOwner !== snapshot.legacyOwner) {
       throw new Error("Local memory changed since preview. Run setup again.");
     }
   }
+};
+
+/** Apply only the previewed ownership pin before key generation can add profiles.
+ * Source-file guards remain frozen; only this planned marker transition advances. */
+export const prepareWorkspaceProfileCreation = (plan: WorkspaceHookPlan): void => {
+  assertWorkspacePlanCurrent(plan);
+  const pin = plan.ownerPin;
+  if (!pin) return;
+  writeManagedFile(pin.file, pin.after, pin.root);
+  pin.before = pin.after;
+  for (const snapshot of plan.sourceSnapshots) snapshot.legacyOwner = pin.after;
 };
 
 export const withWorkspaceSetupLock = async <T>(paths: RuntimePaths, operation: () => Promise<T>): Promise<T> => {
@@ -469,6 +533,7 @@ export const workspaceBindingStatus = (
   binding: WorkspaceHookInspection["bindings"][number], workspace: string | null
 ): string => {
   if (!binding.configured) return "hook settings missing or changed";
+  if (binding.profileState === "invalid") return "profile invalid";
   if (!binding.memoryMode) return "profile missing";
   if (binding.memoryMode === "off") return "memory off";
   if (binding.startup || binding.resume) return "observed in host";

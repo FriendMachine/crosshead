@@ -29,7 +29,9 @@ const localHotMemoryDir = (stateDir: string, owner?: HotMemoryOwner): string =>
     ? path.join(stateDir, LOCAL_HOT_MEMORY_DIR, "profiles", createHash("sha256").update(JSON.stringify([owner.name, owner.npub])).digest("hex"))
     : path.join(stateDir, LOCAL_HOT_MEMORY_DIR);
 
-const legacyOwnerFile = (stateDir: string): string => path.join(stateDir, "legacy-local-hot-owner.json");
+export const legacyOwnerFile = (stateDir: string): string => path.join(stateDir, "legacy-local-hot-owner.json");
+
+const legacyOwners = new Map<string, { signature: string; owner: HotMemoryOwner | null }>();
 
 /** Before namespacing, a flat store was shared by the runtime's local-only profiles.
  * Adopt it only for its sole existing local profile, and pin that identity before
@@ -44,24 +46,47 @@ const legacyOwner = (stateDir: string): HotMemoryOwner | null => {
   }
   const profiles = path.join(path.dirname(stateDir), "config", "profiles");
   if (!existsSync(profiles)) return null;
-  const local = readdirSync(profiles).filter(name => name.endsWith(".json")).flatMap(name => {
+  const names = readdirSync(profiles).filter(name => name.endsWith(".json")).sort();
+  const signature = JSON.stringify(names.map(name => {
+    try {
+      const stat = statSync(path.join(profiles, name), { bigint: true });
+      return [name, stat.ino.toString(), stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString()];
+    } catch { return [name, "unavailable"]; }
+  }));
+  const cached = legacyOwners.get(stateDir);
+  if (cached?.signature === signature) return cached.owner;
+  let unclassified = false;
+  const local = names.flatMap(name => {
     try {
       const profile = JSON.parse(readFileSync(path.join(profiles, name), "utf8"));
-      return typeof profile.name === "string" && typeof profile.npub === "string" && isLocalOnlyRuntimeProfile(profile) ? [profile as HotMemoryOwner] : [];
-    } catch { return []; }
+      if (!profile || typeof profile !== "object" || Array.isArray(profile) || profile.name !== name.slice(0, -5) ||
+	  typeof profile.npub !== "string" || !profile.npub || typeof profile.apiBase !== "string" ||
+	  !["http:", "https:"].includes(new URL(profile.apiBase).protocol)) throw new Error("Unclassified legacy profile");
+      return isLocalOnlyRuntimeProfile(profile) ? [profile as HotMemoryOwner] : [];
+    } catch { unclassified = true; return []; }
   });
-  return local.length === 1 ? { name: local[0]!.name, npub: local[0]!.npub } : null;
+  const owner = !unclassified && local.length === 1 ? { name: local[0]!.name, npub: local[0]!.npub } : null;
+  if (legacyOwners.size >= 64) legacyOwners.delete(legacyOwners.keys().next().value!);
+  legacyOwners.set(stateDir, { signature, owner });
+  return owner;
+};
+
+export const planLegacyLocalHotOwner = (stateDir: string): { file: string; content: string } | null => {
+  if (existsSync(legacyOwnerFile(stateDir))) return null;
+  const directory = localHotMemoryDir(stateDir);
+  if (!existsSync(directory) || !readdirSync(directory).some(name => name.endsWith(".json"))) return null;
+  const owner = legacyOwner(stateDir);
+  return { file: legacyOwnerFile(stateDir), content: JSON.stringify(owner ?? { ambiguous: true }) };
 };
 
 export const preserveLegacyLocalHotOwner = (stateDir: string): void => {
-  if (existsSync(legacyOwnerFile(stateDir))) return;
-  const directory = localHotMemoryDir(stateDir);
-  if (!existsSync(directory) || !readdirSync(directory).some(name => name.endsWith(".json"))) return;
-  const owner = legacyOwner(stateDir);
-  writeManagedFile(legacyOwnerFile(stateDir), JSON.stringify(owner ?? { ambiguous: true }), stateDir);
+  const planned = planLegacyLocalHotOwner(stateDir);
+  if (planned) writeManagedFile(planned.file, planned.content, stateDir);
 };
 
 const canReadLegacy = (stateDir: string, owner: HotMemoryOwner): boolean => {
+  const flat = localHotMemoryDir(stateDir);
+  if (!existsSync(flat) || !readdirSync(flat).some(name => name.endsWith(".json"))) return false;
   const legacy = legacyOwner(stateDir);
   return legacy?.name === owner.name && legacy.npub === owner.npub;
 };
@@ -157,7 +182,7 @@ export const writeLocalHotMemory = (stateDir: string, content: string, scope?: s
 };
 
 /** Fingerprint the complete source set, including newly arrived partitions. */
-export const localHotMemoryAdoptionFingerprint = (stateDir: string, owner: HotMemoryOwner): string => {
+export const localHotMemoryAdoptionSnapshot = (stateDir: string, owner: HotMemoryOwner) => {
   const directories = [localHotMemoryDir(stateDir), localHotMemoryDir(stateDir, owner)];
   const source = directories.map(directory => existsSync(directory)
     ? readdirSync(directory).filter(name => name.endsWith(".json")).sort().map(name => {
@@ -165,7 +190,7 @@ export const localHotMemoryAdoptionFingerprint = (stateDir: string, owner: HotMe
       return [name, statSync(file).mtime.toISOString(), createHash("sha256").update(readFileSync(file)).digest("hex")];
     }) : []);
   const marker = legacyOwnerFile(stateDir);
-  return createHash("sha256").update(JSON.stringify([source, existsSync(marker) ? readFileSync(marker, "utf8") : null])).digest("hex");
+  return { fingerprint: createHash("sha256").update(JSON.stringify(source)).digest("hex"), legacyOwner: existsSync(marker) ? readFileSync(marker, "utf8") : null };
 };
 
 /** Copy eligible history into current workspace partitions before the first new session.
@@ -173,7 +198,7 @@ export const localHotMemoryAdoptionFingerprint = (stateDir: string, owner: HotMe
 export const planLocalHotMemoryAdoption = (
   stateDir: string, owner: HotMemoryOwner, workspaceId: string, unscoped: boolean, before?: string
 ) => {
-  const fingerprint = localHotMemoryAdoptionFingerprint(stateDir, owner);
+  const sourceSnapshot = localHotMemoryAdoptionSnapshot(stateDir, owner);
   const raw = readLocalHotMemory(stateDir, "all", owner);
   const entries = (raw.scopes ?? []) as Array<Record<string, unknown>>;
   const tagged = entries.map(entry => {
@@ -205,5 +230,5 @@ export const planLocalHotMemoryAdoption = (
     const file = legacyOwnerFile(stateDir);
     planned.set(file, { file, content: JSON.stringify({ name: owner.name, npub: owner.npub }), time: 0 });
   }
-  return { files: [...planned.values()].map(({ file, content }) => ({ file, content })), sources: [...sources.values()], snapshot: { stateDir, owner: { name: owner.name, npub: owner.npub }, fingerprint } };
+  return { files: [...planned.values()].map(({ file, content }) => ({ file, content })), sources: [...sources.values()], snapshot: { stateDir, owner: { name: owner.name, npub: owner.npub }, ...sourceSnapshot } };
 };
