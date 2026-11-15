@@ -162,6 +162,13 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 	const memoryMode = typeof flags["memory-mode"] === "string" ? flags["memory-mode"] : "assist";
 	const workspaceScope = typeof flags["workspace-scope"] === "string" ? flags["workspace-scope"] : "repo";
 	const adapter = selectedAdapter(flags);
+	if (flags["dry-run"]) {
+		const preview = { applied: false, scope: "legacy", adapter, profile: profileName,
+			home: resolveRuntimePaths(home).home, workspaceRoot: typeof flags["workspace-root"] === "string" ? path.resolve(flags["workspace-root"]) : process.cwd(),
+			memoryMode, workspaceScope };
+		return flags.json ? JSON.stringify(preview, null, 2)
+			: `Legacy setup preview for ${adapter}, profile ${profileName}, in ${preview.home}. Use --scope project to configure selected projects.`;
+	}
 	const coreArgs = [...flagPair("--home", home), ...flagPair("--channel", typeof flags.channel === "string" ? flags.channel : undefined)];
 	const profileArgs = [
 		...flagPair("--home", home),
@@ -301,3 +308,6 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 	};
 	return flags.json ? JSON.stringify(result, null, 2) : formatQuickstart(result);
 };
+
+/** Only an argument-free invocation opts into the terminal onboarding wizard. */
+export const shouldGuideQuickstart = (args: string[], terminal: boolean): boolean => terminal && args.length === 0;

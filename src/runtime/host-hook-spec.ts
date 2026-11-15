@@ -49,7 +49,7 @@ export const HOST_HOOK_EVENTS: readonly HostHookEventSpec[] = [
 export const CROSSHEAD_PLUGIN_NAME = "crosshead";
 export const CROSSHEAD_MARKETPLACE_NAME = "crosshead";
 /** Bump when any generated plugin file changes; hosts pin installed plugins by version. */
-export const CROSSHEAD_HOST_PLUGIN_VERSION = "1.1.0";
+export const CROSSHEAD_HOST_PLUGIN_VERSION = "1.2.0";
 
 /** Path, relative to the plugin root, of the launcher the plugin hooks run. */
 export const PLUGIN_HOOK_LAUNCHER = "scripts/crosshead-hook";

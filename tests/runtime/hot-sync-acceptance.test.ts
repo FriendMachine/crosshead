@@ -1,5 +1,6 @@
+import { filterHotMemorySnapshotForWorkspace } from "../../src/runtime/host-adapter-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync, truncateSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, realpathSync, statSync, truncateSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -185,6 +186,19 @@ describe("local-first hot-memory acceptance", () => {
 		expect(entries(otherProfile)).toEqual([]);
 		expect(entries(otherIdentity)).toEqual([]);
 		expect(JSON.stringify([...cloud.rows.values()])).not.toMatch(/repo:\/|secret|github.com/);
+	});
+	it("retains explicitly linked cross-device checkpoints through scoped workspace filtering", async () => {
+		const cloud = new Cloud(), id = identity();
+		const make = () => new HotSyncManager({ stateDir: home(), origin: "https://crosshead.sh", ...id, profileName: "work" }, cloud.client(id.npub));
+		const a = make(), b = make(), rootA = realpathSync(home()), rootB = realpathSync(home());
+		a.link(rootA, "shared-project"); b.link(rootB, "shared-project");
+		a.capture("ignored", { ...checkpoint("remote-finding"), workspaceId: `repo:${rootA}` });
+		await a.flush(); await b.flush();
+		const received = b.read("all");
+		const scoped = filterHotMemorySnapshotForWorkspace(received, `repo:${rootB}`, true);
+		expect(JSON.stringify(scoped)).toContain("finding remote-finding");
+		expect(JSON.stringify(scoped)).not.toContain(rootA);
+		expect(filterHotMemorySnapshotForWorkspace(received, `repo:${realpathSync(home())}`, true)).toBeNull();
 	});
 	it("keeps the durable offline backlog beyond upload and view limits, including restart", async () => {
 		const cloud = new Cloud(), id = identity(), stateDir = home(), client = cloud.client(id.npub);

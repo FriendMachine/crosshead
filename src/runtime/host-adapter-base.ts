@@ -1,6 +1,7 @@
+import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
+export { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { existsSync } from "fs";
 import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
-import { workspaceHotScope } from "./workspace-hot-memory";
 import path from "path";
 import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
 import { CHECKPOINT_PAGE_CHARS, inlineCheckpointPages, paginateCheckpoint, saveCheckpointPages } from "./checkpoint-pages";
@@ -33,6 +34,10 @@ export type HostAdapterBaseConfig = {
   adapterVersion: string;
   /** Runtime home holding this host's bridge wrapper under bin/. */
   runtimeHome?: string;
+  sourceExcerpts?: boolean;
+  workspaceOnly?: boolean;
+  legacyUnscoped?: boolean;
+  legacyBefore?: string;
 };
 
 export type HostAdapterTranscriptEntry = {
@@ -184,83 +189,7 @@ export type HostAdapterRememberRequest = {
   tags?: string[];
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value);
-
-const parseJsonRecord = (value: string): Record<string, unknown> | null => {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-};
-
-const parseHotMemoryEntryContent = (entry: Record<string, unknown>): Record<string, unknown> | null => {
-  if (isRecord(entry.content)) {
-    return entry.content;
-  }
-  return typeof entry.content === "string" ? parseJsonRecord(entry.content) : null;
-};
-
-const hasHotMemoryEntryContent = (entry: Record<string, unknown>): boolean => {
-  if (isRecord(entry.content)) {
-    return true;
-  }
-  return typeof entry.content === "string" && entry.content.trim().length > 0;
-};
-
-const getWorkspaceId = (value: Record<string, unknown> | null): string | null => {
-  const workspaceId = value?.workspaceId ?? value?.workspace_id;
-  return typeof workspaceId === "string" && workspaceId.trim().length > 0 ? workspaceId.trim() : null;
-};
-
 const emptyHotMemorySnapshot = (): Record<string, unknown> => ({ scope: "all", scopes: [] });
-
-export const filterHotMemorySnapshotForWorkspace = (
-  hotMemory: Record<string, unknown> | null,
-  workspaceId: string
-): Record<string, unknown> | null => {
-  if (!hotMemory) {
-    return null;
-  }
-  const scopedEntries = Array.isArray(hotMemory.scopes) ? hotMemory.scopes.filter(isRecord) : null;
-  if (!scopedEntries) {
-    if (!hasHotMemoryEntryContent(hotMemory)) {
-      return null;
-    }
-    const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(hotMemory));
-    return entryWorkspaceId && entryWorkspaceId !== workspaceId ? null : hotMemory;
-  }
-  const scopes = scopedEntries.filter((entry) => {
-    if (!hasHotMemoryEntryContent(entry)) {
-      return false;
-    }
-    const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(entry));
-    return !entryWorkspaceId || entryWorkspaceId === workspaceId;
-  });
-  if (scopes.length === 0) {
-    return null;
-  }
-  // The legacy runtime alias and its retained workspace partition describe one
-  // document. Inject the newest version once, under the readable runtime name.
-  const selected = new Map<string, Record<string, unknown>>();
-  const other: Record<string, unknown>[] = [];
-  for (const entry of scopes) {
-    const content = parseHotMemoryEntryContent(entry);
-    const runtime = typeof content?.runtime === "string" ? content.runtime : null;
-    if (!runtime || getWorkspaceId(content) !== workspaceId ||
-      ![runtime, workspaceHotScope(runtime, workspaceId)].includes(String(entry.scope))) {
-      other.push(entry);
-      continue;
-    }
-    const previous = selected.get(runtime);
-    const updated = Date.parse(String(content?.updatedAt)) || 0;
-    const previousUpdated = Date.parse(String(parseHotMemoryEntryContent(previous ?? {})?.updatedAt)) || 0;
-    if (!previous || updated >= previousUpdated) selected.set(runtime, { ...entry, scope: runtime });
-  }
-  return { ...hotMemory, scopes: [...other, ...selected.values()] };
-};
 
 export abstract class HostRuntimeAdapterBase {
   protected abstract readonly identity: HostAdapterIdentity;
@@ -268,9 +197,9 @@ export abstract class HostRuntimeAdapterBase {
   protected abstract readonly config: HostAdapterBaseConfig;
 
   async captureTaskEvidence(file: string | null, sessionId: string, workspaceRoot: string, since?: string | null, goal?: string | null): Promise<TaskEvidence | undefined> {
-    // Exact workspace excerpts can contain credentials even after filtering.
-    // Capture is therefore explicit opt-in, never a side effect of assist/auto.
-    if (!taskEvidenceCaptureEnabled()) return undefined;
+    // Scoped setup stores the capture choice independently of memory mode.
+    // Legacy installs continue using their environment capture policy.
+    if (!(this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return undefined;
     // Check the current profile at capture time, including a mode change during
     // this turn. Never inspect tool output when automatic memory is disabled.
     const status = await this.client.status(this.config.profileName).catch(() => null);
@@ -282,6 +211,12 @@ export abstract class HostRuntimeAdapterBase {
   protected bridgeCommand(): string | null {
     const wrapper = { "claude-code": "crosshead-claude-code", codex: "crosshead-codex" }[this.identity.runtimeId as string];
     if (!wrapper || !this.config.runtimeHome) return null;
+    if (this.config.workspaceOnly) {
+      const cli = path.join(this.config.runtimeHome, "bin", "crosshead");
+      return existsSync(cli)
+	? `${shellQuote(cli)} checkpoint-page%PAGE% --runtime ${this.identity.runtimeId} --home ${shellQuote(this.config.runtimeHome)}`
+	: null;
+    }
     // Plugin-only installs may have no wrapper; never name a command that is not there.
     const file = path.join(this.config.runtimeHome, "bin", wrapper);
     if (!existsSync(file)) return null;
@@ -300,7 +235,7 @@ export abstract class HostRuntimeAdapterBase {
   protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean): string | undefined {
     const command = this.bridgeCommand();
     if (!command || !this.config.runtimeHome) return undefined;
-    const selected = selectHotCheckpoints(snapshot, prompt);
+    const selected = selectHotCheckpoints(snapshot, prompt, this.config.workspaceOnly ? workspaceId : undefined);
     if (!selected.length) return undefined;
     const full = renderHotCheckpoints(selected, HOT_FULL_RENDER_LIMIT);
     const inline = sessionStart ? inlineCheckpointPages(this.identity.runtimeId) : 0;
@@ -322,7 +257,7 @@ export abstract class HostRuntimeAdapterBase {
    * anything was recorded.
    */
   async recordToolEvidence(input: HostAdapterToolEvidenceRequest): Promise<boolean> {
-    if (!taskEvidenceCaptureEnabled()) return false;
+    if (!(this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return false;
     const taskEvidence = evidenceFromToolCall(input.toolName, input.toolInput, input.toolResponse, input.workspaceRoot, nowIso(), input.failed === true);
     if (!taskEvidence.sources.length) return false;
     const profileName = input.profileName ?? this.config.profileName;
@@ -388,7 +323,7 @@ export abstract class HostRuntimeAdapterBase {
       hostVersion: input.hostVersion,
     });
     const rawPreTurnHotMemory = await this.client.readHotMemory(profileName, "all").catch(() => null);
-    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId);
+    const preTurnHotMemory = filterHotMemorySnapshotForWorkspace(rawPreTurnHotMemory, workspaceId, this.config.workspaceOnly, this.config.legacyUnscoped, this.config.legacyBefore);
     const response = await this.client.emitEvent({
       runtime: this.identity.runtimeId,
       profileName,
@@ -421,7 +356,7 @@ export abstract class HostRuntimeAdapterBase {
     const contextPack =
       response.contextPack && typeof response.contextPack === "object" && !Array.isArray(response.contextPack)
         ? response.contextPack
-        : null;
+	: null;
     const packId = contextPack && typeof contextPack.packId === "string" ? contextPack.packId : null;
     const freshness = buildRuntimeStartupFreshness({
       runtime: this.identity.runtimeId,
@@ -439,6 +374,8 @@ export abstract class HostRuntimeAdapterBase {
       runtime: this.identity.runtimeId,
       profileName,
       mode: response.mode,
+      sourceExcerpts: this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled(),
+      workspaceId: this.config.workspaceOnly ? workspaceId : undefined,
       status: null,
       manifest: null,
       inbox: null,

@@ -1752,7 +1752,7 @@ export class RuntimeLifecycleManager {
           } else {
 						if (localOnlyProfile || hotSyncEnabled()) {
 							if (!hasHotMemoryOverride(packRequest)) {
-								packRequest.hotMemorySnapshot = localOnlyProfile ? readLocalHotMemory(this.deps.paths.state, HOT_SCOPE_ALL) : getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).read();
+								packRequest.hotMemorySnapshot = localOnlyProfile ? readLocalHotMemory(this.deps.paths.state, HOT_SCOPE_ALL, profile) : getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName}).read();
 							}
 							contextPack = buildLocalOnlyContextPack(event, packRequest);
 							actions.push(
@@ -1995,7 +1995,7 @@ export class RuntimeLifecycleManager {
 					const partitionScope = workspaceHotScope(scope, event.workspaceId);
 					const client = localOnlyProfile ? null : this.buildClient(profile, secret);
 					const readHot = async (name: string | undefined) => client
-						? client.readHotMemory(name) : readLocalHotMemory(this.deps.paths.state, name);
+						? client.readHotMemory(name) : readLocalHotMemory(this.deps.paths.state, name, profile);
 					const alias = await readHot(scope);
 					const partition = partitionScope === scope ? alias : await readHot(partitionScope);
 					if (client) this.persistClientSession(profileName, secret, client);
@@ -3181,8 +3181,9 @@ export class RuntimeLifecycleManager {
     const { profile, secret } = this.resolveProfile(item.profileName);
     if (item.kind === "hot_write" && isLocalOnlyRuntimeProfile(profile)) {
       const partition = workspaceHotScope(item.payload.scope, item.workspaceId);
-      if (partition !== item.payload.scope) writeLocalHotMemory(this.deps.paths.state, JSON.stringify(item.payload.hotState, null, 2), partition);
-      writeLocalHotMemory(this.deps.paths.state, JSON.stringify(item.payload.hotState, null, 2), item.payload.scope);
+      const content = JSON.stringify(item.payload.hotState, null, 2);
+      if (partition !== item.payload.scope) writeLocalHotMemory(this.deps.paths.state, content, partition, profile);
+      writeLocalHotMemory(this.deps.paths.state, content, item.payload.scope, profile);
       return null;
     }
     const client = this.buildClient(profile, secret);

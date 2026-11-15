@@ -24,6 +24,14 @@ class SecurityBoundaryAdapter extends HostRuntimeAdapterBase {
 }
 
 describe("host adapter hot-memory filtering", () => {
+  it("requires a workspace owner for scoped setup", () => {
+    const snapshot = { scope: "all", scopes: [
+      { scope: "shared", content: "An unscoped legacy note" },
+      { scope: "codex", content: JSON.stringify({ workspaceId: "repo:/fixture", currentGoal: "Scoped finding" }) },
+    ] };
+    expect(filterHotMemorySnapshotForWorkspace(snapshot, "repo:/fixture", true)?.scopes).toEqual([snapshot.scopes[1]]);
+    expect(filterHotMemorySnapshotForWorkspace(snapshot, "repo:/other", true)).toBeNull();
+  });
   it("delivers the newer workspace copy once and accepts newer legacy-client updates", () => {
     const workspaceId = "repo:/tmp/project", runtime = "codex";
     const older = { workspaceId, runtime, updatedAt: "2026-10-20T00:00:00Z", lastTurn: { summary: "old finding" } };

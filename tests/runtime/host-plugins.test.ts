@@ -112,6 +112,7 @@ describe("host plugin files", () => {
 		"1.0.0": "1c6295e2195529599233fae8d5a46b5671ef18998beaf39652e7bc6d955dc4d4",
 		"1.0.1": "1fcdad297292b4ac92cf109a9b29da8f26928710099f028e53c12ae9c45ab5e6",
 		"1.1.0": "afca3f9cf117ed90071a265abd0fa6ebe4d0cb22d1b0e344d20ce70af16d3a9b",
+		"1.2.0": "0fa7de4ce73cb71b04d44a57ceef7707864973ffae5b3dba4dffafd22d5e348d",
 	};
 	it("generated plugin content is pinned to CROSSHEAD_HOST_PLUGIN_VERSION", () => {
 		const files = renderHostPluginFiles(spec) as Record<string, string>;
@@ -142,8 +143,8 @@ describe("host plugin files", () => {
 		for (const host of ["claude-code", "codex"]) {
 			const skill = files[`plugins/${host}/skills/setup/SKILL.md`]!;
 			expect(skill.match(/https?:\/\/[^\s)`]+/g)?.filter((url) => !url.startsWith("https://crosshead.sh"))).toEqual([]);
-			expect(skill).toContain(`--adapter ${host} --workspace-root . --hook-mode plugin`);
-			expect(skill).toContain("ask for explicit consent");
+			expect(skill).toContain(`--scope project --adapter ${host} --workspace-root . --profile WORK --dry-run --json`);
+			expect(skill).toMatch(/ask for explicit\s+consent/);
 		}
 		// The setup skill is user-invoked only.
 		expect(files["plugins/claude-code/skills/setup/SKILL.md"]).toMatch(/^---\n[^]*\ndisable-model-invocation: true\n---\n/);

@@ -1,3 +1,4 @@
+import { isRuntimeProfileForBinding } from "./runtime-profile-validation";
 import { getHotSyncManager, hotSyncEnabled } from "./hot-sync-manager";
 import { isLocalOnlyRuntimeProfile } from "./local-hot-memory";
 import { existsSync } from "fs";
@@ -37,6 +38,7 @@ import {
 	loadDaemonState,
 	loadHealthState,
 	loadProfile,
+	profileFile,
 	loadRuntimeConfig,
 	loadSecret,
 	readJsonLines,
@@ -522,45 +524,55 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 		ok: existsSync(path.join(paths.bin, "onlybotsctl")) && existsSync(path.join(paths.bin, "onlybotsd")),
 		message: "Managed wrapper scripts are installed under the active runtime home’s bin directory",
 	});
+	const selectedName = profileName ?? status.defaultProfile;
+	const selectedProfile = selectedName ? loadProfile(paths, selectedName) : null;
+	const profileValid = selectedName ? isRuntimeProfileForBinding(selectedProfile, selectedName) : false;
 	checks.push({
 		id: "secure_store",
-		ok: status.profile !== null ? existsSync(secretFile(paths, status.profile.name)) : true,
-		message: status.profile ? "Profile secrets are stored in the file-based secure store." : "No profile configured yet.",
+		ok: selectedName ? profileValid && existsSync(secretFile(paths, selectedName)) : true,
+		message: !selectedName ? "No profile configured yet." : profileValid ? "Profile secrets are stored in the file-based secure store." : "Profile configuration is missing or invalid; credentials cannot be checked.",
 	});
 
-	if (status.profile) {
-		const secret = loadSecret(paths, status.profile.name);
-		const hosted = new HostedOnlyBotsClient({
-			apiBase: status.profile.apiBase,
-			npub: status.profile.npub,
-			nsec: secret?.nsec ?? "",
-			session: secret?.session ?? null,
-		});
-		const apiReachable = await hosted.ping().catch(() => false);
-		checks.push({
-			id: "api_base",
-			ok: apiReachable,
-			message: apiReachable ? "Hosted API base is reachable." : "Hosted API base is unreachable; runtime is degraded.",
-		});
+	checks.push({ id: "profile", ok: !selectedName || profileValid,
+		message: !selectedName ? "No profile configured yet." : profileValid ? `Profile ${selectedName} is valid.` :
+			existsSync(profileFile(paths, selectedName)) ? `Profile ${selectedName} is invalid; restore its configuration.` : `Profile ${selectedName} is missing.` });
+	if (selectedProfile && profileValid) {
+		try {
+			const secret = loadSecret(paths, selectedProfile.name);
+			const hosted = new HostedOnlyBotsClient({
+				apiBase: selectedProfile.apiBase,
+				npub: selectedProfile.npub,
+				nsec: secret?.nsec ?? "",
+				session: secret?.session ?? null,
+			});
+			const apiReachable = await hosted.ping().catch(() => false);
+			checks.push({
+				id: "api_base",
+				ok: apiReachable,
+				message: apiReachable ? "Hosted API base is reachable." : "Hosted API base is unreachable; runtime is degraded.",
+			});
 
-		let authValid = false;
-		if (secret) {
-			try {
-				const session = await hosted.ensureSession();
-				saveSecret(paths, status.profile.name, {
-					nsec: secret.nsec,
-					session,
-				});
-				authValid = isSessionFresh(session);
-			} catch {
-				authValid = false;
+			let authValid = false;
+			if (secret) {
+				try {
+					const session = await hosted.ensureSession();
+					saveSecret(paths, selectedProfile.name, {
+						nsec: secret.nsec,
+						session,
+					});
+					authValid = isSessionFresh(session);
+				} catch {
+					authValid = false;
+				}
 			}
+			checks.push({
+				id: "auth",
+				ok: authValid,
+				message: authValid ? "Hosted auth session is valid." : "Hosted auth session is missing or expired.",
+			});
+		} catch {
+			checks.push({ id: "auth", ok: false, message: "Profile credentials are missing or invalid." });
 		}
-		checks.push({
-			id: "auth",
-			ok: authValid,
-			message: authValid ? "Hosted auth session is valid." : "Hosted auth session is missing or expired.",
-		});
 	}
 
 	checks.push({

@@ -17,7 +17,19 @@ describe("native hook capture contract", () => {
   });
 
   it.each(["off", "manual"] as const)("does not promise automatic capture in %s mode", mode => {
-    expect(renderRuntimeStartupContext({ ...empty, actions: [], warnings: [], runtime: "codex", mode })).toBe("");
+    expect(renderRuntimeStartupContext({ ...empty, actions: [], warnings: [], runtime: "codex", mode })).not.toContain("capture your final response");
+  });
+
+  it("suppresses recalled memory while preserving off-mode diagnostics", () => {
+    const context = renderRuntimeStartupContext({
+      ...empty, runtime: "codex", mode: "off", actions: [], warnings: ["Saved warning"],
+      injectedContext: "A previously saved private finding",
+      hotMemorySnapshot: { scopes: [{ scope: "codex", content: "Saved checkpoint" }] },
+    });
+    expect(context).toContain("Mode: off");
+    expect(context).toContain("Saved warning");
+    expect(context).not.toContain("private finding");
+    expect(context).not.toContain("Saved checkpoint");
   });
 
   it("keeps prior findings and capture guidance together", () => {

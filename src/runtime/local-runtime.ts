@@ -29,7 +29,7 @@ import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./o
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
 import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
-import { isLocalOnlyRuntimeProfile, readLocalHotMemory } from "./local-hot-memory";
+import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { searchHotCheckpoints } from "./hot-continuity";
 import {
 	RuntimeLifecycleManager,
@@ -172,7 +172,9 @@ import {
 	writeRuntimeInstallMarker,
 	writeRuntimeLog,
 } from "./runtime-persistence";
-import { nowIso } from "./adapter-utils";
+import { nowIso, parseArgs } from "./adapter-utils";
+export { parseArgs } from "./adapter-utils";
+import { applyWorkspaceHookPlan, planWorkspaceHooks, readWorkspaceHookPolicy, refreshWorkspaceHooks, withWorkspaceSetupLock } from "./workspace-hooks";
 import {
 	cloneOrganizationalWorkerReadiness,
 	normalizeOrganizationalWorkerReadiness,
@@ -457,6 +459,7 @@ export type SetupRuntimeProfileOptions = {
 	workspaceScope?: "repo" | "workspace" | "global";
 	features?: Partial<RuntimeProfile["features"]>;
 	makeDefault?: boolean;
+	createOnly?: boolean;
 };
 
 type GeneratedRuntimeIdentity = {
@@ -758,27 +761,6 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 		},
 		migrationNotes: ["Canary channel is intended for early validation before promoting a release downstream."],
 	},
-};
-
-export const parseArgs = (args: string[]): { positionals: string[]; flags: Record<string, string | boolean> } => {
-	const positionals: string[] = [];
-	const flags: Record<string, string | boolean> = {};
-	for (let index = 0; index < args.length; index += 1) {
-		const value = args[index]!;
-		if (!value.startsWith("--")) {
-			positionals.push(value);
-			continue;
-		}
-		const key = value.slice(2);
-		const next = args[index + 1];
-		if (!next || next.startsWith("--")) {
-			flags[key] = true;
-			continue;
-		}
-		flags[key] = next;
-		index += 1;
-	}
-	return { positionals, flags };
 };
 
 const normalizeBaseUrl = (value: string): string => {
@@ -1212,6 +1194,7 @@ const writeWrapper = (filePath: string, scriptPath: string, home: string): void 
 };
 
 export const installRuntimeCore = async (options: InstallRuntimeCoreOptions = {}): Promise<RuntimePaths> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(options.home));
 	const paths = ensureRuntimeHomeLayout(options.home);
 	writeRuntimeInstallMarker(paths);
 	const config: RuntimeConfig = {
@@ -1284,9 +1267,18 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 		marker.canonicalHome !== canonicalHome) {
 		throw new Error(`Refusing to uninstall ${canonicalHome}: valid Crosshead installation marker is missing`);
 	}
+	const policy = readWorkspaceHookPolicy(paths);
 	const daemon = readDaemonOwnershipState(paths);
-	if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-	rmSync(canonicalHome, { recursive: true, force: true });
+	if (policy) {
+		await withWorkspaceSetupLock(paths, async () => {
+			applyWorkspaceHookPlan(planWorkspaceHooks({ home: paths.home, scope: "manual", targets: [], cleanup: true }));
+			if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
+			rmSync(canonicalHome, { recursive: true, force: true });
+		});
+	} else {
+		if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
+		rmSync(canonicalHome, { recursive: true, force: true });
+	}
 	if (resolvedHome !== canonicalHome) {
 		try { if (lstatSync(resolvedHome).isSymbolicLink()) rmSync(resolvedHome, { force: true }); }
 		catch { /* The alias may disappear with its target. */ }
@@ -1311,6 +1303,7 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	}
 	const paths = ensureRuntimeHomeLayout(options.home);
 	writeRuntimeInstallMarker(paths);
+	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} already exists`);
 	const secret = loadSecret(paths, options.profileName);
 	const localOnlyProfile = isLocalOnlyRuntimeProfile({ apiBase: options.apiBase });
 	const session = localOnlyProfile
@@ -1340,6 +1333,8 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 		createdAt: loadProfile(paths, options.profileName)?.createdAt ?? nowIso(),
 		updatedAt: nowIso(),
 	};
+	preserveLegacyLocalHotOwner(paths.state);
+	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} was created during setup`);
 	saveProfile(paths, profile);
 	saveSecret(paths, options.profileName, {
 		nsec: options.nsec,
@@ -1638,7 +1633,7 @@ export const inspectPublishedRuntimeRelease = async (home?: string): Promise<{ i
 	return { installed: inspectInstalledRuntimeRelease(paths).releaseId, available: parseInstallerReleaseMetadata(script).releaseId };
 };
 
-const reapplyManagedRuntimeRelease = async (
+export const reapplyManagedRuntimeRelease = async (
 	paths: RuntimePaths,
 	release: DownloadedRuntimeRelease,
 	specs: ManagedAdapterReinstallSpec[]
@@ -1649,6 +1644,9 @@ const reapplyManagedRuntimeRelease = async (
 	if (specs.some(spec => spec.name === "hermes" || spec.name === "opencode") && !existsSync(path.join(release.releaseRoot, "dist", "runtime", "native-host-adapter.js"))) {
 		throw new Error("Target release does not support installed Hermes/OpenCode plugins; uninstall those adapters before downgrading");
 	}
+	const workspacePolicy = readWorkspaceHookPolicy(paths);
+	const workspaceModule = path.join(release.releaseRoot, "dist", "runtime", "workspace-hooks.js");
+	if (workspacePolicy && !existsSync(workspaceModule)) throw new Error("This release does not support the configured workspace hooks.");
 	const config = loadRuntimeConfig(paths);
 	const nextRuntime = require(release.localRuntimeModulePath) as {
 		installRuntimeCore: typeof installRuntimeCore;
@@ -1677,6 +1675,7 @@ const reapplyManagedRuntimeRelease = async (
 			};
 			const result = await nextCodex.installCodexAdapter({
 				home: paths.home,
+				deferWorkspaceHookRefresh: true,
 				hostHome: spec.hostHome ?? undefined,
 				profileName: spec.profileName,
 				codexBinary: spec.codexBinary ?? undefined,
@@ -1695,6 +1694,7 @@ const reapplyManagedRuntimeRelease = async (
 			};
 			const result = await nextClaude.installClaudeCodeAdapter({
 				home: paths.home,
+				deferWorkspaceHookRefresh: true,
 				hostHome: spec.hostHome ?? undefined,
 				workspaceRoot: spec.workspaceRoot ?? undefined,
 				profileName: spec.profileName,
@@ -1719,6 +1719,11 @@ const reapplyManagedRuntimeRelease = async (
 			name: "pi",
 			version: result.adapter.version,
 		});
+	}
+
+	if (workspacePolicy) {
+		const scoped = require(workspaceModule) as { refreshWorkspaceHooks: typeof refreshWorkspaceHooks };
+		await scoped.refreshWorkspaceHooks(paths.home);
 	}
 
 	return {
@@ -1785,6 +1790,7 @@ export const updateManagedRuntimeRelease = async (
 		restart?: boolean;
 	} = {}
 ): Promise<RuntimeReleaseUpdateResult> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const previousRelease = inspectInstalledRuntimeRelease(paths);
 	const specs = await collectManagedAdapterReinstallSpecs(paths);
@@ -1852,6 +1858,7 @@ export const updateRuntimeCatalogInstall = async (
 	coreVersion: string;
 	adapters: Array<{ name: RuntimeAdapterName; version: string }>;
 }> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const targetVersion = resolveCoreTargetVersion(channel, versionOverride);
 	await updateRuntimeCoreVersion(paths.home, channel, targetVersion);
@@ -1875,6 +1882,7 @@ export const updateRuntimeCatalogInstall = async (
 };
 
 const updateRuntimeCoreVersion = async (home: string, channel: RuntimeChannel, targetVersion: string): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	ensureCoreCompatibilityForTarget(paths, targetVersion);
 	recordInstalledStateSnapshots(paths, "update");
@@ -1894,6 +1902,7 @@ export const updateRuntimeAdapterVersion = async (
 	adapterName: RuntimeAdapterName,
 	targetVersion: string
 ): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	ensureAdapterCompatibilityForTarget(paths, adapterName, targetVersion);
 	recordInstalledStateSnapshots(paths, "update");
@@ -1908,6 +1917,7 @@ export const updateRuntimeAdapterVersion = async (
 };
 
 export const rollbackRuntimeCoreVersion = async (home: string, targetVersion: string): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const snapshot = loadCoreSnapshot(paths, targetVersion);
 	if (!snapshot) {
@@ -1927,6 +1937,7 @@ export const rollbackRuntimeCoreVersion = async (home: string, targetVersion: st
 };
 
 export const rollbackRuntimeAdapterVersion = async (home: string, adapterName: RuntimeAdapterName, targetVersion: string): Promise<void> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const snapshot = loadAdapterSnapshot(paths, adapterName, targetVersion);
 	if (!snapshot) {
@@ -3256,7 +3267,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		});
 		const profile = loadProfile(this.paths, resolvedProfileName);
 		if (profile && isLocalOnlyRuntimeProfile(profile)) {
-			return readLocalHotMemory(this.paths.state, scope);
+			return readLocalHotMemory(this.paths.state, scope, profile);
 		}
 		if (profile && hotSyncEnabled()) {
 			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
@@ -3292,7 +3303,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			// No hosted index exists for this profile. Answer from local hot memory.
 			const query = typeof payload.query === "string" ? payload.query : "";
 			const workspaceId = typeof payload.local_workspace_id === "string" ? payload.local_workspace_id : null;
-			const results = searchHotCheckpoints(readLocalHotMemory(this.paths.state, "all"), query, Number(payload.top_k) || 10, workspaceId);
+			const results = searchHotCheckpoints(readLocalHotMemory(this.paths.state, "all", profile), query, Number(payload.top_k) || 10, workspaceId);
 			return { scope: "local_hot_memory", query, count: results.length, results };
 		}
 		delete payload.local_workspace_id;

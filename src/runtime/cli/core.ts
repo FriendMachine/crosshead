@@ -5,6 +5,7 @@ import { billingFromCli } from "./billing";
 import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy } from "../runtime-auto-update";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 import { inspectHostHookRegistrations } from "../host-hook-doctor";
+import { inspectWorkspaceHooks, workspaceBindingStatus } from "../workspace-hooks";
 
 export const installCoreFromCli = async (argv: string[], cliScriptPath: string, daemonScriptPath: string): Promise<string> => {
 	const { flags } = parseArgs(argv);
@@ -119,7 +120,8 @@ const parseSetupCliOptions = (
 	apiBase: String(flags["api-base"] ?? flags.apiBase ?? ""),
 	memoryMode: (flags["memory-mode"] as RuntimeMemoryMode | undefined) ?? "assist",
 	workspaceScope: (flags["workspace-scope"] as "repo" | "workspace" | "global" | undefined) ?? "repo",
-	makeDefault: true,
+	makeDefault: flags["no-default"] !== true,
+	createOnly: flags["create-only"] === true,
 });
 
 export const setupProfileFromCli = async (argv: string[]): Promise<string> => {
@@ -205,9 +207,20 @@ export const doctorFromCli = async (argv: string[]): Promise<string> => {
 	// Inside a Claude Code session, CLAUDE_PROJECT_DIR is the project whose settings it loaded.
 	const workspaceRoot =
 		typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : process.env.CLAUDE_PROJECT_DIR || process.cwd();
-	const hookChecks = inspectHostHookRegistrations(home, workspaceRoot);
+	const workspaceHooks = inspectWorkspaceHooks(home, workspaceRoot);
+	const hookChecks = workspaceHooks.error || workspaceHooks.workspaceError
+		? [{ id: "workspace_hooks", ok: false, message: [workspaceHooks.error, workspaceHooks.workspaceError].filter(Boolean).join("; ") }]
+		: workspaceHooks.scope === "legacy"
+		? inspectHostHookRegistrations(home, workspaceRoot)
+		: workspaceHooks.bindings.length
+			? workspaceHooks.bindings.map((binding) => ({
+				id: `${binding.host.replace("-", "_")}_hooks`,
+				ok: binding.configured && binding.memoryMode !== null,
+				message: `profile=${binding.profile}; ${workspaceBindingStatus(binding, workspaceHooks.workspace)}. ${binding.file}`,
+			}))
+			: [{ id: "workspace_hooks", ok: true, message: "No automatic Crosshead hooks apply in this directory." }];
 	const checks = [...daemonReport.checks, ...hookChecks];
-	const report = { ...daemonReport, ok: checks.every((check) => check.ok), checks };
+	const report = { ...daemonReport, ok: checks.every((check) => check.ok), checks, workspaceHooks };
 	return flags.json ? JSON.stringify(report, null, 2) : formatRuntimeDoctor(report);
 };
 
