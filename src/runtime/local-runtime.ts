@@ -28,7 +28,8 @@ import * as tar from "tar";
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
-import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
+import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession } from "./hosted-client";
+export { describeFetchFailure } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { searchHotCheckpoints } from "./hot-continuity";
 import {
@@ -1285,7 +1286,49 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 	}
 };
 
-export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): Promise<RuntimeProfile> => {
+// Node's fetch reports nearly every transport failure as TypeError("fetch failed") and puts the
+// real reason in `cause` (sometimes an AggregateError, one entry per address tried). Only these
+// codes mean "no route to the service right now". A redirect, a certificate problem or a proxy
+// error means something answered, or the address is wrong, and setup must say so instead.
+const NETWORK_UNREACHABLE_CODES = new Set([
+	"ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "EHOSTDOWN", "ETIMEDOUT", "ECONNRESET",
+	"EAI_AGAIN", "EAI_FAIL", "EADDRNOTAVAIL", "EPIPE", "UND_ERR_CONNECT_TIMEOUT",
+	// Sandboxes (macOS seatbelt, Linux seccomp) deny connect() itself with these.
+	"EPERM", "EACCES",
+]);
+const DEFAULT_HOSTED_HOSTS = new Set(["crosshead.sh", "www.crosshead.sh"]);
+
+/**
+ * Why the hosted service could not be reached at all, or null when the failure is something
+ * setup must report: an HTTP answer, a failed challenge, a redirect, a certificate error, or a
+ * host name that does not exist. A proxy that refuses the tunnel counts as unreachable. A name that does not resolve is treated as offline
+ * only for the default service, where it means DNS is unavailable rather than a typo.
+ */
+export const hostedServiceUnreachableReason = (error: unknown, apiBase: string): string | null => {
+	if (!(error instanceof Error) || error instanceof HostedOnlyBotsRequestError) return null;
+	let host = "";
+	try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
+	// This machine cannot be "offline" from itself: any failure to reach a loopback address,
+	// including a timeout, is a wrong port or a stopped or hung local server, which setup must report.
+	if (/^(localhost\.?|.+\.localhost\.?|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\])$/i.test(host)) return null;
+	if (error.name === "TimeoutError" || error.name === "AbortError") return "timed out";
+	if (error.name !== "TypeError" || !/fetch failed/i.test(error.message)) return null;
+	const causes = fetchCauses(error.cause);
+	const codes = causes.flatMap((cause) => (cause.code ? [cause.code] : []));
+	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code));
+	if (unreachable) return unreachable;
+	// Only a proxy that forbids the destination means "not from here". 407 is missing proxy
+	// credentials and 502/504 usually a host the proxy could not resolve: both need fixing, not waiting.
+	const proxy = causes.map((cause) => PROXY_REFUSAL.exec(cause.message)).find(Boolean);
+	if (proxy?.[1] === "403") return "proxy refused the connection (HTTP 403)";
+	if (codes.includes("ENOTFOUND")) return DEFAULT_HOSTED_HOSTS.has(host) ? "ENOTFOUND" : null;
+	return null;
+};
+
+/** The saved profile, plus whether sign-in with the hosted service was put off because it was unreachable. */
+export type SetupRuntimeProfileResult = RuntimeProfile & { registrationDeferred?: true; registrationDeferredReason?: string };
+
+export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): Promise<SetupRuntimeProfileResult> => {
 	try {
 		const decodedNpub = nip19.decode(options.npub);
 		const decodedNsec = nip19.decode(options.nsec);
@@ -1306,6 +1349,10 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} already exists`);
 	const secret = loadSecret(paths, options.profileName);
 	const localOnlyProfile = isLocalOnlyRuntimeProfile({ apiBase: options.apiBase });
+	// Capture and recall are local-first, so a machine with no route to the service (a sandbox, a
+	// CI job, a laptop offline) can still be set up. The client signs in on its first hosted request.
+	let registrationDeferred = false;
+	let registrationDeferredReason: string | undefined;
 	const session = localOnlyProfile
 		? null
 		: await new HostedOnlyBotsClient({
@@ -1313,7 +1360,28 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				npub: options.npub,
 				nsec: options.nsec,
 				session: secret?.session ?? null,
-			}).ensureSession();
+			}).ensureSession().catch((error: unknown) => {
+				const reason = hostedServiceUnreachableReason(error, options.apiBase);
+				if (reason === null) {
+					// Name the real cause: a bare "fetch failed" hides a typo in --api-base or a certificate problem.
+					if (error instanceof TypeError && /fetch failed/i.test(error.message)) {
+						const reason = describeFetchFailure(error);
+						throw new Error(`Could not sign in to ${options.apiBase}: ${reason}. Check --api-base${
+							reason.startsWith("proxy") ? " and the proxy settings (HTTPS_PROXY, NODE_USE_ENV_PROXY)" : ""}.`, { cause: error });
+					}
+					if (error instanceof HostedOnlyBotsRequestError && error.status === 404) {
+						// Keep the type, status and code: --json error output reports them.
+						throw new HostedOnlyBotsRequestError({
+							message: `Could not sign in to ${options.apiBase}: it answered 404, so it is probably not a Crosshead service. Check --api-base.`,
+							status: error.status, code: error.code, details: error.details, retryAfterMs: error.retryAfterMs,
+						});
+					}
+					throw error;
+				}
+				registrationDeferred = true;
+				registrationDeferredReason = reason;
+				return null;
+			});
 
 	const profile: RuntimeProfile = {
 		name: options.profileName,
@@ -1353,8 +1421,9 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 		npub: profile.npub,
 		apiBase: profile.apiBase,
 		memoryMode: profile.memoryMode,
+		...(registrationDeferred ? { registrationDeferred: true, registrationDeferredReason } : {}),
 	});
-	return profile;
+	return registrationDeferred ? { ...profile, registrationDeferred: true, registrationDeferredReason } : profile;
 };
 
 const installManagedAdapter = async (

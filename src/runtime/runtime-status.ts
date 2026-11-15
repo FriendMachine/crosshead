@@ -5,7 +5,7 @@ import { existsSync } from "fs";
 import path from "path";
 import { daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState } from "./daemon-ownership";
 
-import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
+import { describeFetchFailure, describeHostedFailure, HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
 import {
 	readRuntimeDreamReviewHudSnapshot,
 	readRuntimeInboxHudSnapshot,
@@ -536,7 +536,11 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 	checks.push({ id: "profile", ok: !selectedName || profileValid,
 		message: !selectedName ? "No profile configured yet." : profileValid ? `Profile ${selectedName} is valid.` :
 			existsSync(profileFile(paths, selectedName)) ? `Profile ${selectedName} is invalid; restore its configuration.` : `Profile ${selectedName} is missing.` });
-	if (selectedProfile && profileValid) {
+	if (selectedProfile && profileValid && isLocalOnlyRuntimeProfile(selectedProfile)) {
+		// A local-only profile never contacts a hosted service, so there is nothing to reach or sign in to.
+		checks.push({ id: "api_base", ok: true, message: "Local-only profile; no hosted service is used." });
+		checks.push({ id: "auth", ok: true, message: "Local-only profile; hosted sign-in is not used." });
+	} else if (selectedProfile && profileValid) {
 		try {
 			const secret = loadSecret(paths, selectedProfile.name);
 			const hosted = new HostedOnlyBotsClient({
@@ -553,6 +557,7 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 			});
 
 			let authValid = false;
+			let signInError: string | null = null;
 			if (secret) {
 				try {
 					const session = await hosted.ensureSession();
@@ -561,14 +566,28 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 						session,
 					});
 					authValid = isSessionFresh(session);
-				} catch {
+				} catch (error) {
 					authValid = false;
+					// The cause for a network failure; for an HTTP answer only the status and code, never
+					// text the server chose (see describeHostedFailure).
+					const hosted = describeHostedFailure(error);
+					signInError = error instanceof TypeError && /fetch failed/i.test(error.message)
+						? describeFetchFailure(error)
+						: hosted.errorClass === "http" ? `HTTP ${hosted.status}${hosted.code ? ` ${hosted.code}` : ""}`
+							: hosted.errorClass === "Error" ? "the service's sign-in challenge could not be used" : String(hosted.errorClass);
 				}
 			}
+			// A profile set up while the service was unreachable has never held a session. Say so,
+			// rather than reporting an expiry that never happened.
+			const neverSignedIn = Boolean(secret) && !secret?.session;
 			checks.push({
 				id: "auth",
 				ok: authValid,
-				message: authValid ? "Hosted auth session is valid." : "Hosted auth session is missing or expired.",
+				message: authValid
+					? "Hosted auth session is valid."
+					: neverSignedIn
+						? `This profile has no session with ${selectedProfile.apiBase}: it has not signed in yet, or its session was cleared${signInError ? `; sign-in failed: ${signInError}` : ""}.`
+						: `Hosted auth session is missing or expired${signInError ? `; sign-in failed: ${signInError}` : ""}.`,
 			});
 		} catch {
 			checks.push({ id: "auth", ok: false, message: "Profile credentials are missing or invalid." });
