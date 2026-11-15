@@ -1285,17 +1285,49 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 	}
 };
 
+// Node's fetch reports nearly every transport failure as TypeError("fetch failed") and puts the
+// real reason in `cause` (sometimes an AggregateError, one entry per address tried). Only these
+// codes mean "no route to the service right now". A redirect, a certificate problem or a proxy
+// error means something answered, or the address is wrong, and setup must say so instead.
+const NETWORK_UNREACHABLE_CODES = new Set([
+	"ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "EHOSTDOWN", "ETIMEDOUT", "ECONNRESET",
+	"EAI_AGAIN", "EPIPE", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
+]);
+const DEFAULT_HOSTED_HOSTS = new Set(["crosshead.sh", "www.crosshead.sh"]);
+
+const fetchCauseCodes = (error: unknown, depth = 0): string[] => {
+	if (!error || typeof error !== "object" || depth > 4) return [];
+	const record = error as { code?: unknown; cause?: unknown; errors?: unknown };
+	return [
+		...(typeof record.code === "string" ? [record.code] : []),
+		...fetchCauseCodes(record.cause, depth + 1),
+		...(Array.isArray(record.errors) ? record.errors.flatMap((entry) => fetchCauseCodes(entry, depth + 1)) : []),
+	];
+};
+
 /**
- * True when the hosted service could not be reached at all: no route, DNS failure, refused
- * connection or timeout. An HTTP answer, or a challenge that fails validation, is the service
- * (or something posing as it) responding, and is never treated as "offline".
+ * Why the hosted service could not be reached at all, or null when the failure is something
+ * setup must report: an HTTP answer, a failed challenge, a redirect, a certificate or proxy
+ * error, or a host name that does not exist. A name that does not resolve is treated as offline
+ * only for the default service, where it means DNS is unavailable rather than a typo.
  */
-const hostedServiceUnreachable = (error: unknown): boolean =>
-	error instanceof Error && !(error instanceof HostedOnlyBotsRequestError) &&
-	(error.name === "TimeoutError" || error.name === "AbortError" || (error.name === "TypeError" && /fetch failed/i.test(error.message)));
+export const hostedServiceUnreachableReason = (error: unknown, apiBase: string): string | null => {
+	if (!(error instanceof Error) || error instanceof HostedOnlyBotsRequestError) return null;
+	if (error.name === "TimeoutError" || error.name === "AbortError") return "timed out";
+	if (error.name !== "TypeError" || !/fetch failed/i.test(error.message)) return null;
+	const codes = fetchCauseCodes(error.cause);
+	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code));
+	if (unreachable) return unreachable;
+	if (codes.includes("ENOTFOUND")) {
+		let host = "";
+		try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
+		return DEFAULT_HOSTED_HOSTS.has(host) ? "ENOTFOUND" : null;
+	}
+	return null;
+};
 
 /** The saved profile, plus whether sign-in with the hosted service was put off because it was unreachable. */
-export type SetupRuntimeProfileResult = RuntimeProfile & { registrationDeferred?: true };
+export type SetupRuntimeProfileResult = RuntimeProfile & { registrationDeferred?: true; registrationDeferredReason?: string };
 
 export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): Promise<SetupRuntimeProfileResult> => {
 	try {
@@ -1321,6 +1353,7 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	// Capture and recall are local-first, so a machine with no route to the service (a sandbox, a
 	// CI job, a laptop offline) can still be set up. The client signs in on its first hosted request.
 	let registrationDeferred = false;
+	let registrationDeferredReason: string | undefined;
 	const session = localOnlyProfile
 		? null
 		: await new HostedOnlyBotsClient({
@@ -1329,8 +1362,10 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				nsec: options.nsec,
 				session: secret?.session ?? null,
 			}).ensureSession().catch((error: unknown) => {
-				if (!hostedServiceUnreachable(error)) throw error;
+				const reason = hostedServiceUnreachableReason(error, options.apiBase);
+				if (reason === null) throw error;
 				registrationDeferred = true;
+				registrationDeferredReason = reason;
 				return null;
 			});
 
@@ -1372,9 +1407,9 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 		npub: profile.npub,
 		apiBase: profile.apiBase,
 		memoryMode: profile.memoryMode,
-		...(registrationDeferred ? { registrationDeferred: true } : {}),
+		...(registrationDeferred ? { registrationDeferred: true, registrationDeferredReason } : {}),
 	});
-	return registrationDeferred ? { ...profile, registrationDeferred: true } : profile;
+	return registrationDeferred ? { ...profile, registrationDeferred: true, registrationDeferredReason } : profile;
 };
 
 const installManagedAdapter = async (

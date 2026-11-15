@@ -553,6 +553,7 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 			});
 
 			let authValid = false;
+			let signInError: string | null = null;
 			if (secret) {
 				try {
 					const session = await hosted.ensureSession();
@@ -561,14 +562,22 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 						session,
 					});
 					authValid = isSessionFresh(session);
-				} catch {
+				} catch (error) {
 					authValid = false;
+					signInError = error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200);
 				}
 			}
+			// A profile set up while the service was unreachable has never held a session. Say so,
+			// rather than reporting an expiry that never happened.
+			const neverSignedIn = Boolean(secret) && !secret?.session;
 			checks.push({
 				id: "auth",
 				ok: authValid,
-				message: authValid ? "Hosted auth session is valid." : "Hosted auth session is missing or expired.",
+				message: authValid
+					? "Hosted auth session is valid."
+					: neverSignedIn
+						? `This profile has not signed in to ${selectedProfile.apiBase} yet${signInError ? `; sign-in failed: ${signInError}` : ""}.`
+						: `Hosted auth session is missing or expired${signInError ? `; sign-in failed: ${signInError}` : ""}.`,
 			});
 		} catch {
 			checks.push({ id: "auth", ok: false, message: "Profile credentials are missing or invalid." });

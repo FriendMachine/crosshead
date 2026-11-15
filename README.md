@@ -171,9 +171,14 @@ project.
 Setup does not need the hosted service to be reachable. If `crosshead.sh`
 cannot be reached (a sandbox with restricted egress, a CI job, a laptop
 offline), the profile is still created and setup prints `registration:
-deferred`. Capture and recall work locally at once, and the profile signs in
-on its first successful request. A response from the service that refuses the
-sign-in still fails setup.
+deferred` with the network error. Capture and recall work locally at once, and
+the profile tries to sign in on its next hosted request. That sign-in can still
+be refused; `crosshead doctor` reports a profile that has never signed in and
+why.
+
+Setup still fails when the problem is the address rather than the network: a
+response that refuses the sign-in, a redirect, a certificate error, or (for any
+`--api-base` other than `crosshead.sh`) a host name that does not exist.
 
 For a profile that never contacts a hosted service, pass
 `--api-base http://127.0.0.1:0`. Hot memory, hooks and handoff capsules work;

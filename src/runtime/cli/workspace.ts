@@ -11,7 +11,7 @@ import {
 import { isRuntimeProfileName } from "../runtime-env";
 import { uninstallCodexFromCli } from "../codex-adapter";
 import { uninstallClaudeCodeFromCli } from "../claude-code-adapter";
-import { installCoreFromCli, keygenFromCli } from "./core";
+import { installCoreFromCli, keygenFromCli, registrationDeferredLines } from "./core";
 import { ensureQuickstartDaemon, type QuickstartCliPaths } from "./quickstart";
 
 type Flags = Record<string, string | boolean>;
@@ -228,6 +228,7 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
       return flags.json ? JSON.stringify({ applied: false, ...preview }, null, 2) : runtimePlan + profilePlan + describePlan(preview);
     }
     if (flow && !await flow.confirm(runtimePlan + profilePlan + describePlan(preview))) return "Setup cancelled.";
+    const deferred: Array<{ profile: string; apiBase: string; reason: string | null }> = [];
     const daemon = await withWorkspaceSetupLock(paths, async () => {
       assertWorkspacePlanCurrent(plan);
       if (names.some((name) => profileSnapshot(paths, name) !== profilesBefore.get(name))) {
@@ -240,8 +241,9 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
 	await installCoreFromCli([...args, "--channel", channel], scripts.cliScriptPath, scripts.daemonScriptPath);
       }
       for (const name of newProfiles) {
-	await keygenFromCli([...args, "--setup", "--profile", name, "--api-base", apiBase!, "--memory-mode", mode,
-	  "--workspace-scope", "repo", "--no-default", "--create-only", "--json"]);
+	const created = JSON.parse(await keygenFromCli([...args, "--setup", "--profile", name, "--api-base", apiBase!, "--memory-mode", mode,
+	  "--workspace-scope", "repo", "--no-default", "--create-only", "--json"])) as { registrationDeferred?: boolean; registrationDeferredReason?: string | null };
+	if (created.registrationDeferred) deferred.push({ profile: name, apiBase: apiBase!, reason: created.registrationDeferredReason ?? null });
       }
       applyWorkspaceHookPlan(plan);
       const result = enabled(flags, "no-start") ? null : await ensureQuickstartDaemon({
@@ -252,9 +254,12 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
     const inspection = inspectWorkspaceHooks(options.home);
     const checks = scope === "project" ? [...new Set(targets.map((target) => workspaceProjectRoot(target.directory)))] : [process.cwd()];
     return flags.json
-      ? JSON.stringify({ command: "quickstart", applied: true, home: paths.home, profiles: names, daemon, ...inspection }, null, 2)
+      ? JSON.stringify({ command: "quickstart", applied: true, home: paths.home, profiles: names, daemon, ...inspection,
+	  ...(deferred.length > 0 ? { registrationDeferred: deferred } : {}) }, null, 2)
       : [
 	  "Crosshead setup complete.",
+	  ...deferred.flatMap((entry) => registrationDeferredLines({ apiBase: entry.apiBase, registrationDeferred: true, registrationDeferredReason: entry.reason ?? undefined })
+	    .map((line) => `${entry.profile} ${line}`)),
 	  ...(daemon ? [daemon.detail] : []),
 	  formatWorkspaceHookInspection(inspection),
 	  ...checks.map((root) => `Verify from a fresh session with crosshead workspace check --workspace-root ${shellQuote(root)}${options.home ? ` --home ${shellQuote(paths.home)}` : ""}`),
