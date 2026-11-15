@@ -1,4 +1,5 @@
 import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
+import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
 export { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { existsSync } from "fs";
 import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
@@ -548,6 +549,44 @@ export abstract class HostRuntimeAdapterBase {
 
   async compactCompleted(input: HostAdapterCompactEventRequest): Promise<void> {
     await this.emitCompactEvent("compact.completed", input);
+  }
+
+  /**
+   * Saves an accepted handoff import to hot memory as an ordinary finding (not an explicit
+   * remember). The ids come from the capsule, so a repeated import is reported, not duplicated.
+   */
+  async saveImportedHandoff(input: {
+    profileName?: string;
+    workspaceId: string;
+    sessionId: string;
+    hostVersion?: string;
+    eventId: string;
+    turnId: string;
+    goal: string;
+    content: string;
+  }): Promise<{ saved: boolean; duplicate: boolean }> {
+    const response = await this.client.emitEvent({
+      eventId: input.eventId,
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      type: "operator.command",
+      payload: {
+        command: HANDOFF_IMPORT_COMMAND,
+        goal: input.goal,
+        content: input.content,
+        handoffTurnId: input.turnId,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+    const actions = Array.isArray(response?.actions) ? response.actions : [];
+    const duplicate = actions.some((action) => action?.type === "duplicate_event");
+    // Memory mode off or manual writes no hot memory, and a repeat writes nothing new; report what happened.
+    return { saved: actions.some((action) => action?.type === "hot_write"), duplicate };
   }
 
   async remember(input: HostAdapterRememberRequest): Promise<void> {

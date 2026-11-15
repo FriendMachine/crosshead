@@ -1,7 +1,8 @@
 import path from "path";
 import { OnlyBotsLocalRuntimeDaemon, formatHandoffExportResult, formatHandoffImportResult, formatHandoffInspection, formatHandoffOutcomeResult, formatHandoffVerification, parseArgs, parseJsonFlag } from "../local-runtime";
-import { readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { parseAllowedSigners } from "../handoff-import";
+import { workspaceProjectRoot } from "../workspace-identity";
 
 export const handoffFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
@@ -15,6 +16,11 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		const targetRuntime = typeof flags.target === "string" ? flags.target : sourceRuntime === "codex" ? "claude-code" : "codex";
 		if (targetRuntime !== "codex" && targetRuntime !== "claude-code") {
 			throw new Error("handoff export requires --target codex or --target claude-code");
+		}
+		// Check before exporting: the capsule holds transcript text, so an existing file is not replaced silently.
+		const outputFile = typeof flags.output === "string" && flags.output.trim().length > 0 ? path.resolve(flags.output) : null;
+		if (outputFile && existsSync(outputFile) && flags.force !== true) {
+			throw new Error(`${outputFile} already exists; choose another --output path or pass --force to replace it`);
 		}
 		const workspaceRoot =
 			typeof flags["workspace-root"] === "string"
@@ -131,12 +137,13 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 			throw new Error("handoff export requires --source codex or --source claude-code");
 		}
 		// The capsule file is what travels to another machine for `handoff import --file`.
-		if (typeof flags.output === "string" && flags.output.trim().length > 0) {
+		if (outputFile) {
 			const record = result.record as { capsule?: unknown } | undefined;
 			if (!record?.capsule) throw new Error("handoff export produced no capsule to write");
-			const capsuleFile = path.resolve(flags.output);
-			writeFileSync(capsuleFile, `${JSON.stringify(record.capsule, null, 2)}\n`, { mode: 0o600 });
-			result = { ...result, capsuleFile };
+			// mode applies only when the file is created, so a replaced file is narrowed explicitly too.
+			writeFileSync(outputFile, `${JSON.stringify(record.capsule, null, 2)}\n`, { mode: 0o600, flag: flags.force === true ? "w" : "wx" });
+			chmodSync(outputFile, 0o600);
+			result = { ...result, capsuleFile: outputFile };
 		}
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatHandoffExportResult(result as unknown as Record<string, unknown>);
 	}
@@ -161,12 +168,13 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 			profileName,
 			handoffId: handoffId.trim().length > 0 ? handoffId : undefined,
 			capsule: capsule as never,
+			// Hooks key memory by the project root, so run from a subdirectory the import still lands there.
 			workspaceRoot:
 				typeof flags["workspace-root"] === "string"
-					? flags["workspace-root"]
+					? path.resolve(flags["workspace-root"])
 					: typeof flags.workspaceRoot === "string"
-						? flags.workspaceRoot
-						: process.cwd(),
+						? path.resolve(flags.workspaceRoot)
+						: importWorkspaceRoot(process.cwd()),
 			workspaceId:
 				typeof flags["workspace-id"] === "string"
 					? flags["workspace-id"]
@@ -187,6 +195,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 						// An import often happens before any session exists on the receiving machine.
 						: "handoff-import",
 			allowedSigners: parseAllowedSigners(flags["allow-signer"] ?? flags.allowSigner),
+			allowStale: flags["allow-stale"] === true || flags.allowStale === true,
 			accepted: flags.reject ? false : true,
 			note:
 				typeof flags.note === "string"
@@ -398,4 +407,12 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 	}
 
 	throw new Error("handoff requires one of: export, import, outcome, create, verify, explain");
+};
+
+const importWorkspaceRoot = (directory: string): string => {
+	try {
+		return workspaceProjectRoot(directory);
+	} catch {
+		return path.resolve(directory);
+	}
 };

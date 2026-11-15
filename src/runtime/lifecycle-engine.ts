@@ -11,6 +11,7 @@ import type { Npub } from "../protocol/base";
 import { COLLABORATION_EVENT_PRIORITIES } from "../protocol/collaboration";
 import { DURABLE_INBOX_STATUSES, DURABLE_INBOX_TERMINAL_STATUSES } from "../protocol/inbox";
 import { HOT_SCOPE_ALL } from "../protocol/memory";
+import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
 import { captureHotFinding, HOT_TURN_IN_PROGRESS, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
 import { normalizeTaskEvidence } from "./task-evidence";
 import {
@@ -899,8 +900,15 @@ const buildHotState = (
   // capture remains a separate opt-in operation.
   const explicitMemory = event.type === "operator.command" && payload.command === "remember"
     ? asString(payload.content) : null;
+  // An imported handoff capsule is saved as an ordinary hot finding, labelled by its goal. It is
+  // not the user's own explicit save: no "explicitly saved" origin, no warm promotion. Its turn id
+  // is the capsule's, so importing the same capsule again replaces the entry instead of adding one.
+  const importedHandoff = event.type === "operator.command" && payload.command === HANDOFF_IMPORT_COMMAND
+    ? asString(payload.content) : null;
+  const importedHandoffTurnId = importedHandoff ? asString(payload.handoffTurnId) : null;
   const summary =
     explicitMemory ??
+    importedHandoff ??
     continuityOutcome?.summary ??
     asString(payload.summary) ??
     asString(payload.result) ??
@@ -979,17 +987,17 @@ const buildHotState = (
   // A tool result observed mid-turn is checkpointed at once: a session that is
   // killed or crashes never reaches turn.completed, and would otherwise leave nothing.
   const toolEvidence = event.type === "tool.completed" && Boolean(normalizeTaskEvidence(payload.taskEvidence)?.sources.length);
-  if (explicitMemory || toolEvidence || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
+  if (explicitMemory || importedHandoff || toolEvidence || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
     const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
     const assistant = transcript.slice().reverse().map(asRecord).find((item) => item?.role === "assistant");
-    const finding = explicitMemory ?? (toolEvidence ? HOT_TURN_IN_PROGRESS : null) ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
+    const finding = explicitMemory ?? importedHandoff ?? (toolEvidence ? HOT_TURN_IN_PROGRESS : null) ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
     // Lifecycle acknowledgments describe transport, not findings. They must not
     // replace a completed turn's substantive checkpoint.
     const evidence = normalizeTaskEvidence(payload.taskEvidence);
-    if (explicitMemory || evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
+    if (explicitMemory || importedHandoff || evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
       nextState.continuityCheckpoints = updateHotCheckpoints(baseHot.continuityCheckpoints, {
 	runtime: event.runtime, workspaceId: event.workspaceId, sessionId: event.sessionId,
-	turnId: explicitMemory ? event.eventId : event.turnId,
+	turnId: explicitMemory ? event.eventId : importedHandoff ? (importedHandoffTurnId ?? event.eventId) : event.turnId,
 	goal: continuityOutcome?.goal ?? asString(payload.goal) ?? "",
 	...(explicitMemory ? { origin: "remember" as const } : {}),
 	summary: captureHotFinding(finding), occurredAt: event.occurredAt,

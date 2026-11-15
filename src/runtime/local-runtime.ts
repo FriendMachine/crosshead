@@ -5071,7 +5071,13 @@ export const formatHandoffImportResult = (result: Record<string, unknown>): stri
 	const lines = [
 		inspection ? formatHandoffInspection(inspection) : "handoff import",
 		`accepted: ${result.accepted === true ? "yes" : "no"}`,
-		result.savedToHotMemory === true ? "saved: hot memory for this workspace; the next session here starts with it" : null,
+		result.alreadyImported === true
+			? "saved: already imported into this workspace; nothing new was written"
+			: result.savedToHotMemory === true
+				? "saved: hot memory for this workspace; the next session here starts with it"
+				: result.accepted === true
+					? "saved: no; this profile's memory mode does not write hot memory, so the next session will not see it (crosshead memory mode assist)"
+					: null,
 		result.accepted !== true ? rejectionReasonLine(result, receipt) : null,
 		delivery
 			? `delivery: ${String(delivery.primary ?? "unknown")}${

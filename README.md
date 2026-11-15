@@ -162,12 +162,18 @@ a fresh session after choosing either setting.
   ```
 
   Export works with no network; it leaves out hosted memory references it
-  cannot read and says so. Import saves the handoff to hot memory for the
-  current project, so the next session there starts with it. Without `--target`,
-  export addresses the other host (Codex to Claude Code, or the reverse).
+  cannot read and says so. `--output` will not replace an existing file unless
+  you pass `--force`, and the file is readable only by you. Import saves the
+  handoff to hot memory for the project that contains the current directory, so
+  the next session there starts with it. Importing the same capsule again
+  changes nothing. Without `--target`, export addresses the other host (Codex
+  to Claude Code, or the reverse).
 - Import accepts a capsule signed by the profile's own key. A valid signature
   from any other key is rejected unless you pass `--allow-signer <npub>` for a
-  key you trust.
+  key you trust. Capsules older than 30 days are rejected unless you pass
+  `--allow-stale`.
+- Imported text is labelled as an imported handoff, not as something you saved
+  yourself. It is not promoted to warm memory.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
   runtime is doing. Local state lives in `~/.crosshead/state/`.
 
