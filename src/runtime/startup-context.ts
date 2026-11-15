@@ -10,6 +10,13 @@ import type { RuntimeStatus } from "./local-runtime";
 import { compactContinuitySummary } from "./summary-compaction";
 import { renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
 
+
+// The shell form reads the default profile unless told otherwise; name a non-default profile.
+const capabilityLine = (profileName: string): string => {
+  const profile = profileName && profileName !== "default" ? ` --profile ${/^[\w.+-]+$/.test(profileName) ? profileName : `'${profileName.replace(/'/g, "'\\''")}'`}` : "";
+  return `Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: crosshead memory hot${profile} | crosshead memory warm${profile} | crosshead memory search "<query>"${profile})`;
+};
+
 export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi" | "hermes" | "opencode";
 
 type RuntimeStartupContextInput = {
@@ -264,7 +271,7 @@ export const buildRuntimeStartupFreshness = (input: {
   const advisory =
     peerUpdate || !(changedSincePreviousContextRead === true || differentRuntime)
       ? null
-      : "Shared runtime state appears newer or from another runtime; for recent-work or continuity questions, call memory_hot before answering.";
+      : "Shared runtime state appears newer or from another runtime; for recent-work or continuity questions, call memory_hot (shell: crosshead memory hot) before answering.";
   return {
     observedAt: input.observedAt,
     previousContextReadAt,
@@ -741,7 +748,8 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
     formatDreamReviewCommandLine(input.dreamReview),
     formatObligationsTopLine(input.obligations),
     input.warnings.length > 0 ? `Warnings: ${input.warnings.join(" | ")}` : null,
-    capabilitiesNeeded ? "Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve" : null,
+    // Name a command that exists on every host: the capability names alone are not runnable.
+    capabilitiesNeeded ? capabilityLine(input.profileName) : null,
   ].filter((value): value is string => value !== null && value.length > 0);
 
   return trimmedContext.length > 0 ? `${lines.join("\n")}\n\nInjected context:\n${trimmedContext}` : lines.join("\n");

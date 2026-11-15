@@ -1,4 +1,5 @@
 import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
+import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
 export { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { existsSync } from "fs";
 import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
@@ -548,6 +549,45 @@ export abstract class HostRuntimeAdapterBase {
 
   async compactCompleted(input: HostAdapterCompactEventRequest): Promise<void> {
     await this.emitCompactEvent("compact.completed", input);
+  }
+
+  /**
+   * Saves an accepted handoff import to hot memory as an ordinary finding (not an explicit
+   * remember). The turn id comes from the capsule, so a repeated import replaces the earlier entry.
+   */
+  async saveImportedHandoff(input: {
+    profileName?: string;
+    workspaceId: string;
+    sessionId: string;
+    hostVersion?: string;
+    eventId: string;
+    turnId: string;
+    goal: string;
+    content: string;
+  }): Promise<{ saved: boolean; notSavedReason?: string }> {
+    const response = await this.client.emitEvent({
+      eventId: input.eventId,
+      runtime: this.identity.runtimeId,
+      profileName: input.profileName ?? this.config.profileName,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      type: "operator.command",
+      payload: {
+        command: HANDOFF_IMPORT_COMMAND,
+        goal: input.goal,
+        content: input.content,
+        handoffTurnId: input.turnId,
+      },
+      metadata: {
+        hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,
+        adapterVersion: this.config.adapterVersion,
+      },
+    });
+    const actions = Array.isArray(response?.actions) ? response.actions : [];
+    // Memory mode, a continuity pause or policy can each stop the write; report what actually happened and why.
+    const saved = actions.some((action) => action?.type === "hot_write");
+    const skipped = actions.find((action) => action?.status === "skipped" && typeof action.reason === "string");
+    return { saved, ...(saved || !skipped ? {} : { notSavedReason: String(skipped.reason) }) };
   }
 
   async remember(input: HostAdapterRememberRequest): Promise<void> {

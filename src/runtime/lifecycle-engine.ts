@@ -11,6 +11,7 @@ import type { Npub } from "../protocol/base";
 import { COLLABORATION_EVENT_PRIORITIES } from "../protocol/collaboration";
 import { DURABLE_INBOX_STATUSES, DURABLE_INBOX_TERMINAL_STATUSES } from "../protocol/inbox";
 import { HOT_SCOPE_ALL } from "../protocol/memory";
+import { HANDOFF_IMPORT_COMMAND, IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
 import { captureHotFinding, HOT_TURN_IN_PROGRESS, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
 import { normalizeTaskEvidence } from "./task-evidence";
 import {
@@ -899,8 +900,15 @@ const buildHotState = (
   // capture remains a separate opt-in operation.
   const explicitMemory = event.type === "operator.command" && payload.command === "remember"
     ? asString(payload.content) : null;
+  // An imported handoff capsule is saved as an ordinary hot finding, labelled by its goal. It is
+  // not the user's own explicit save: no "explicitly saved" origin, no warm promotion. Its turn id
+  // is the capsule's, so importing the same capsule again replaces the entry instead of adding one.
+  const importedHandoff = event.type === "operator.command" && payload.command === HANDOFF_IMPORT_COMMAND
+    ? asString(payload.content) : null;
+  const importedHandoffTurnId = importedHandoff ? asString(payload.handoffTurnId) : null;
   const summary =
     explicitMemory ??
+    importedHandoff ??
     continuityOutcome?.summary ??
     asString(payload.summary) ??
     asString(payload.result) ??
@@ -979,17 +987,26 @@ const buildHotState = (
   // A tool result observed mid-turn is checkpointed at once: a session that is
   // killed or crashes never reaches turn.completed, and would otherwise leave nothing.
   const toolEvidence = event.type === "tool.completed" && Boolean(normalizeTaskEvidence(payload.taskEvidence)?.sources.length);
-  if (explicitMemory || toolEvidence || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
+  if (explicitMemory || importedHandoff || toolEvidence || event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.ended" || event.type === "compact.started") {
     const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
     const assistant = transcript.slice().reverse().map(asRecord).find((item) => item?.role === "assistant");
-    const finding = explicitMemory ?? (toolEvidence ? HOT_TURN_IN_PROGRESS : null) ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
+    const finding = explicitMemory ?? importedHandoff ?? (toolEvidence ? HOT_TURN_IN_PROGRESS : null) ?? asString(payload.turnSummary) ?? asString(payload.turn_summary) ?? asString(payload.summary) ?? asString(assistant?.content) ?? summary;
     // Lifecycle acknowledgments describe transport, not findings. They must not
     // replace a completed turn's substantive checkpoint.
     const evidence = normalizeTaskEvidence(payload.taskEvidence);
-    if (explicitMemory || evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
-      nextState.continuityCheckpoints = updateHotCheckpoints(baseHot.continuityCheckpoints, {
+    if (explicitMemory || importedHandoff || evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
+      // One imported handoff per workspace: a new import (or the same capsule again, from any
+      // session) replaces the earlier one, so imports cannot crowd out the workspace's own history.
+      const priorCheckpoints = importedHandoff && Array.isArray(baseHot.continuityCheckpoints)
+        ? baseHot.continuityCheckpoints.filter((entry) => {
+          const checkpoint = asRecord(entry);
+          return !(checkpoint && typeof checkpoint.turnId === "string" && checkpoint.turnId.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) &&
+            (checkpoint.workspaceId ?? null) === (event.workspaceId ?? null));
+        })
+        : baseHot.continuityCheckpoints;
+      nextState.continuityCheckpoints = updateHotCheckpoints(priorCheckpoints, {
 	runtime: event.runtime, workspaceId: event.workspaceId, sessionId: event.sessionId,
-	turnId: explicitMemory ? event.eventId : event.turnId,
+	turnId: explicitMemory ? event.eventId : importedHandoff ? (importedHandoffTurnId ?? event.eventId) : event.turnId,
 	goal: continuityOutcome?.goal ?? asString(payload.goal) ?? "",
 	...(explicitMemory ? { origin: "remember" as const } : {}),
 	summary: captureHotFinding(finding), occurredAt: event.occurredAt,
@@ -1985,7 +2002,11 @@ export class RuntimeLifecycleManager {
 						// turn are superseded by the newer one, so one turn never crowds
 						// earlier sessions out of the bounded synced document.
 						const sameTurn=last ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && c.summary === HOT_TURN_IN_PROGRESS && c.sessionId === event.sessionId && c.turnId === (typeof last.turnId === "string" ? last.turnId : event.turnId) && typeof c.id === "string").map(c=>String(c!.id)) : [];
-						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn])];
+						// An import replaces any earlier synced import in this scope (the scope is already per
+						// runtime and workspace), so repeats and new capsules never pile up large records.
+						const lastTurnId=last && typeof last.turnId === "string" ? last.turnId : null;
+						const sameImport=lastTurnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && typeof c.turnId === "string" && c.turnId.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) && typeof c.id === "string" && c.id !== event.eventId).map(c=>String(c!.id)) : [];
+						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn,...sameImport])];
 						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints) {
 						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(supersededIds.length ? {supersedes:supersededIds} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));

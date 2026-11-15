@@ -5,6 +5,7 @@ import path from "path";
 
 import type { OperatorWorkspaceManifest } from "./operator-policy";
 import { LocalRuntimeClient } from "./local-client";
+import { handoffAgeRejection, handoffImportIds, handoffSignerRejection, importedHandoffGoal, optionalHostedRead, renderImportedHandoffMemory } from "./handoff-import";
 import {
   ONLYBOTS_RUNTIME_CORE_VERSION,
   ensureRuntimeHomeLayout,
@@ -188,7 +189,7 @@ export type CodexContinuityCapture = ContinuityCaptureBase & {
 
 export type CodexAdapterHandoffCreateRequest = Omit<CodexContinuityCapture, "runtime"> & {
   profileName?: string;
-  targetRuntime?: "claude-code";
+  targetRuntime?: "codex" | "claude-code";
   maxBytes?: number;
 };
 
@@ -199,6 +200,8 @@ export type CodexAdapterHandoffCreateResult = {
   plainTextSummary: string;
   restatementComparison: ContinuityRestatementComparison;
   record: HandoffStoredRecord;
+  /** Parts of the export that could not be read, such as hosted memory references while offline. */
+  warnings: string[];
 };
 
 export type CodexAdapterHandoffImportRequest = {
@@ -212,6 +215,10 @@ export type CodexAdapterHandoffImportRequest = {
   sessionId: string;
   accepted?: boolean;
   note?: string;
+  /** Signers accepted in addition to this profile's own key. */
+  allowedSigners?: string[];
+  /** Import a capsule older than the age limit. */
+  allowStale?: boolean;
 };
 
 export type CodexAdapterHandoffImportResult = {
@@ -224,6 +231,12 @@ export type CodexAdapterHandoffImportResult = {
   restatementComparison: ContinuityRestatementComparison | null;
   receipt: HandoffReceipt | null;
   record: HandoffStoredRecord | null;
+  /** True when the handoff was saved to hot memory for the next session in the workspace. */
+  savedToHotMemory?: boolean;
+  /** The workspace the import was saved under; sessions see it only when their hooks use the same one. */
+  savedWorkspaceId?: string;
+  /** Why nothing was written, when savedToHotMemory is false. */
+  notSavedReason?: string;
 };
 
 
@@ -988,10 +1001,13 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     const needsIdentity = !input.identity?.npub;
     const needsPolicyRef = !input.policy?.policyRef;
 
+    const targetRuntime = input.targetRuntime ?? "claude-code";
+    const targetLabel = targetRuntime === "codex" ? "Codex" : "Claude Code";
+    const warnings: string[] = [];
     const [hot, warm, judgment, status] = await Promise.all([
       needsHotSummary ? this.client.readHotMemory(profileName) : Promise.resolve(null),
-      needsWarmIds ? this.client.listWarmMemory(profileName, { status: "active" }) : Promise.resolve(null),
-      needsJudgment ? this.client.inspectContinuityJudgment(profileName) : Promise.resolve(null),
+      optionalHostedRead(needsWarmIds, () => this.client.listWarmMemory(profileName, { status: "active" }), "Warm memory", warnings),
+      optionalHostedRead(needsJudgment, () => this.client.inspectContinuityJudgment(profileName), "Continuity judgment", warnings),
       needsIdentity || needsPolicyRef ? this.client.status(profileName) : Promise.resolve(null),
     ]);
 
@@ -1043,7 +1059,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
           input.reasoning?.unresolvedRisks ?? (projectModel ? summarizeJudgmentEntries(projectModel.unresolvedRisks) : []),
         portabilityNotes:
           input.reasoning?.portabilityNotes ?? [
-            "Exported from the live Codex runtime so Claude Code can resume with explicit continuity gaps.",
+            `Exported from the live Codex runtime so ${targetLabel} can resume with explicit continuity gaps.`,
           ],
         nextAction: input.reasoning?.nextAction ?? null,
       },
@@ -1067,9 +1083,9 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       delegation: {
         whyTransfer:
           input.delegation?.whyTransfer ??
-          "Continue execution in Claude Code while preserving the current Crosshead continuity state.",
+          `Continue execution in ${targetLabel} while preserving the current Crosshead continuity state.`,
         requestedCapabilities: input.delegation?.requestedCapabilities ?? ["repo_execution", "tool_use"],
-        recommendedTarget: "claude-code",
+        recommendedTarget: targetRuntime,
       },
       economics: {
         budgetRemainingSats: input.economics?.budgetRemainingSats ?? null,
@@ -1084,10 +1100,10 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     };
 
     const capture = codexContinuityTranslationContract.captureContext(enrichedCapture);
-    const translation = codexContinuityTranslationContract.normalizeToContinuityIr(capture, input.targetRuntime ?? "claude-code");
-    const materialization = codexContinuityTranslationContract.materializeFromContinuityIr(translation, "claude-code");
-    const plainTextSummary = buildPlainTextContinuationSummary(translation, "claude-code");
-    const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, "claude-code");
+    const translation = codexContinuityTranslationContract.normalizeToContinuityIr(capture, targetRuntime);
+    const materialization = codexContinuityTranslationContract.materializeFromContinuityIr(translation, targetRuntime);
+    const plainTextSummary = buildPlainTextContinuationSummary(translation, targetRuntime);
+    const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, targetRuntime);
     const created = (await this.client.createHandoff({
       translation,
       maxBytes: input.maxBytes,
@@ -1104,18 +1120,21 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       plainTextSummary,
       restatementComparison,
       record,
+      warnings,
     };
   }
 
   async importHandoff(input: CodexAdapterHandoffImportRequest): Promise<CodexAdapterHandoffImportResult> {
-    const workspaceRoot = String(input.workspaceRoot ?? "").trim();
+    const rawWorkspaceRoot = String(input.workspaceRoot ?? "").trim();
+    // Hooks key memory by absolute project path, so a relative root would save where no session looks.
+    const workspaceRoot = rawWorkspaceRoot ? path.resolve(rawWorkspaceRoot) : "";
     const workspaceId = input.workspaceId ?? `repo:${workspaceRoot}`;
     const sessionId = String(input.sessionId ?? "").trim();
     const handoffId = sanitizeString(input.handoffId);
     const accepted = input.accepted !== false;
     const rejectionReason = (reason: string): string => (input.note ? `${reason} ${input.note}` : reason);
 
-    const rejectStoredHandoff = async (reason: string): Promise<CodexAdapterHandoffImportResult> => {
+    const rejectStoredHandoff = async (reason: string, known?: { verification?: HandoffVerificationResult; sourceRuntime?: string }): Promise<CodexAdapterHandoffImportResult> => {
       const baseVerification: HandoffVerificationResult = {
         valid: false,
         signatureValid: false,
@@ -1123,16 +1142,21 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
         withinBudget: false,
         errors: [reason],
         warnings: [],
-        sourceRuntime: "claude-code",
+        sourceRuntime: (known?.sourceRuntime ?? "claude-code") as HandoffVerificationResult["sourceRuntime"],
         targetRuntime: "codex",
         signedBy: null,
         sizeBytes: null,
       };
+      // A capsule that verified but was refused keeps its real verification details, marked invalid
+      // for this import with the reason, so JSON callers never see accepted: false beside valid: true.
+      const refusedVerification: HandoffVerificationResult = known?.verification
+        ? { ...known.verification, valid: false, errors: [...known.verification.errors, reason] }
+        : baseVerification;
       const baseInspection: HandoffInspection = {
         handoffId: handoffId ?? "unknown",
         capsuleVersion: "unknown",
         capsuleKind: "unknown",
-        sourceRuntime: "claude-code",
+        sourceRuntime: (known?.sourceRuntime ?? "claude-code") as HandoffInspection["sourceRuntime"],
         targetRuntime: "codex",
         signedBy: "",
         createdAt: nowIso(),
@@ -1177,7 +1201,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
         return {
           handoffId: null,
           accepted: false,
-          verification: baseVerification,
+          verification: refusedVerification,
           inspection: baseInspection,
           materialization: null,
           plainTextSummary: null,
@@ -1204,7 +1228,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       return {
         handoffId,
         accepted: false,
-        verification: updated.validation,
+        verification: known?.verification ? refusedVerification : updated.validation,
         inspection: updated.inspection,
         materialization: null,
         plainTextSummary: null,
@@ -1249,11 +1273,23 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     if (!verification.valid) {
       return rejectStoredHandoff(`Codex handoff import rejected an invalid capsule: ${verification.errors.join(" | ")}`);
     }
-    if (capsule.sourceRuntime !== "claude-code") {
-      return rejectStoredHandoff(`Codex import only accepts Claude Code-origin handoffs, received ${capsule.sourceRuntime}`);
-    }
     if (capsule.targetRuntime !== "codex") {
-      return rejectStoredHandoff(`Codex import requires targetRuntime=codex, received ${capsule.targetRuntime}`);
+      return rejectStoredHandoff(`Codex import requires targetRuntime=codex, received ${capsule.targetRuntime}`, { verification, sourceRuntime: capsule.sourceRuntime });
+    }
+    // The signature shows the capsule is intact. Whose capsule it is must be checked separately.
+    const ownNpub = await this.client.status(input.profileName ?? this.config.profileName).then(
+      (status) => (status?.profile && typeof status.profile === "object" && !Array.isArray(status.profile)
+        ? sanitizeString((status.profile as Record<string, unknown>).npub) : null),
+      () => null
+    );
+    const signerRejection = handoffSignerRejection(verification.signedBy, ownNpub, input.allowedSigners ?? []);
+    const known = { verification, sourceRuntime: capsule.sourceRuntime };
+    if (accepted && signerRejection) {
+      return rejectStoredHandoff(`Codex handoff import rejected the signer: ${signerRejection}`, known);
+    }
+    const ageRejection = handoffAgeRejection(capsule.createdAt, new Date(), undefined, input.allowStale === true);
+    if (accepted && ageRejection) {
+      return rejectStoredHandoff(`Codex handoff import rejected a stale capsule: ${ageRejection}`, known);
     }
     if (!accepted) {
       return rejectStoredHandoff(input.note?.trim().length ? input.note.trim() : "Operator rejected the handoff during Codex import.");
@@ -1271,6 +1307,30 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     const materialization = codexContinuityTranslationContract.materializeFromContinuityIr(translation, "codex");
     const plainTextSummary = buildPlainTextContinuationSummary(translation, "codex");
     const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, "codex");
+    // Printing the state is not delivery. Saving it to hot memory is what makes the next session
+    // in this workspace start with it, on this machine or after sync. It is saved before the handoff
+    // is acknowledged, so a failed save never leaves a record that says the import succeeded.
+    const ids = handoffImportIds(capsule.capsuleId, workspaceId, "codex", input.profileName ?? this.config.profileName);
+    const saved = await this.saveImportedHandoff({
+      profileName: input.profileName,
+      workspaceId,
+      sessionId,
+      hostVersion: input.hostVersion,
+      ...ids,
+      goal: importedHandoffGoal({ sourceRuntime: capsule.sourceRuntime, objective: capsule.continuityIr.task.objective, createdAt: capsule.createdAt }),
+      content: renderImportedHandoffMemory({
+        sourceRuntime: capsule.sourceRuntime,
+        signedBy: verification.signedBy,
+        ownNpub,
+        startupContext: materialization.startupContext,
+      }),
+    });
+    // A capsule that was not saved has not been handed off: refuse it (the operator can retry once
+    // memory can be written), so neither the record nor the exit status claims success.
+    if (!saved.saved) {
+      return rejectStoredHandoff(`Codex handoff import could not save the handoff: ${saved.notSavedReason ?? "hot memory was not written"}`, known);
+    }
+
     const updated =
       handoffId === null
         ? null
@@ -1293,6 +1353,9 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     return {
       handoffId,
       accepted: true,
+      savedToHotMemory: saved.saved,
+      savedWorkspaceId: workspaceId,
+      ...(saved.notSavedReason ? { notSavedReason: saved.notSavedReason } : {}),
       verification,
       inspection,
       materialization,
