@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -86,7 +85,7 @@ describe("setup when the hosted service cannot be reached", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(typo));
     const home = newHome();
     await expect(setupRuntimeProfile({ home, profileName: "default", apiBase: "https://crossheed.sh", ...identity(), makeDefault: true }))
-      .rejects.toThrow("Could not sign in to https://crossheed.sh: ENOTFOUND: getaddrinfo ENOTFOUND crossheed.sh. Check --api-base.");
+      .rejects.toThrow("Could not sign in to https://crossheed.sh: getaddrinfo ENOTFOUND crossheed.sh. Check --api-base.");
     expect(loadProfile(resolveRuntimePaths(home), "default")).toBeNull();
   });
 });
@@ -103,8 +102,10 @@ describe("doctor after a deferred setup", () => {
     )));
     const auth = (await buildRuntimeDoctorDirect(home, "default")).checks.find((check) => check.id === "auth");
     expect(auth?.ok).toBe(false);
-    expect(auth?.message).toContain("has not signed in to https://crosshead.sh yet");
-    expect(auth?.message).toContain("registration closed");
+    expect(auth?.message).toContain("has no session with https://crosshead.sh");
+    // Status and code only: text chosen by the server is not copied into local output.
+    expect(auth?.message).toContain("sign-in failed: HTTP 403 forbidden");
+    expect(auth?.message).not.toContain("registration closed");
   });
 });
 
@@ -138,10 +139,14 @@ describe("classifying hosted sign-in failures", () => {
       cause: Object.assign(new Error("Proxy response (403) !== 200 when HTTP Tunneling"), { code: "UND_ERR_ABORTED" }),
     }));
     expect(hostedServiceUnreachableReason(proxyRefusal, "https://crosshead.sh")).toBe("proxy refused the connection (HTTP 403)");
+    // A sandbox that denies connect() itself.
+    expect(hostedServiceUnreachableReason(failed(coded("EPERM")), "https://crosshead.sh")).toBe("EPERM");
+    expect(hostedServiceUnreachableReason(failed(coded("EADDRNOTAVAIL")), "https://crosshead.sh")).toBe("EADDRNOTAVAIL");
   });
 
   it("names the underlying cause of a fetch failure", () => {
-    expect(describeFetchFailure(failed(coded("CERT_HAS_EXPIRED")))).toBe("CERT_HAS_EXPIRED: CERT_HAS_EXPIRED");
+    expect(describeFetchFailure(failed(Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" })))).toBe("CERT_HAS_EXPIRED: certificate has expired");
+    expect(describeFetchFailure(failed(Object.assign(new Error("getaddrinfo ENOTFOUND x.test"), { code: "ENOTFOUND" })))).toBe("getaddrinfo ENOTFOUND x.test");
     expect(describeFetchFailure(failed(new Error("unexpected redirect")))).toBe("unexpected redirect");
     expect(describeFetchFailure(failed(undefined))).toBe("fetch failed");
   });
@@ -151,6 +156,14 @@ describe("classifying hosted sign-in failures", () => {
     expect(hostedServiceUnreachableReason(failed(coded("CERT_HAS_EXPIRED")), "https://crosshead.sh")).toBeNull();
     expect(hostedServiceUnreachableReason(failed(coded("ERR_TLS_CERT_ALTNAME_INVALID")), "https://crosshead.sh")).toBeNull();
     expect(hostedServiceUnreachableReason(failed(undefined), "https://crosshead.sh")).toBeNull();
+    // Nothing listening on this machine is a wrong port or a stopped local server.
+    expect(hostedServiceUnreachableReason(failed(coded("ECONNREFUSED")), "http://127.0.0.1:8788")).toBeNull();
+    expect(hostedServiceUnreachableReason(failed(coded("ECONNREFUSED")), "http://localhost:8788")).toBeNull();
+    // A listener that accepts and drops the connection answered; so did a proxy asking for credentials or failing upstream.
+    expect(hostedServiceUnreachableReason(failed(coded("UND_ERR_SOCKET")), "https://crosshead.sh")).toBeNull();
+    for (const status of ["407", "502", "504"]) {
+      expect(hostedServiceUnreachableReason(failed(new Error(`Proxy response (${status}) !== 200 when HTTP Tunneling`)), "https://crosshead.sh")).toBeNull();
+    }
     expect(hostedServiceUnreachableReason(new HostedOnlyBotsRequestError({ message: "nope", status: 503 }), "https://crosshead.sh")).toBeNull();
     expect(hostedServiceUnreachableReason(new Error("Invalid challenge"), "https://crosshead.sh")).toBeNull();
   });
@@ -158,18 +171,9 @@ describe("classifying hosted sign-in failures", () => {
 
 describe("guided project setup with no connection", () => {
   const cliScript = path.resolve(__dirname, "../../dist/runtime/cli.js");
+  // npm test builds dist first; a stale build would test old code.
 
-  // A port that was free a moment ago, so a connection to it is refused. (Fetch blocks low ports
-  // such as 1 outright with "bad port", which is rightly not treated as offline.)
-  const closedPort = () => new Promise<number>((resolve) => {
-    const server = createServer().listen(0, "127.0.0.1", () => {
-      const { port } = server.address() as { port: number };
-      server.close(() => resolve(port));
-    });
-  });
-
-  it("reports the deferred sign-in instead of only 'setup complete', using Node's real refused-connection error", async () => {
-    const apiBase = `http://127.0.0.1:${await closedPort()}`;
+  it("reports the deferred sign-in instead of only 'setup complete', in text and JSON", () => {
     const root = realpathSync(newHome());
     const home = path.join(root, "runtime");
     const project = path.join(root, "project");
@@ -177,16 +181,23 @@ describe("guided project setup with no connection", () => {
     expect(spawnSync("git", ["init", "-q", project]).status).toBe(0);
     mkdirSync(path.join(root, "codex"), { recursive: true });
     mkdirSync(path.join(root, "claude"), { recursive: true });
-    // Nothing listens on port 1, so the connection is refused immediately.
-    const run = spawnSync(process.execPath, [
-      cliScript, "quickstart", "--scope", "project", "--adapter", "both", "--workspace-root", project, "--profile", "work",
-      "--api-base", apiBase, "--no-start", "--codex-home", path.join(root, "codex"), "--claude-home", path.join(root, "claude"),
-      "--home", home,
+    // The real CLI, with fetch replaced before it loads so no request leaves the machine: every
+    // connection is refused the way Node reports it when there is no route to the service.
+    const stub = path.join(root, "offline-fetch.mjs");
+    writeFileSync(stub, `globalThis.fetch = async () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED 203.0.113.1:443"), { code: "ECONNREFUSED" }) }); };\n`);
+    const quickstart = (profile: string, ...extra: string[]) => spawnSync(process.execPath, [
+      "--import", stub, cliScript, "quickstart", "--scope", "project", "--adapter", "both", "--workspace-root", project, "--profile", profile,
+      "--api-base", "https://crosshead.sh", "--no-start", "--codex-home", path.join(root, "codex"), "--claude-home", path.join(root, "claude"),
+      "--home", home, ...extra,
     ], { env: { PATH: process.env.PATH, CROSSHEAD_HOOK_AUTOSTART: "0" }, encoding: "utf8", timeout: 20000 });
+    const run = quickstart("work");
     expect(run.status, run.stderr || run.stdout).toBe(0);
     expect(run.stdout).toContain("Crosshead setup complete.");
     expect(run.stdout).toContain("work registration: deferred");
     expect(run.stdout).toContain("ECONNREFUSED");
-    expect(loadProfile(resolveRuntimePaths(home), "work")).toMatchObject({ apiBase });
+    const json = quickstart("second", "--json");
+    expect(json.status, json.stderr || json.stdout).toBe(0);
+    expect(JSON.parse(json.stdout)).toMatchObject({ registrationDeferred: true, registrationDeferredReason: "ECONNREFUSED" });
+    expect(loadProfile(resolveRuntimePaths(home), "work")).toMatchObject({ apiBase: "https://crosshead.sh" });
   }, 30_000);
 });

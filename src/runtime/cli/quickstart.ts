@@ -205,17 +205,21 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 
 	const config = loadRuntimeConfig(runtimePaths);
 	const existingProfile = loadProfile(runtimePaths, profileName);
+	let registration: { registrationDeferred: true; registrationDeferredReason: string | null } | null = null;
 	if (!existingProfile) {
 		if (!apiBase) {
 			throw new Error("quickstart requires --api-base <url> when the selected profile does not exist");
 		}
 		const profileOutput = await keygenFromCli([...profileArgs, "--setup", "--json"]);
-		const parsed = JSON.parse(profileOutput) as { npub?: string; apiBase?: string; registrationDeferred?: boolean };
+		const parsed = JSON.parse(profileOutput) as { npub?: string; apiBase?: string; registrationDeferred?: boolean; registrationDeferredReason?: string | null };
+		if (parsed.registrationDeferred) registration = { registrationDeferred: true, registrationDeferredReason: parsed.registrationDeferredReason ?? null };
 		steps.push({
 			id: "profile",
 			ok: true,
 			detail: `configured ${profileName} for ${parsed.apiBase ?? apiBase} with generated runtime identity ${parsed.npub ?? "unknown"}${
-				parsed.registrationDeferred ? "; the service could not be reached, so sign-in is deferred until it can (local capture and recall work now)" : ""
+				parsed.registrationDeferred
+					? `; the service could not be reached${parsed.registrationDeferredReason ? ` (${parsed.registrationDeferredReason})` : ""}, so sign-in is deferred until it can (local capture and recall work now)`
+					: ""
 			}`,
 		});
 	} else {
@@ -307,6 +311,7 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 		firstValueCommand: `crosshead memory hot --home ${runtimePaths.home} --profile ${profileName}`,
 		billingCommand: `crosshead billing status --home ${runtimePaths.home} --profile ${profileName}`,
 		paymentBoundary: "Agents may create/show checkout links or invoices, but a human must submit payment.",
+		...(registration ?? {}),
 	};
 	return flags.json ? JSON.stringify(result, null, 2) : formatQuickstart(result);
 };

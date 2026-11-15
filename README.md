@@ -177,8 +177,13 @@ be refused; `crosshead doctor` reports a profile that has never signed in and
 why.
 
 Setup still fails when the problem is the address rather than the network: a
-response that refuses the sign-in, a redirect, a certificate error, or (for any
-`--api-base` other than `crosshead.sh`) a host name that does not exist.
+response that refuses the sign-in, a redirect, a certificate error, a refused
+connection to this machine (`localhost`, `127.0.0.1`), a proxy asking for
+credentials or failing upstream, or (for any `--api-base` other than
+`crosshead.sh`) a host name that does not exist. A proxy that refuses the
+destination (HTTP 403) counts as unreachable. A proxy that intercepts TLS and
+answers with its own page or certificate is not recognised and fails setup;
+use the local-only profile below in that case.
 
 For a profile that never contacts a hosted service, pass
 `--api-base http://127.0.0.1:0`. Hot memory, hooks and handoff capsules work;

@@ -246,6 +246,29 @@ export class HostedOnlyBotsRequestError extends Error {
   }
 }
 
+export type FetchCause = { code: string | null; message: string };
+export const fetchCauses = (error: unknown, depth = 0): FetchCause[] => {
+	if (!error || typeof error !== "object" || depth > 4) return [];
+	const record = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+	return [
+		{ code: typeof record.code === "string" ? record.code : null, message: typeof record.message === "string" ? record.message : "" },
+		...fetchCauses(record.cause, depth + 1),
+		...(Array.isArray(record.errors) ? record.errors.flatMap((entry) => fetchCauses(entry, depth + 1)) : []),
+	];
+};
+// An egress proxy that refuses the tunnel (a sandbox allowlist, a corporate proxy) is the network
+// saying "not from here", the same as a refused connection.
+export const PROXY_REFUSAL = /Proxy response \((\d{3})\) !== 200 when HTTP Tunneling/;
+
+/** A one-line description of why a fetch failed, for error messages: the deepest specific cause. */
+export const describeFetchFailure = (error: unknown): string => {
+	const causes = error instanceof Error ? fetchCauses(error.cause) : [];
+	const specific = causes.filter((cause) => cause.code || cause.message).at(-1);
+	if (!specific) return error instanceof Error ? error.message : String(error);
+	const message = specific.code && specific.message.includes(specific.code) ? specific.message : [specific.code, specific.message].filter(Boolean).join(": ");
+	return message.slice(0, 200);
+};
+
 /**
  * Classify a failed hosted request for local diagnostics without copying its
  * message, URL, headers or body: a timeout, an HTTP status/code, or an error name.

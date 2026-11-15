@@ -28,7 +28,8 @@ import * as tar from "tar";
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
-import { HostedOnlyBotsClient, HostedOnlyBotsRequestError, type HostedSession } from "./hosted-client";
+import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession } from "./hosted-client";
+export { describeFetchFailure } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { searchHotCheckpoints } from "./hot-continuity";
 import {
@@ -1291,31 +1292,11 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 // error means something answered, or the address is wrong, and setup must say so instead.
 const NETWORK_UNREACHABLE_CODES = new Set([
 	"ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "EHOSTDOWN", "ETIMEDOUT", "ECONNRESET",
-	"EAI_AGAIN", "EPIPE", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
+	"EAI_AGAIN", "EAI_FAIL", "EADDRNOTAVAIL", "EPIPE", "UND_ERR_CONNECT_TIMEOUT",
+	// Sandboxes (macOS seatbelt, Linux seccomp) deny connect() itself with these.
+	"EPERM", "EACCES",
 ]);
 const DEFAULT_HOSTED_HOSTS = new Set(["crosshead.sh", "www.crosshead.sh"]);
-
-type FetchCause = { code: string | null; message: string };
-const fetchCauses = (error: unknown, depth = 0): FetchCause[] => {
-	if (!error || typeof error !== "object" || depth > 4) return [];
-	const record = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
-	return [
-		{ code: typeof record.code === "string" ? record.code : null, message: typeof record.message === "string" ? record.message : "" },
-		...fetchCauses(record.cause, depth + 1),
-		...(Array.isArray(record.errors) ? record.errors.flatMap((entry) => fetchCauses(entry, depth + 1)) : []),
-	];
-};
-// An egress proxy that refuses the tunnel (a sandbox allowlist, a corporate proxy) is the network
-// saying "not from here", the same as a refused connection.
-const PROXY_REFUSAL = /Proxy response \((\d{3})\) !== 200 when HTTP Tunneling/;
-
-/** A one-line description of why a fetch failed, for error messages: the deepest specific cause. */
-export const describeFetchFailure = (error: unknown): string => {
-	const causes = error instanceof Error ? fetchCauses(error.cause) : [];
-	const specific = causes.filter((cause) => cause.code || cause.message).at(-1);
-	if (!specific) return error instanceof Error ? error.message : String(error);
-	return [specific.code, specific.message].filter(Boolean).join(": ").slice(0, 200);
-};
 
 /**
  * Why the hosted service could not be reached at all, or null when the failure is something
@@ -1329,15 +1310,17 @@ export const hostedServiceUnreachableReason = (error: unknown, apiBase: string):
 	if (error.name !== "TypeError" || !/fetch failed/i.test(error.message)) return null;
 	const causes = fetchCauses(error.cause);
 	const codes = causes.flatMap((cause) => (cause.code ? [cause.code] : []));
-	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code));
+	let host = "";
+	try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
+	// Nothing listening on this machine is a wrong port or a stopped local server, not being offline.
+	const loopback = /^(localhost|127(\.\d{1,3}){3}|\[?::1\]?)$/i.test(host);
+	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code) && !(loopback && code === "ECONNREFUSED"));
 	if (unreachable) return unreachable;
+	// Only a proxy that forbids the destination means "not from here". 407 is missing proxy
+	// credentials and 502/504 usually a host the proxy could not resolve: both need fixing, not waiting.
 	const proxy = causes.map((cause) => PROXY_REFUSAL.exec(cause.message)).find(Boolean);
-	if (proxy) return `proxy refused the connection (HTTP ${proxy[1]})`;
-	if (codes.includes("ENOTFOUND")) {
-		let host = "";
-		try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
-		return DEFAULT_HOSTED_HOSTS.has(host) ? "ENOTFOUND" : null;
-	}
+	if (proxy?.[1] === "403") return "proxy refused the connection (HTTP 403)";
+	if (codes.includes("ENOTFOUND")) return DEFAULT_HOSTED_HOSTS.has(host) ? "ENOTFOUND" : null;
 	return null;
 };
 
@@ -1381,7 +1364,11 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				if (reason === null) {
 					// Name the real cause: a bare "fetch failed" hides a typo in --api-base or a certificate problem.
 					if (error instanceof TypeError && /fetch failed/i.test(error.message)) {
-						throw new Error(`Could not sign in to ${options.apiBase}: ${describeFetchFailure(error)}. Check --api-base.`, { cause: error });
+						throw new Error(`Could not sign in to ${options.apiBase}: ${describeFetchFailure(error)}. Check --api-base${
+							/Proxy response/.test(describeFetchFailure(error)) ? " and the HTTPS_PROXY settings" : ""}.`, { cause: error });
+					}
+					if (error instanceof HostedOnlyBotsRequestError && error.status === 404) {
+						throw new Error(`Could not sign in to ${options.apiBase}: it answered 404, so it is probably not a Crosshead service. Check --api-base.`, { cause: error });
 					}
 					throw error;
 				}

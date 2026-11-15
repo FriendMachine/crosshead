@@ -5,7 +5,7 @@ import { existsSync } from "fs";
 import path from "path";
 import { daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState } from "./daemon-ownership";
 
-import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
+import { describeFetchFailure, describeHostedFailure, HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
 import {
 	readRuntimeDreamReviewHudSnapshot,
 	readRuntimeInboxHudSnapshot,
@@ -568,7 +568,12 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 					authValid = isSessionFresh(session);
 				} catch (error) {
 					authValid = false;
-					signInError = error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200);
+					// The cause for a network failure; for an HTTP answer only the status and code, never
+					// text the server chose (see describeHostedFailure).
+					const hosted = describeHostedFailure(error);
+					signInError = error instanceof TypeError && /fetch failed/i.test(error.message)
+						? describeFetchFailure(error)
+						: hosted.errorClass === "http" ? `HTTP ${hosted.status}${hosted.code ? ` ${hosted.code}` : ""}` : String(hosted.errorClass);
 				}
 			}
 			// A profile set up while the service was unreachable has never held a session. Say so,
@@ -580,7 +585,7 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 				message: authValid
 					? "Hosted auth session is valid."
 					: neverSignedIn
-						? `This profile has not signed in to ${selectedProfile.apiBase} yet${signInError ? `; sign-in failed: ${signInError}` : ""}.`
+						? `This profile has no session with ${selectedProfile.apiBase}: it has not signed in yet, or its session was cleared${signInError ? `; sign-in failed: ${signInError}` : ""}.`
 						: `Hosted auth session is missing or expired${signInError ? `; sign-in failed: ${signInError}` : ""}.`,
 			});
 		} catch {

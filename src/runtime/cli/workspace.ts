@@ -255,7 +255,8 @@ export const scopedQuickstartFromCli = async (flags: Flags, scripts: QuickstartC
     const checks = scope === "project" ? [...new Set(targets.map((target) => workspaceProjectRoot(target.directory)))] : [process.cwd()];
     return flags.json
       ? JSON.stringify({ command: "quickstart", applied: true, home: paths.home, profiles: names, daemon, ...inspection,
-	  ...(deferred.length > 0 ? { registrationDeferred: deferred } : {}) }, null, 2)
+	  // Same fields as keygen and quickstart; one entry per profile created here.
+	  ...(deferred.length > 0 ? { registrationDeferred: true, registrationDeferredReason: deferred[0]!.reason, registrationDeferredProfiles: deferred } : {}) }, null, 2)
       : [
 	  "Crosshead setup complete.",
 	  ...deferred.flatMap((entry) => registrationDeferredLines({ apiBase: entry.apiBase, registrationDeferred: true, registrationDeferredReason: entry.reason ?? undefined })
