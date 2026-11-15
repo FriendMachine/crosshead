@@ -28,7 +28,7 @@ import * as tar from "tar";
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
-import { HostedOnlyBotsClient, type HostedSession } from "./hosted-client";
+import { HostedOnlyBotsClient, HostedOnlyBotsRequestError, type HostedSession } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { searchHotCheckpoints } from "./hot-continuity";
 import {
@@ -1285,7 +1285,19 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 	}
 };
 
-export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): Promise<RuntimeProfile> => {
+/**
+ * True when the hosted service could not be reached at all: no route, DNS failure, refused
+ * connection or timeout. An HTTP answer, or a challenge that fails validation, is the service
+ * (or something posing as it) responding, and is never treated as "offline".
+ */
+const hostedServiceUnreachable = (error: unknown): boolean =>
+	error instanceof Error && !(error instanceof HostedOnlyBotsRequestError) &&
+	(error.name === "TimeoutError" || error.name === "AbortError" || (error.name === "TypeError" && /fetch failed/i.test(error.message)));
+
+/** The saved profile, plus whether sign-in with the hosted service was put off because it was unreachable. */
+export type SetupRuntimeProfileResult = RuntimeProfile & { registrationDeferred?: true };
+
+export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): Promise<SetupRuntimeProfileResult> => {
 	try {
 		const decodedNpub = nip19.decode(options.npub);
 		const decodedNsec = nip19.decode(options.nsec);
@@ -1306,6 +1318,9 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} already exists`);
 	const secret = loadSecret(paths, options.profileName);
 	const localOnlyProfile = isLocalOnlyRuntimeProfile({ apiBase: options.apiBase });
+	// Capture and recall are local-first, so a machine with no route to the service (a sandbox, a
+	// CI job, a laptop offline) can still be set up. The client signs in on its first hosted request.
+	let registrationDeferred = false;
 	const session = localOnlyProfile
 		? null
 		: await new HostedOnlyBotsClient({
@@ -1313,7 +1328,11 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				npub: options.npub,
 				nsec: options.nsec,
 				session: secret?.session ?? null,
-			}).ensureSession();
+			}).ensureSession().catch((error: unknown) => {
+				if (!hostedServiceUnreachable(error)) throw error;
+				registrationDeferred = true;
+				return null;
+			});
 
 	const profile: RuntimeProfile = {
 		name: options.profileName,
@@ -1353,8 +1372,9 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 		npub: profile.npub,
 		apiBase: profile.apiBase,
 		memoryMode: profile.memoryMode,
+		...(registrationDeferred ? { registrationDeferred: true } : {}),
 	});
-	return profile;
+	return registrationDeferred ? { ...profile, registrationDeferred: true } : profile;
 };
 
 const installManagedAdapter = async (

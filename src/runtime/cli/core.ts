@@ -131,8 +131,13 @@ export const setupProfileFromCli = async (argv: string[]): Promise<string> => {
 		npub: String(flags.npub ?? ""),
 		nsec: String(flags.nsec ?? ""),
 	});
-	return `Configured runtime profile ${profile.name} for ${profile.npub}`;
+	return [`Configured runtime profile ${profile.name} for ${profile.npub}`, ...registrationDeferredLines(profile)].join("\n");
 };
+
+const registrationDeferredLines = (profile: { apiBase: string; registrationDeferred?: true }): string[] =>
+	profile.registrationDeferred
+		? [`registration: deferred; ${profile.apiBase} could not be reached. Local capture and recall work now, and the profile signs in on its first successful request.`]
+		: [];
 
 export const keygenFromCli = async (argv: string[]): Promise<string> => {
 	const { flags } = parseArgs(argv);
@@ -161,6 +166,7 @@ export const keygenFromCli = async (argv: string[]): Promise<string> => {
 		memoryMode: profile.memoryMode,
 		workspaceScope: profile.workspaceScope,
 		secureStoreMode: profile.secureStoreMode,
+		...(profile.registrationDeferred ? { registrationDeferred: true } : {}),
 	};
 	return flags.json
 		? JSON.stringify(result, null, 2)
@@ -171,6 +177,7 @@ export const keygenFromCli = async (argv: string[]): Promise<string> => {
 		`memory_mode: ${profile.memoryMode}`,
 		`workspace_scope: ${profile.workspaceScope}`,
 		`secure_store: ${profile.secureStoreMode}`,
+		...registrationDeferredLines(profile),
 			].join("\n");
 };
 

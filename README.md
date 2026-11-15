@@ -166,6 +166,19 @@ that profile. Other hosts retain a mode-off notice and administrative diagnostic
 without injecting recalled memory. Use `crosshead workspace remove` to detach a
 project.
 
+### Without a connection
+
+Setup does not need the hosted service to be reachable. If `crosshead.sh`
+cannot be reached (a sandbox with restricted egress, a CI job, a laptop
+offline), the profile is still created and setup prints `registration:
+deferred`. Capture and recall work locally at once, and the profile signs in
+on its first successful request. A response from the service that refuses the
+sign-in still fails setup.
+
+For a profile that never contacts a hosted service, pass
+`--api-base http://127.0.0.1:0`. Hot memory, hooks and handoff capsules work;
+hosted recall, sync between machines and billing do not.
+
 Local-only checkpoints are stored per profile. A legacy flat store remains
 readable for its sole existing local-only profile, whose identity is pinned
 before creating another profile. If several profiles already shared an unowned

@@ -210,11 +210,13 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 			throw new Error("quickstart requires --api-base <url> when the selected profile does not exist");
 		}
 		const profileOutput = await keygenFromCli([...profileArgs, "--setup", "--json"]);
-		const parsed = JSON.parse(profileOutput) as { npub?: string; apiBase?: string };
+		const parsed = JSON.parse(profileOutput) as { npub?: string; apiBase?: string; registrationDeferred?: boolean };
 		steps.push({
 			id: "profile",
 			ok: true,
-			detail: `configured ${profileName} for ${parsed.apiBase ?? apiBase} with generated runtime identity ${parsed.npub ?? "unknown"}`,
+			detail: `configured ${profileName} for ${parsed.apiBase ?? apiBase} with generated runtime identity ${parsed.npub ?? "unknown"}${
+				parsed.registrationDeferred ? "; the service could not be reached, so sign-in is deferred until it can (local capture and recall work now)" : ""
+			}`,
 		});
 	} else {
 		steps.push({
