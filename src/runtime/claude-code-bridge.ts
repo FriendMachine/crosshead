@@ -57,10 +57,28 @@ const parseBooleanFlag = (value: string | boolean | undefined): boolean | undefi
   return undefined;
 };
 
+// The injected context names capabilities with underscores, and the Codex bridge uses the
+// memory-* spellings. Accept the same names here so one instruction works on both hosts.
+const canonicalCommand = (command: string): string => {
+  switch (command) {
+    case "memory_hot": return "memory-hot";
+    case "memory_warm": return "memory-warm";
+    case "memory_search":
+    case "memory-search": return "search-memory";
+    case "inbox_state": return "inbox-state";
+    case "inbox_replay": return "inbox-replay";
+    case "inbox_ack": return "inbox-ack";
+    case "inbox_resolve": return "inbox-resolve";
+    case "session_end": return "session-end";
+    case "turn_failed": return "turn-failed";
+    default: return command;
+  }
+};
+
 export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.argv.slice(2)): Promise<void> => {
 	assertSecureNodeRuntimeVersion();
   const { positionals, flags } = parseArgs(argv);
-  const command = positionals[0] ?? "help";
+  const command = canonicalCommand(positionals[0] ?? "help");
   if (command === "checkpoint-page") {
     runCheckpointPageCommand("claude-code", positionals, flags);
     return;
@@ -78,7 +96,9 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
         "crosshead-claude-code task-changed --workspace-root <path> --session-id <id> --task-title <text>",
         "crosshead-claude-code turn-completed --workspace-root <path> --session-id <id> --turn-id <id> --summary <text> [--goal <text>] [--pack-id <id>]",
         "crosshead-claude-code remember --workspace-root <path> --session-id <id> --content <text> [--entry-type fact]",
-        "crosshead-claude-code search-memory --query <text> [--top-k 10]",
+        "crosshead-claude-code memory-hot [--profile <name>] [--scope all|shared|codex|claude-code]",
+        "crosshead-claude-code memory-warm [--profile <name>] [--type <type>] [--status <status>] [--include-system]",
+        "crosshead-claude-code memory-search --query <text> [--top-k 10]",
 		"crosshead-claude-code inbox-state [--profile <name>] [--unread-only true|false] [--include-terminal true|false] [--limit <n>]",
 		"crosshead-claude-code inbox-replay (--inbox-id <id>|--message-event-id <id>) [--profile <name>] [--note <text>]",
 		"crosshead-claude-code inbox-ack (--inbox-id <id>|--message-event-id <id>) [--profile <name>] [--actor-runtime-host <host>] [--note <text>]",
@@ -249,9 +269,32 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
     return;
   }
 
+  if (command === "memory-hot") {
+    const result = await adapter.readHotMemory(
+      typeof flags.profile === "string" ? flags.profile : undefined,
+      typeof flags.scope === "string" && flags.scope.length > 0 ? flags.scope : "all"
+    );
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  if (command === "memory-warm") {
+    const result = await adapter.listWarmMemory(typeof flags.profile === "string" ? flags.profile : undefined, {
+      type: typeof flags.type === "string" ? flags.type : undefined,
+      status: typeof flags.status === "string" ? flags.status : undefined,
+      includeSystemMemory: flags["include-system"] === true || flags.includeSystem === true,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
   if (command === "search-memory") {
+    const query = typeof flags.query === "string" ? flags.query : positionals.slice(1).join(" ").trim();
+    if (query.length === 0) {
+      throw new Error("memory-search requires --query <text> or a positional query");
+    }
     const result = await adapter.searchMemory(
-      String(flags.query ?? ""),
+      query,
       typeof flags.profile === "string" ? flags.profile : undefined,
       typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10,
       false,

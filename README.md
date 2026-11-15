@@ -151,9 +151,23 @@ a fresh session after choosing either setting.
   response field is injected into an agent prompt. Only locally signature-
   verified hot memory remains available automatically; hosted recall can be
   inspected explicitly until a client-verifiable aggregation protocol exists.
-- Handoff capsules are signed, verified, and stored by the local runtime. Share
-  the capsule JSON for cross-machine imports; the private key is never sent to
-  the handoff service.
+- Handoff capsules are signed, verified, and stored by the local runtime; the
+  private key is never sent to the handoff service. To move work to another
+  machine, write the capsule to a file and import it there:
+
+  ```sh
+  crosshead handoff export --source claude-code --target claude-code \
+    --session-id <id> --prompt "<what to continue>" --output capsule.json
+  crosshead handoff import --target claude-code --file capsule.json
+  ```
+
+  Export works with no network; it leaves out hosted memory references it
+  cannot read and says so. Import saves the handoff to hot memory for the
+  current project, so the next session there starts with it. Without `--target`,
+  export addresses the other host (Codex to Claude Code, or the reverse).
+- Import accepts a capsule signed by the profile's own key. A valid signature
+  from any other key is rejected unless you pass `--allow-signer <npub>` for a
+  key you trust.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
   runtime is doing. Local state lives in `~/.crosshead/state/`.
 

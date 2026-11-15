@@ -5021,7 +5021,21 @@ export const formatHandoffExportResult = (result: Record<string, unknown>): stri
 		lines.push("claude_startup_context:");
 		lines.push(String(materialization.startupContext));
 	}
+	for (const warning of Array.isArray(result.warnings) ? result.warnings : []) {
+		lines.push(`warning: ${String(warning)}`);
+	}
+	if (typeof result.capsuleFile === "string") {
+		lines.push(`capsule_file: ${result.capsuleFile}`);
+	}
 	return lines.join("\n");
+};
+
+const rejectionReasonLine = (result: Record<string, unknown>, receipt: Record<string, unknown> | null): string | null => {
+	const verification = result.verification && typeof result.verification === "object" && !Array.isArray(result.verification)
+		? (result.verification as Record<string, unknown>) : null;
+	const errors = Array.isArray(verification?.errors) ? verification.errors.filter((entry): entry is string => typeof entry === "string") : [];
+	const reason = typeof receipt?.note === "string" ? receipt.note : errors.join(" | ");
+	return reason ? `reason: ${reason}` : null;
 };
 
 export const formatHandoffImportResult = (result: Record<string, unknown>): string => {
@@ -5057,6 +5071,8 @@ export const formatHandoffImportResult = (result: Record<string, unknown>): stri
 	const lines = [
 		inspection ? formatHandoffInspection(inspection) : "handoff import",
 		`accepted: ${result.accepted === true ? "yes" : "no"}`,
+		result.savedToHotMemory === true ? "saved: hot memory for this workspace; the next session here starts with it" : null,
+		result.accepted !== true ? rejectionReasonLine(result, receipt) : null,
 		delivery
 			? `delivery: ${String(delivery.primary ?? "unknown")}${
 					typeof delivery.managedSurface === "string" ? ` via ${delivery.managedSurface}` : ""

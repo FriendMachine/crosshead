@@ -5,6 +5,7 @@ import path from "path";
 
 import type { OperatorWorkspaceManifest } from "./operator-policy";
 import { LocalRuntimeClient } from "./local-client";
+import { handoffSignerRejection, optionalHostedRead, renderImportedHandoffMemory } from "./handoff-import";
 import {
   ONLYBOTS_RUNTIME_CORE_VERSION,
   ensureRuntimeHomeLayout,
@@ -188,7 +189,7 @@ export type CodexContinuityCapture = ContinuityCaptureBase & {
 
 export type CodexAdapterHandoffCreateRequest = Omit<CodexContinuityCapture, "runtime"> & {
   profileName?: string;
-  targetRuntime?: "claude-code";
+  targetRuntime?: "codex" | "claude-code";
   maxBytes?: number;
 };
 
@@ -199,6 +200,8 @@ export type CodexAdapterHandoffCreateResult = {
   plainTextSummary: string;
   restatementComparison: ContinuityRestatementComparison;
   record: HandoffStoredRecord;
+  /** Parts of the export that could not be read, such as hosted memory references while offline. */
+  warnings: string[];
 };
 
 export type CodexAdapterHandoffImportRequest = {
@@ -212,6 +215,8 @@ export type CodexAdapterHandoffImportRequest = {
   sessionId: string;
   accepted?: boolean;
   note?: string;
+  /** Signers accepted in addition to this profile's own key. */
+  allowedSigners?: string[];
 };
 
 export type CodexAdapterHandoffImportResult = {
@@ -224,6 +229,8 @@ export type CodexAdapterHandoffImportResult = {
   restatementComparison: ContinuityRestatementComparison | null;
   receipt: HandoffReceipt | null;
   record: HandoffStoredRecord | null;
+  /** True when the handoff was saved to hot memory for the next session in the workspace. */
+  savedToHotMemory?: boolean;
 };
 
 
@@ -988,10 +995,13 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     const needsIdentity = !input.identity?.npub;
     const needsPolicyRef = !input.policy?.policyRef;
 
+    const targetRuntime = input.targetRuntime ?? "claude-code";
+    const targetLabel = targetRuntime === "codex" ? "Codex" : "Claude Code";
+    const warnings: string[] = [];
     const [hot, warm, judgment, status] = await Promise.all([
       needsHotSummary ? this.client.readHotMemory(profileName) : Promise.resolve(null),
-      needsWarmIds ? this.client.listWarmMemory(profileName, { status: "active" }) : Promise.resolve(null),
-      needsJudgment ? this.client.inspectContinuityJudgment(profileName) : Promise.resolve(null),
+      optionalHostedRead(needsWarmIds, () => this.client.listWarmMemory(profileName, { status: "active" }), "Warm memory", warnings),
+      optionalHostedRead(needsJudgment, () => this.client.inspectContinuityJudgment(profileName), "Continuity judgment", warnings),
       needsIdentity || needsPolicyRef ? this.client.status(profileName) : Promise.resolve(null),
     ]);
 
@@ -1043,7 +1053,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
           input.reasoning?.unresolvedRisks ?? (projectModel ? summarizeJudgmentEntries(projectModel.unresolvedRisks) : []),
         portabilityNotes:
           input.reasoning?.portabilityNotes ?? [
-            "Exported from the live Codex runtime so Claude Code can resume with explicit continuity gaps.",
+            `Exported from the live Codex runtime so ${targetLabel} can resume with explicit continuity gaps.`,
           ],
         nextAction: input.reasoning?.nextAction ?? null,
       },
@@ -1067,9 +1077,9 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       delegation: {
         whyTransfer:
           input.delegation?.whyTransfer ??
-          "Continue execution in Claude Code while preserving the current Crosshead continuity state.",
+          `Continue execution in ${targetLabel} while preserving the current Crosshead continuity state.`,
         requestedCapabilities: input.delegation?.requestedCapabilities ?? ["repo_execution", "tool_use"],
-        recommendedTarget: "claude-code",
+        recommendedTarget: targetRuntime,
       },
       economics: {
         budgetRemainingSats: input.economics?.budgetRemainingSats ?? null,
@@ -1084,10 +1094,10 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     };
 
     const capture = codexContinuityTranslationContract.captureContext(enrichedCapture);
-    const translation = codexContinuityTranslationContract.normalizeToContinuityIr(capture, input.targetRuntime ?? "claude-code");
-    const materialization = codexContinuityTranslationContract.materializeFromContinuityIr(translation, "claude-code");
-    const plainTextSummary = buildPlainTextContinuationSummary(translation, "claude-code");
-    const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, "claude-code");
+    const translation = codexContinuityTranslationContract.normalizeToContinuityIr(capture, targetRuntime);
+    const materialization = codexContinuityTranslationContract.materializeFromContinuityIr(translation, targetRuntime);
+    const plainTextSummary = buildPlainTextContinuationSummary(translation, targetRuntime);
+    const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, targetRuntime);
     const created = (await this.client.createHandoff({
       translation,
       maxBytes: input.maxBytes,
@@ -1104,6 +1114,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
       plainTextSummary,
       restatementComparison,
       record,
+      warnings,
     };
   }
 
@@ -1249,11 +1260,18 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
     if (!verification.valid) {
       return rejectStoredHandoff(`Codex handoff import rejected an invalid capsule: ${verification.errors.join(" | ")}`);
     }
-    if (capsule.sourceRuntime !== "claude-code") {
-      return rejectStoredHandoff(`Codex import only accepts Claude Code-origin handoffs, received ${capsule.sourceRuntime}`);
-    }
     if (capsule.targetRuntime !== "codex") {
       return rejectStoredHandoff(`Codex import requires targetRuntime=codex, received ${capsule.targetRuntime}`);
+    }
+    // The signature shows the capsule is intact. Whose capsule it is must be checked separately.
+    const ownNpub = await this.client.status(input.profileName ?? this.config.profileName).then(
+      (status) => (status?.profile && typeof status.profile === "object" && !Array.isArray(status.profile)
+        ? sanitizeString((status.profile as Record<string, unknown>).npub) : null),
+      () => null
+    );
+    const signerRejection = handoffSignerRejection(verification.signedBy, ownNpub, input.allowedSigners ?? []);
+    if (accepted && signerRejection) {
+      return rejectStoredHandoff(`Codex handoff import rejected the signer: ${signerRejection}`);
     }
     if (!accepted) {
       return rejectStoredHandoff(input.note?.trim().length ? input.note.trim() : "Operator rejected the handoff during Codex import.");
@@ -1290,9 +1308,29 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
             },
           })) as HandoffStoredRecord);
 
+    // Printing the state is not delivery. Saving it to hot memory is what makes the next session
+    // in this workspace start with it, on this machine or after sync.
+    await this.remember({
+      profileName: input.profileName,
+      workspaceRoot,
+      workspaceId,
+      hostHome: input.hostHome,
+      hostVersion: input.hostVersion,
+      sessionId,
+      entryType: "fact",
+      content: renderImportedHandoffMemory({
+        sourceRuntime: capsule.sourceRuntime,
+        signedBy: verification.signedBy,
+        ownNpub,
+        startupContext: materialization.startupContext,
+      }),
+      tags: ["codex", "handoff-import"],
+    });
+
     return {
       handoffId,
       accepted: true,
+      savedToHotMemory: true,
       verification,
       inspection,
       materialization,

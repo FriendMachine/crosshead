@@ -6,6 +6,7 @@ import { spawn } from "child_process";
 
 import type { OperatorWorkspaceManifest } from "./operator-policy";
 import { LocalRuntimeClient } from "./local-client";
+import { handoffSignerRejection, optionalHostedRead, renderImportedHandoffMemory } from "./handoff-import";
 import {
   ONLYBOTS_RUNTIME_CORE_VERSION,
   ensureRuntimeHomeLayout,
@@ -194,7 +195,7 @@ export type ClaudeCodeContinuityCapture = ContinuityCaptureBase & {
 
 export type ClaudeCodeAdapterHandoffCreateRequest = Omit<ClaudeCodeContinuityCapture, "runtime"> & {
   profileName?: string;
-  targetRuntime?: "codex";
+  targetRuntime?: "codex" | "claude-code";
   maxBytes?: number;
 };
 
@@ -205,6 +206,8 @@ export type ClaudeCodeAdapterHandoffCreateResult = {
   plainTextSummary: string;
   restatementComparison: ContinuityRestatementComparison;
   record: HandoffStoredRecord;
+  /** Parts of the export that could not be read, such as hosted memory references while offline. */
+  warnings: string[];
 };
 
 export type ClaudeCodeAdapterHandoffImportRequest = {
@@ -218,6 +221,8 @@ export type ClaudeCodeAdapterHandoffImportRequest = {
   sessionId: string;
   accepted?: boolean;
   note?: string;
+  /** Signers accepted in addition to this profile's own key. */
+  allowedSigners?: string[];
 };
 
 export type ClaudeCodeAdapterHandoffImportResult = {
@@ -230,6 +235,8 @@ export type ClaudeCodeAdapterHandoffImportResult = {
   restatementComparison: ContinuityRestatementComparison | null;
   receipt: HandoffReceipt | null;
   record: HandoffStoredRecord | null;
+  /** True when the handoff was saved to hot memory for the next session in the workspace. */
+  savedToHotMemory?: boolean;
 };
 
 type CommandCaptureResult = {
@@ -959,10 +966,13 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
     const needsIdentity = !input.identity?.npub;
     const needsPolicyRef = !input.policy?.policyRef;
 
+    const targetRuntime = input.targetRuntime ?? "codex";
+    const targetLabel = targetRuntime === "codex" ? "Codex" : "Claude Code";
+    const warnings: string[] = [];
     const [hot, warm, judgment, status] = await Promise.all([
       needsHotSummary ? this.client.readHotMemory(profileName) : Promise.resolve(null),
-      needsWarmIds ? this.client.listWarmMemory(profileName, { status: "active" }) : Promise.resolve(null),
-      needsJudgment ? this.client.inspectContinuityJudgment(profileName) : Promise.resolve(null),
+      optionalHostedRead(needsWarmIds, () => this.client.listWarmMemory(profileName, { status: "active" }), "Warm memory", warnings),
+      optionalHostedRead(needsJudgment, () => this.client.inspectContinuityJudgment(profileName), "Continuity judgment", warnings),
       needsIdentity || needsPolicyRef ? this.client.status(profileName) : Promise.resolve(null),
     ]);
 
@@ -1023,7 +1033,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
         unresolvedRisks:
           input.reasoning?.unresolvedRisks ?? (projectModel ? summarizeJudgmentEntries(projectModel.unresolvedRisks) : []),
         portabilityNotes: input.reasoning?.portabilityNotes ?? [
-          "Exported from the live Claude Code runtime so Codex can resume with explicit continuity gaps.",
+          `Exported from the live Claude Code runtime so ${targetLabel} can resume with explicit continuity gaps.`,
         ],
         nextAction: input.reasoning?.nextAction ?? null,
       },
@@ -1047,9 +1057,9 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       delegation: {
         whyTransfer:
           input.delegation?.whyTransfer ??
-          "Continue execution in Codex while preserving the current Crosshead continuity state.",
+          `Continue execution in ${targetLabel} while preserving the current Crosshead continuity state.`,
         requestedCapabilities: input.delegation?.requestedCapabilities ?? ["repo_execution", "tool_use"],
-        recommendedTarget: "codex",
+        recommendedTarget: targetRuntime,
       },
       economics: {
         budgetRemainingSats: input.economics?.budgetRemainingSats ?? null,
@@ -1064,10 +1074,10 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
     };
 
     const capture = claudeCodeContinuityTranslationContract.captureContext(enrichedCapture);
-    const translation = claudeCodeContinuityTranslationContract.normalizeToContinuityIr(capture, input.targetRuntime ?? "codex");
-    const materialization = claudeCodeContinuityTranslationContract.materializeFromContinuityIr(translation, "codex");
-    const plainTextSummary = buildPlainTextContinuationSummary(translation, "codex");
-    const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, "codex");
+    const translation = claudeCodeContinuityTranslationContract.normalizeToContinuityIr(capture, targetRuntime);
+    const materialization = claudeCodeContinuityTranslationContract.materializeFromContinuityIr(translation, targetRuntime);
+    const plainTextSummary = buildPlainTextContinuationSummary(translation, targetRuntime);
+    const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, targetRuntime);
     const created = (await this.client.createHandoff({
       translation,
       maxBytes: input.maxBytes,
@@ -1084,6 +1094,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       plainTextSummary,
       restatementComparison,
       record,
+      warnings,
     };
   }
 
@@ -1229,11 +1240,18 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
     if (!verification.valid) {
       return rejectStoredHandoff(`Claude Code handoff import rejected an invalid capsule: ${verification.errors.join(" | ")}`);
     }
-    if (capsule.sourceRuntime !== "codex") {
-      return rejectStoredHandoff(`Claude Code import only accepts Codex-origin handoffs, received ${capsule.sourceRuntime}`);
-    }
     if (capsule.targetRuntime !== "claude-code") {
       return rejectStoredHandoff(`Claude Code import requires targetRuntime=claude-code, received ${capsule.targetRuntime}`);
+    }
+    // The signature shows the capsule is intact. Whose capsule it is must be checked separately.
+    const ownNpub = await this.client.status(input.profileName ?? this.config.profileName).then(
+      (status) => (status?.profile && typeof status.profile === "object" && !Array.isArray(status.profile)
+        ? sanitizeString((status.profile as Record<string, unknown>).npub) : null),
+      () => null
+    );
+    const signerRejection = handoffSignerRejection(verification.signedBy, ownNpub, input.allowedSigners ?? []);
+    if (accepted && signerRejection) {
+      return rejectStoredHandoff(`Claude Code handoff import rejected the signer: ${signerRejection}`);
     }
     if (!accepted) {
       return rejectStoredHandoff(input.note?.trim().length ? input.note.trim() : "Operator rejected the handoff during Claude Code import.");
@@ -1271,9 +1289,29 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
             },
           })) as HandoffStoredRecord);
 
+    // Printing the state is not delivery. Saving it to hot memory is what makes the next session
+    // in this workspace start with it, on this machine or after sync.
+    await this.remember({
+      profileName: input.profileName,
+      workspaceRoot,
+      workspaceId,
+      hostHome: input.hostHome,
+      hostVersion: input.hostVersion,
+      sessionId,
+      entryType: "fact",
+      content: renderImportedHandoffMemory({
+        sourceRuntime: capsule.sourceRuntime,
+        signedBy: verification.signedBy,
+        ownNpub,
+        startupContext: materialization.startupContext,
+      }),
+      tags: ["claude-code", "handoff-import"],
+    });
+
     return {
       handoffId,
       accepted: true,
+      savedToHotMemory: true,
       verification,
       inspection,
       materialization,

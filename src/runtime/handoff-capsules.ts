@@ -360,7 +360,6 @@ export const verifyHandoffCapsule = async (value: unknown): Promise<HandoffVerif
   const targetRuntime = value.targetRuntime === "codex" || value.targetRuntime === "claude-code" ? value.targetRuntime : null;
   if (!sourceRuntime) errors.push("sourceRuntime must be codex or claude-code");
   if (!targetRuntime) errors.push("targetRuntime must be codex or claude-code");
-  if (sourceRuntime && sourceRuntime === targetRuntime) errors.push("sourceRuntime and targetRuntime must differ");
   if (value.capsuleVersion !== HANDOFF_CAPSULE_VERSION) errors.push(`capsuleVersion must be ${HANDOFF_CAPSULE_VERSION}`);
   if (value.capsuleKind !== HANDOFF_CAPSULE_KIND) errors.push(`capsuleKind must be ${HANDOFF_CAPSULE_KIND}`);
   errors.push(...validateCapsuleStructure(value));
@@ -430,8 +429,9 @@ export const createSignedHandoffCapsule = async (
   input: CreateSignedHandoffCapsuleInput
 ): Promise<HandoffStoredRecord> => {
   const { translation } = input;
-  if (!translation.targetRuntime || translation.sourceRuntime === translation.targetRuntime) {
-    throw new HandoffCapsuleValidationError("sourceRuntime and targetRuntime must differ for a handoff capsule");
+  // The target may be the same host as the source: the same agent on another machine.
+  if (!translation.targetRuntime) {
+    throw new HandoffCapsuleValidationError("a handoff capsule requires a targetRuntime");
   }
   const irErrors = validateContinuityIr(translation.ir);
   if (irErrors.length > 0) throw new HandoffCapsuleValidationError(irErrors.join("; "));

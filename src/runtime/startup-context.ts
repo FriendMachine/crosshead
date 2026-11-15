@@ -264,7 +264,7 @@ export const buildRuntimeStartupFreshness = (input: {
   const advisory =
     peerUpdate || !(changedSincePreviousContextRead === true || differentRuntime)
       ? null
-      : "Shared runtime state appears newer or from another runtime; for recent-work or continuity questions, call memory_hot before answering.";
+      : "Shared runtime state appears newer or from another runtime; for recent-work or continuity questions, call memory_hot (shell: crosshead memory hot) before answering.";
   return {
     observedAt: input.observedAt,
     previousContextReadAt,
@@ -741,7 +741,8 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
     formatDreamReviewCommandLine(input.dreamReview),
     formatObligationsTopLine(input.obligations),
     input.warnings.length > 0 ? `Warnings: ${input.warnings.join(" | ")}` : null,
-    capabilitiesNeeded ? "Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve" : null,
+    // Name a command that exists on every host: the capability names alone are not runnable.
+    capabilitiesNeeded ? "Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: crosshead memory hot | crosshead memory warm | crosshead memory search \"<query>\")" : null,
   ].filter((value): value is string => value !== null && value.length > 0);
 
   return trimmedContext.length > 0 ? `${lines.join("\n")}\n\nInjected context:\n${trimmedContext}` : lines.join("\n");
