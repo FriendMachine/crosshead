@@ -5072,9 +5072,9 @@ export const formatHandoffImportResult = (result: Record<string, unknown>): stri
 		inspection ? formatHandoffInspection(inspection) : "handoff import",
 		`accepted: ${result.accepted === true ? "yes" : "no"}`,
 		result.savedToHotMemory === true
-			? "saved: hot memory for this workspace; the next session here starts with it"
+			? `saved: hot memory for ${typeof result.savedWorkspaceId === "string" ? result.savedWorkspaceId : "this workspace"}; the next session there starts with it`
 			: result.accepted === true
-				? "saved: no; this profile's memory mode does not write hot memory, so the next session will not see it (crosshead memory mode assist)"
+				? `saved: no; ${typeof result.notSavedReason === "string" ? result.notSavedReason : "hot memory was not written"}, so the next session will not see it`
 				: null,
 		result.accepted !== true ? rejectionReasonLine(result, receipt) : null,
 		delivery

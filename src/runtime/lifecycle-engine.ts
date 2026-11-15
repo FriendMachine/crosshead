@@ -11,7 +11,7 @@ import type { Npub } from "../protocol/base";
 import { COLLABORATION_EVENT_PRIORITIES } from "../protocol/collaboration";
 import { DURABLE_INBOX_STATUSES, DURABLE_INBOX_TERMINAL_STATUSES } from "../protocol/inbox";
 import { HOT_SCOPE_ALL } from "../protocol/memory";
-import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
+import { HANDOFF_IMPORT_COMMAND, IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
 import { captureHotFinding, HOT_TURN_IN_PROGRESS, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
 import { normalizeTaskEvidence } from "./task-evidence";
 import {
@@ -1993,7 +1993,11 @@ export class RuntimeLifecycleManager {
 						// turn are superseded by the newer one, so one turn never crowds
 						// earlier sessions out of the bounded synced document.
 						const sameTurn=last ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && c.summary === HOT_TURN_IN_PROGRESS && c.sessionId === event.sessionId && c.turnId === (typeof last.turnId === "string" ? last.turnId : event.turnId) && typeof c.id === "string").map(c=>String(c!.id)) : [];
-						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn])];
+						// Re-importing a handoff capsule replaces its earlier synced copy (same capsule, workspace and
+						// profile give the same turn id) rather than adding another large record.
+						const lastTurnId=last && typeof last.turnId === "string" ? last.turnId : null;
+						const sameImport=lastTurnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && c.turnId === lastTurnId && typeof c.id === "string" && c.id !== event.eventId).map(c=>String(c!.id)) : [];
+						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn,...sameImport])];
 						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints) {
 						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(supersededIds.length ? {supersedes:supersededIds} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));

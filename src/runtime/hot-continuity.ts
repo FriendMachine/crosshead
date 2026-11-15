@@ -8,6 +8,8 @@ import { IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
 // compacting it loses the values the next session needs.
 
 export const HOT_FINDING_LIMIT = 12000;
+const IMPORT_PIN_SKEW_MS = 10 * 60 * 1000;
+const IMPORT_PIN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const HOT_REQUEST_LIMIT = 6000;
 // Delivery budget for a prompt inside a session that already received context.
 export const HOT_CONTEXT_LIMIT = 4200;
@@ -251,7 +253,11 @@ export const selectHotCheckpoints = (
   // with it. Once that session has worked, the import competes like any other finding.
   const newest = unique.reduce<SelectedHotCheckpoint | null>((latest, entry) =>
     !latest || timestamp(entry.occurredAt) > timestamp(latest.occurredAt) ? entry : latest, null);
+  // Bounded in time so a clock that runs ahead on the importing machine cannot pin it indefinitely.
+  const importedAt = newest ? timestamp(newest.occurredAt) : 0;
+  const now = Date.now();
   const imported = newest && newest.turnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) &&
+    importedAt <= now + IMPORT_PIN_SKEW_MS && importedAt >= now - IMPORT_PIN_MAX_AGE_MS &&
     ![...chosen, ...saved].includes(newest) ? [newest] : [];
   return [...chosen, ...saved, ...imported];
 };

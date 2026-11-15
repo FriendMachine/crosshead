@@ -564,7 +564,7 @@ export abstract class HostRuntimeAdapterBase {
     turnId: string;
     goal: string;
     content: string;
-  }): Promise<{ saved: boolean }> {
+  }): Promise<{ saved: boolean; notSavedReason?: string }> {
     const response = await this.client.emitEvent({
       eventId: input.eventId,
       runtime: this.identity.runtimeId,
@@ -584,8 +584,10 @@ export abstract class HostRuntimeAdapterBase {
       },
     });
     const actions = Array.isArray(response?.actions) ? response.actions : [];
-    // Memory mode off or manual writes no hot memory; report what actually happened.
-    return { saved: actions.some((action) => action?.type === "hot_write") };
+    // Memory mode, a continuity pause or policy can each stop the write; report what actually happened and why.
+    const saved = actions.some((action) => action?.type === "hot_write");
+    const skipped = actions.find((action) => action?.status === "skipped" && typeof action.reason === "string");
+    return { saved, ...(saved || !skipped ? {} : { notSavedReason: String(skipped.reason) }) };
   }
 
   async remember(input: HostAdapterRememberRequest): Promise<void> {

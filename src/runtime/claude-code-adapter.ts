@@ -239,6 +239,10 @@ export type ClaudeCodeAdapterHandoffImportResult = {
   record: HandoffStoredRecord | null;
   /** True when the handoff was saved to hot memory for the next session in the workspace. */
   savedToHotMemory?: boolean;
+  /** The workspace the import was saved under; sessions see it only when their hooks use the same one. */
+  savedWorkspaceId?: string;
+  /** Why nothing was written, when savedToHotMemory is false. */
+  notSavedReason?: string;
 };
 
 type CommandCaptureResult = {
@@ -1326,6 +1330,8 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       handoffId,
       accepted: true,
       savedToHotMemory: saved.saved,
+      savedWorkspaceId: workspaceId,
+      ...(saved.notSavedReason ? { notSavedReason: saved.notSavedReason } : {}),
       verification,
       inspection,
       materialization,

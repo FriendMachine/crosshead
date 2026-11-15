@@ -173,7 +173,8 @@ a fresh session after choosing either setting.
   key you trust. Capsules older than 30 days are rejected unless you pass
   `--allow-stale`.
 - Imported text is labelled as an imported handoff, not as something you saved
-  yourself. It is not promoted to warm memory.
+  yourself. It is not promoted to warm memory. Until the project records newer
+  work (and for at most seven days) it is included in every prompt there.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
   runtime is doing. Local state lives in `~/.crosshead/state/`.
 

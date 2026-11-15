@@ -171,9 +171,9 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 			// Hooks key memory by the project root, so run from a subdirectory the import still lands there.
 			workspaceRoot:
 				typeof flags["workspace-root"] === "string"
-					? path.resolve(flags["workspace-root"])
+					? importWorkspaceRoot(flags["workspace-root"])
 					: typeof flags.workspaceRoot === "string"
-						? path.resolve(flags.workspaceRoot)
+						? importWorkspaceRoot(flags.workspaceRoot)
 						: importWorkspaceRoot(process.cwd()),
 			workspaceId:
 				typeof flags["workspace-id"] === "string"
