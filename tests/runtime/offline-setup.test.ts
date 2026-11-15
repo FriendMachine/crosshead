@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { keygenFromCli } from "../../src/runtime/cli/core";
 import { HostedOnlyBotsRequestError } from "../../src/runtime/hosted-client";
-import { hostedServiceUnreachableReason, setupRuntimeProfile } from "../../src/runtime/local-runtime";
+import { describeFetchFailure, hostedServiceUnreachableReason, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 import { loadProfile, loadSecret, resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
 import { buildRuntimeDoctorDirect } from "../../src/runtime/runtime-status";
 
@@ -86,7 +86,7 @@ describe("setup when the hosted service cannot be reached", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(typo));
     const home = newHome();
     await expect(setupRuntimeProfile({ home, profileName: "default", apiBase: "https://crossheed.sh", ...identity(), makeDefault: true }))
-      .rejects.toThrow("fetch failed");
+      .rejects.toThrow("Could not sign in to https://crossheed.sh: ENOTFOUND: getaddrinfo ENOTFOUND crossheed.sh. Check --api-base.");
     expect(loadProfile(resolveRuntimePaths(home), "default")).toBeNull();
   });
 });
@@ -108,6 +108,19 @@ describe("doctor after a deferred setup", () => {
   });
 });
 
+describe("doctor on a local-only profile", () => {
+  it("does not report a missing sign-in", async () => {
+    const home = newHome();
+    const fetchMock = unreachable();
+    vi.stubGlobal("fetch", fetchMock);
+    await setupRuntimeProfile({ home, profileName: "default", apiBase: "http://127.0.0.1:0", ...identity(), makeDefault: true });
+    const checks = (await buildRuntimeDoctorDirect(home, "default")).checks;
+    expect(checks.find((check) => check.id === "auth")).toMatchObject({ ok: true, message: expect.stringContaining("Local-only") });
+    expect(checks.find((check) => check.id === "api_base")?.ok).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("classifying hosted sign-in failures", () => {
   const failed = (cause: unknown) => new TypeError("fetch failed", { cause });
   const coded = (code: string) => Object.assign(new Error(code), { code });
@@ -120,6 +133,17 @@ describe("classifying hosted sign-in failures", () => {
     // DNS failing for the default service means DNS is unavailable; for any other host it is more likely a typo.
     expect(hostedServiceUnreachableReason(failed(coded("ENOTFOUND")), "https://crosshead.sh")).toBe("ENOTFOUND");
     expect(hostedServiceUnreachableReason(failed(coded("ENOTFOUND")), "https://crossheed.sh")).toBeNull();
+    // An allowlisting egress proxy refusing the tunnel, exactly as Node 26 reports it.
+    const proxyRefusal = failed(Object.assign(new Error("Request was cancelled."), {
+      cause: Object.assign(new Error("Proxy response (403) !== 200 when HTTP Tunneling"), { code: "UND_ERR_ABORTED" }),
+    }));
+    expect(hostedServiceUnreachableReason(proxyRefusal, "https://crosshead.sh")).toBe("proxy refused the connection (HTTP 403)");
+  });
+
+  it("names the underlying cause of a fetch failure", () => {
+    expect(describeFetchFailure(failed(coded("CERT_HAS_EXPIRED")))).toBe("CERT_HAS_EXPIRED: CERT_HAS_EXPIRED");
+    expect(describeFetchFailure(failed(new Error("unexpected redirect")))).toBe("unexpected redirect");
+    expect(describeFetchFailure(failed(undefined))).toBe("fetch failed");
   });
 
   it("reports redirects, certificate errors, HTTP answers and unexplained failures", () => {

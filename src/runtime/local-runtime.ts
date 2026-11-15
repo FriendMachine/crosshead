@@ -1295,29 +1295,44 @@ const NETWORK_UNREACHABLE_CODES = new Set([
 ]);
 const DEFAULT_HOSTED_HOSTS = new Set(["crosshead.sh", "www.crosshead.sh"]);
 
-const fetchCauseCodes = (error: unknown, depth = 0): string[] => {
+type FetchCause = { code: string | null; message: string };
+const fetchCauses = (error: unknown, depth = 0): FetchCause[] => {
 	if (!error || typeof error !== "object" || depth > 4) return [];
-	const record = error as { code?: unknown; cause?: unknown; errors?: unknown };
+	const record = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
 	return [
-		...(typeof record.code === "string" ? [record.code] : []),
-		...fetchCauseCodes(record.cause, depth + 1),
-		...(Array.isArray(record.errors) ? record.errors.flatMap((entry) => fetchCauseCodes(entry, depth + 1)) : []),
+		{ code: typeof record.code === "string" ? record.code : null, message: typeof record.message === "string" ? record.message : "" },
+		...fetchCauses(record.cause, depth + 1),
+		...(Array.isArray(record.errors) ? record.errors.flatMap((entry) => fetchCauses(entry, depth + 1)) : []),
 	];
+};
+// An egress proxy that refuses the tunnel (a sandbox allowlist, a corporate proxy) is the network
+// saying "not from here", the same as a refused connection.
+const PROXY_REFUSAL = /Proxy response \((\d{3})\) !== 200 when HTTP Tunneling/;
+
+/** A one-line description of why a fetch failed, for error messages: the deepest specific cause. */
+export const describeFetchFailure = (error: unknown): string => {
+	const causes = error instanceof Error ? fetchCauses(error.cause) : [];
+	const specific = causes.filter((cause) => cause.code || cause.message).at(-1);
+	if (!specific) return error instanceof Error ? error.message : String(error);
+	return [specific.code, specific.message].filter(Boolean).join(": ").slice(0, 200);
 };
 
 /**
  * Why the hosted service could not be reached at all, or null when the failure is something
- * setup must report: an HTTP answer, a failed challenge, a redirect, a certificate or proxy
- * error, or a host name that does not exist. A name that does not resolve is treated as offline
+ * setup must report: an HTTP answer, a failed challenge, a redirect, a certificate error, or a
+ * host name that does not exist. A proxy that refuses the tunnel counts as unreachable. A name that does not resolve is treated as offline
  * only for the default service, where it means DNS is unavailable rather than a typo.
  */
 export const hostedServiceUnreachableReason = (error: unknown, apiBase: string): string | null => {
 	if (!(error instanceof Error) || error instanceof HostedOnlyBotsRequestError) return null;
 	if (error.name === "TimeoutError" || error.name === "AbortError") return "timed out";
 	if (error.name !== "TypeError" || !/fetch failed/i.test(error.message)) return null;
-	const codes = fetchCauseCodes(error.cause);
+	const causes = fetchCauses(error.cause);
+	const codes = causes.flatMap((cause) => (cause.code ? [cause.code] : []));
 	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code));
 	if (unreachable) return unreachable;
+	const proxy = causes.map((cause) => PROXY_REFUSAL.exec(cause.message)).find(Boolean);
+	if (proxy) return `proxy refused the connection (HTTP ${proxy[1]})`;
 	if (codes.includes("ENOTFOUND")) {
 		let host = "";
 		try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
@@ -1363,7 +1378,13 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				session: secret?.session ?? null,
 			}).ensureSession().catch((error: unknown) => {
 				const reason = hostedServiceUnreachableReason(error, options.apiBase);
-				if (reason === null) throw error;
+				if (reason === null) {
+					// Name the real cause: a bare "fetch failed" hides a typo in --api-base or a certificate problem.
+					if (error instanceof TypeError && /fetch failed/i.test(error.message)) {
+						throw new Error(`Could not sign in to ${options.apiBase}: ${describeFetchFailure(error)}. Check --api-base.`, { cause: error });
+					}
+					throw error;
+				}
 				registrationDeferred = true;
 				registrationDeferredReason = reason;
 				return null;

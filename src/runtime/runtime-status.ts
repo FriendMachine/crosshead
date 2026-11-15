@@ -536,7 +536,11 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 	checks.push({ id: "profile", ok: !selectedName || profileValid,
 		message: !selectedName ? "No profile configured yet." : profileValid ? `Profile ${selectedName} is valid.` :
 			existsSync(profileFile(paths, selectedName)) ? `Profile ${selectedName} is invalid; restore its configuration.` : `Profile ${selectedName} is missing.` });
-	if (selectedProfile && profileValid) {
+	if (selectedProfile && profileValid && isLocalOnlyRuntimeProfile(selectedProfile)) {
+		// A local-only profile never contacts a hosted service, so there is nothing to reach or sign in to.
+		checks.push({ id: "api_base", ok: true, message: "Local-only profile; no hosted service is used." });
+		checks.push({ id: "auth", ok: true, message: "Local-only profile; hosted sign-in is not used." });
+	} else if (selectedProfile && profileValid) {
 		try {
 			const secret = loadSecret(paths, selectedProfile.name);
 			const hosted = new HostedOnlyBotsClient({
