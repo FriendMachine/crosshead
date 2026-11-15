@@ -10,6 +10,7 @@ import { IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
 export const HOT_FINDING_LIMIT = 12000;
 const IMPORT_PIN_SKEW_MS = 10 * 60 * 1000;
 const IMPORT_PIN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const IMPORT_PIN_NEWER_LIMIT = 3;
 const HOT_REQUEST_LIMIT = 6000;
 // Delivery budget for a prompt inside a session that already received context.
 export const HOT_CONTEXT_LIMIT = 4200;
@@ -248,18 +249,18 @@ export const selectHotCheckpoints = (
   // extra entry divides the small per-prompt budget further.
   const saved = chosen.some(entry => entry.origin === "remember") ? [] : unique.filter(entry => entry.origin === "remember")
     .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, 1);
-  // A handoff just imported here is what the next session came to continue. Until any newer
-  // checkpoint exists in this workspace, include it even when the first prompt shares no words
-  // with it. Once that session has worked, the import competes like any other finding.
-  const newest = unique.reduce<SelectedHotCheckpoint | null>((latest, entry) =>
-    !latest || timestamp(entry.occurredAt) > timestamp(latest.occurredAt) ? entry : latest, null);
-  // Bounded in time so a clock that runs ahead on the importing machine cannot pin it indefinitely.
-  const importedAt = newest ? timestamp(newest.occurredAt) : 0;
+  // A handoff just imported here is what the next session came to continue. Include the latest
+  // import, first, until the workspace has recorded a few newer checkpoints (one turn finishing
+  // in the session that ran the import must not end it), even when the prompt shares no words with
+  // it. Bounded in time so a clock running ahead on the importing machine cannot pin it indefinitely.
   const now = Date.now();
-  const imported = newest && newest.turnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) &&
-    importedAt <= now + IMPORT_PIN_SKEW_MS && importedAt >= now - IMPORT_PIN_MAX_AGE_MS &&
-    ![...chosen, ...saved].includes(newest) ? [newest] : [];
-  return [...chosen, ...saved, ...imported];
+  const latestImport = unique.filter(entry => entry.turnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX))
+    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt))[0];
+  const importedAt = latestImport ? timestamp(latestImport.occurredAt) : 0;
+  const newerWork = latestImport ? unique.filter(entry => entry !== latestImport && timestamp(entry.occurredAt) > importedAt).length : 0;
+  const pinned = latestImport && newerWork < IMPORT_PIN_NEWER_LIMIT &&
+    importedAt <= now + IMPORT_PIN_SKEW_MS && importedAt >= now - IMPORT_PIN_MAX_AGE_MS ? latestImport : null;
+  return pinned ? [pinned, ...[...chosen, ...saved].filter(entry => entry !== pinned)] : [...chosen, ...saved];
 };
 
 export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT): string => {

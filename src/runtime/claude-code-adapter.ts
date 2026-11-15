@@ -1267,7 +1267,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
     if (accepted && signerRejection) {
       return rejectStoredHandoff(`Claude Code handoff import rejected the signer: ${signerRejection}`, known);
     }
-    const ageRejection = input.allowStale ? null : handoffAgeRejection(capsule.createdAt);
+    const ageRejection = handoffAgeRejection(capsule.createdAt, new Date(), undefined, input.allowStale === true);
     if (accepted && ageRejection) {
       return rejectStoredHandoff(`Claude Code handoff import rejected a stale capsule: ${ageRejection}`, known);
     }
@@ -1305,6 +1305,11 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
         startupContext: materialization.startupContext,
       }),
     });
+    // A capsule that was not saved has not been handed off: refuse it (the operator can retry once
+    // memory can be written), so neither the record nor the exit status claims success.
+    if (!saved.saved) {
+      return rejectStoredHandoff(`Claude Code handoff import could not save the handoff: ${saved.notSavedReason ?? "hot memory was not written"}`, known);
+    }
 
     const updated =
       handoffId === null

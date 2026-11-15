@@ -33,9 +33,9 @@ const identity = () => {
   return { nsec: nip19.nsecEncode(secret), npub: nip19.npubEncode(getPublicKey(secret)) };
 };
 
-const machine = async (key: { npub: string; nsec: string }): Promise<Machine> => {
+const machine = async (key: { npub: string; nsec: string }, memoryMode?: "manual" | "assist"): Promise<Machine> => {
   const home = mkdtempSync(path.join(os.tmpdir(), "crosshead-handoff-machine-"));
-  await setupRuntimeProfile({ home, profileName: "default", apiBase: "http://127.0.0.1:0", npub: key.npub, nsec: key.nsec, makeDefault: true });
+  await setupRuntimeProfile({ home, profileName: "default", apiBase: "http://127.0.0.1:0", npub: key.npub, nsec: key.nsec, makeDefault: true, ...(memoryMode ? { memoryMode } : {}) });
   const daemon = new OnlyBotsLocalRuntimeDaemon(home);
   await daemon.start();
   cleanups.push(async () => {
@@ -240,12 +240,25 @@ describe("import safeguards", () => {
     expect(context).toContain("Auth token refresh fixed");
   }, 30_000);
 
+  it("refuses an import it could not save, so neither the record nor the exit status claims success", async () => {
+    const key = identity();
+    const source = await machine(key);
+    const target = await machine(key, "manual");
+    const { capsule } = (await source.claude.createHandoff({ ...exportRequest, targetRuntime: "claude-code" })).record;
+    const result = await target.claude.importHandoff({ capsule, workspaceRoot: project, sessionId: "handoff-import" });
+    expect(result.accepted).toBe(false);
+    expect(result.verification.errors.join(" ")).toContain("could not save the handoff");
+  }, 30_000);
+
   it("dates capsules by their creation time", () => {
     const now = new Date("2026-11-15T00:00:00.000Z");
     expect(handoffAgeRejection("2026-11-10T00:00:00.000Z", now)).toBeNull();
     expect(handoffAgeRejection("2026-09-01T00:00:00.000Z", now)).toContain("--allow-stale");
     expect(handoffAgeRejection("2026-12-01T00:00:00.000Z", now)).toContain("in the future");
     expect(handoffAgeRejection("not a date", now)).toContain("no valid creation time");
+    // --allow-stale accepts an old capsule but never a future or missing date.
+    expect(handoffAgeRejection("2026-09-01T00:00:00.000Z", now, undefined, true)).toBeNull();
+    expect(handoffAgeRejection("2026-12-01T00:00:00.000Z", now, undefined, true)).toContain("in the future");
   });
 });
 

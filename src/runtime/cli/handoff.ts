@@ -18,6 +18,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 			throw new Error("handoff export requires --target codex or --target claude-code");
 		}
 		// Check before exporting: the capsule holds transcript text, so an existing file is not replaced silently.
+		if (flags.output === true) throw new Error("--output needs a file path");
 		const outputFile = typeof flags.output === "string" && flags.output.trim().length > 0 ? path.resolve(flags.output) : null;
 		if (outputFile && existsSync(outputFile) && flags.force !== true) {
 			throw new Error(`${outputFile} already exists; choose another --output path or pass --force to replace it`);
@@ -141,6 +142,8 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 			const record = result.record as { capsule?: unknown } | undefined;
 			if (!record?.capsule) throw new Error("handoff export produced no capsule to write");
 			// mode applies only when the file is created, so a replaced file is narrowed explicitly too.
+			// Narrow an existing file before writing, so the capsule is never readable by others even briefly.
+			if (flags.force === true && existsSync(outputFile)) chmodSync(outputFile, 0o600);
 			writeFileSync(outputFile, `${JSON.stringify(record.capsule, null, 2)}\n`, { mode: 0o600, flag: flags.force === true ? "w" : "wx" });
 			chmodSync(outputFile, 0o600);
 			result = { ...result, capsuleFile: outputFile };
@@ -194,7 +197,11 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 						? flags.sessionId
 						// An import often happens before any session exists on the receiving machine.
 						: "handoff-import",
-			allowedSigners: parseAllowedSigners(flags["allow-signer"] ?? flags.allowSigner),
+			allowedSigners: (() => {
+				const value = flags["allow-signer"] ?? flags.allowSigner;
+				if (value === true) throw new Error("--allow-signer needs an npub");
+				return parseAllowedSigners(value);
+			})(),
 			allowStale: flags["allow-stale"] === true || flags.allowStale === true,
 			accepted: flags.reject ? false : true,
 			note:

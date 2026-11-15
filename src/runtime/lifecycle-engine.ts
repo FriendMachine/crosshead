@@ -995,7 +995,16 @@ const buildHotState = (
     // replace a completed turn's substantive checkpoint.
     const evidence = normalizeTaskEvidence(payload.taskEvidence);
     if (explicitMemory || importedHandoff || evidence?.sources.length || (event.type !== "compact.started" && !/^(?:(?:Codex|Claude Code)\s+)?(?:session (?:started|ended)|(?:completed|failed) a hooked turn)[.!\s]/i.test(finding))) {
-      nextState.continuityCheckpoints = updateHotCheckpoints(baseHot.continuityCheckpoints, {
+      // One imported handoff per workspace: a new import (or the same capsule again, from any
+      // session) replaces the earlier one, so imports cannot crowd out the workspace's own history.
+      const priorCheckpoints = importedHandoff && Array.isArray(baseHot.continuityCheckpoints)
+        ? baseHot.continuityCheckpoints.filter((entry) => {
+          const checkpoint = asRecord(entry);
+          return !(checkpoint && typeof checkpoint.turnId === "string" && checkpoint.turnId.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) &&
+            (checkpoint.workspaceId ?? null) === (event.workspaceId ?? null));
+        })
+        : baseHot.continuityCheckpoints;
+      nextState.continuityCheckpoints = updateHotCheckpoints(priorCheckpoints, {
 	runtime: event.runtime, workspaceId: event.workspaceId, sessionId: event.sessionId,
 	turnId: explicitMemory ? event.eventId : importedHandoff ? (importedHandoffTurnId ?? event.eventId) : event.turnId,
 	goal: continuityOutcome?.goal ?? asString(payload.goal) ?? "",
@@ -1993,10 +2002,10 @@ export class RuntimeLifecycleManager {
 						// turn are superseded by the newer one, so one turn never crowds
 						// earlier sessions out of the bounded synced document.
 						const sameTurn=last ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && c.summary === HOT_TURN_IN_PROGRESS && c.sessionId === event.sessionId && c.turnId === (typeof last.turnId === "string" ? last.turnId : event.turnId) && typeof c.id === "string").map(c=>String(c!.id)) : [];
-						// Re-importing a handoff capsule replaces its earlier synced copy (same capsule, workspace and
-						// profile give the same turn id) rather than adding another large record.
+						// An import replaces any earlier synced import in this scope (the scope is already per
+						// runtime and workspace), so repeats and new capsules never pile up large records.
 						const lastTurnId=last && typeof last.turnId === "string" ? last.turnId : null;
-						const sameImport=lastTurnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && c.turnId === lastTurnId && typeof c.id === "string" && c.id !== event.eventId).map(c=>String(c!.id)) : [];
+						const sameImport=lastTurnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && typeof c.turnId === "string" && c.turnId.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) && typeof c.id === "string" && c.id !== event.eventId).map(c=>String(c!.id)) : [];
 						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn,...sameImport])];
 						if(last && hot.continuityCheckpoints !== current.continuityCheckpoints) {
 						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(supersededIds.length ? {supersedes:supersededIds} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
