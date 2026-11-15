@@ -218,7 +218,7 @@ export const quickstartFromCli = async (argv: string[], paths: QuickstartCliPath
 			ok: true,
 			detail: `configured ${profileName} for ${parsed.apiBase ?? apiBase} with generated runtime identity ${parsed.npub ?? "unknown"}${
 				parsed.registrationDeferred
-					? `; the service could not be reached${parsed.registrationDeferredReason ? ` (${parsed.registrationDeferredReason})` : ""}, so sign-in is deferred until it can (local capture and recall work now)`
+					? `; registration: deferred, the service could not be reached${parsed.registrationDeferredReason ? ` (${parsed.registrationDeferredReason})` : ""}; local capture and recall work now and sign-in happens on the next hosted request`
 					: ""
 			}`,
 		});

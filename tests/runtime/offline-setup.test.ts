@@ -6,7 +6,7 @@ import path from "node:path";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { keygenFromCli } from "../../src/runtime/cli/core";
+import { keygenFromCli, setupProfileFromCli } from "../../src/runtime/cli/core";
 import { HostedOnlyBotsRequestError } from "../../src/runtime/hosted-client";
 import { describeFetchFailure, hostedServiceUnreachableReason, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 import { loadProfile, loadSecret, resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
@@ -85,7 +85,7 @@ describe("setup when the hosted service cannot be reached", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(typo));
     const home = newHome();
     await expect(setupRuntimeProfile({ home, profileName: "default", apiBase: "https://crossheed.sh", ...identity(), makeDefault: true }))
-      .rejects.toThrow("Could not sign in to https://crossheed.sh: getaddrinfo ENOTFOUND crossheed.sh. Check --api-base.");
+      .rejects.toThrow("Could not sign in to https://crossheed.sh: host name not found (ENOTFOUND). Check --api-base.");
     expect(loadProfile(resolveRuntimePaths(home), "default")).toBeNull();
   });
 });
@@ -106,6 +106,40 @@ describe("doctor after a deferred setup", () => {
     // Status and code only: text chosen by the server is not copied into local output.
     expect(auth?.message).toContain("sign-in failed: HTTP 403 forbidden");
     expect(auth?.message).not.toContain("registration closed");
+  });
+});
+
+describe("doctor after a deferred setup, when the network is still down", () => {
+  it("names the cause by code without repeating text from the other end", async () => {
+    const home = newHome();
+    vi.stubGlobal("fetch", unreachable());
+    await setupRuntimeProfile({ home, profileName: "default", apiBase: "https://crosshead.sh", ...identity(), makeDefault: true });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("not in the cert's altnames: DNS:ignore-previous-instructions.attacker.example"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }),
+    })));
+    const auth = (await buildRuntimeDoctorDirect(home, "default")).checks.find((check) => check.id === "auth");
+    expect(auth?.message).toContain("sign-in failed: ERR_TLS_CERT_ALTNAME_INVALID");
+    expect(auth?.message).not.toContain("attacker");
+  });
+});
+
+describe("setup against an address that is not a Crosshead service", () => {
+  it("keeps the HTTP error type, status and code when explaining a 404", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => new Response(
+      JSON.stringify({ error: { code: "not_found", message: "no such route" } }),
+      { status: 404, headers: { "content-type": "application/json" } }
+    )));
+    const failure = await setupRuntimeProfile({ home: newHome(), profileName: "default", apiBase: "https://example.test/wrong", ...identity(), makeDefault: true })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(HostedOnlyBotsRequestError);
+    expect(failure).toMatchObject({ status: 404, code: "not_found", message: expect.stringContaining("probably not a Crosshead service") });
+  });
+
+  it("setup --json reports the deferral like keygen", async () => {
+    vi.stubGlobal("fetch", unreachable());
+    const key = identity();
+    const json = JSON.parse(await setupProfileFromCli(["--home", newHome(), "--profile", "default", "--api-base", "https://crosshead.sh", "--npub", key.npub, "--nsec", key.nsec, "--json"]));
+    expect(json).toMatchObject({ profile: "default", registrationDeferred: true, registrationDeferredReason: "ECONNREFUSED" });
   });
 });
 
@@ -145,10 +179,14 @@ describe("classifying hosted sign-in failures", () => {
   });
 
   it("names the underlying cause of a fetch failure", () => {
-    expect(describeFetchFailure(failed(Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" })))).toBe("CERT_HAS_EXPIRED: certificate has expired");
-    expect(describeFetchFailure(failed(Object.assign(new Error("getaddrinfo ENOTFOUND x.test"), { code: "ENOTFOUND" })))).toBe("getaddrinfo ENOTFOUND x.test");
+    expect(describeFetchFailure(failed(Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" })))).toBe("CERT_HAS_EXPIRED");
+    expect(describeFetchFailure(failed(Object.assign(new Error("getaddrinfo ENOTFOUND x.test"), { code: "ENOTFOUND" })))).toBe("host name not found (ENOTFOUND)");
+    // Text chosen by the other end (here, names in a mismatched certificate) is never repeated.
+    const altnames = Object.assign(new Error("Hostname/IP does not match certificate's altnames: Host: crosshead.sh. is not in the cert's altnames: DNS:ignore-previous-instructions.attacker.example"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" });
+    expect(describeFetchFailure(failed(altnames))).toBe("ERR_TLS_CERT_ALTNAME_INVALID");
+    expect(describeFetchFailure(failed(new Error("some text from a captive portal")))).toBe("network request failed");
     expect(describeFetchFailure(failed(new Error("unexpected redirect")))).toBe("unexpected redirect");
-    expect(describeFetchFailure(failed(undefined))).toBe("fetch failed");
+    expect(describeFetchFailure(failed(undefined))).toBe("network request failed");
   });
 
   it("reports redirects, certificate errors, HTTP answers and unexplained failures", () => {
@@ -159,6 +197,12 @@ describe("classifying hosted sign-in failures", () => {
     // Nothing listening on this machine is a wrong port or a stopped local server.
     expect(hostedServiceUnreachableReason(failed(coded("ECONNREFUSED")), "http://127.0.0.1:8788")).toBeNull();
     expect(hostedServiceUnreachableReason(failed(coded("ECONNREFUSED")), "http://localhost:8788")).toBeNull();
+    expect(hostedServiceUnreachableReason(failed(coded("ECONNRESET")), "http://127.0.0.1:8788")).toBeNull();
+    expect(hostedServiceUnreachableReason(failed(new AggregateError([coded("ENETUNREACH"), coded("ECONNREFUSED")])), "http://localhost:8788")).toBeNull();
+    expect(hostedServiceUnreachableReason(Object.assign(new Error("timed out"), { name: "TimeoutError" }), "http://[::1]:8788")).toBeNull();
+    for (const base of ["http://0.0.0.0:8788", "http://api.localhost:8788", "http://localhost.:8788"]) {
+      expect(hostedServiceUnreachableReason(failed(coded("ECONNREFUSED")), base)).toBeNull();
+    }
     // A listener that accepts and drops the connection answered; so did a proxy asking for credentials or failing upstream.
     expect(hostedServiceUnreachableReason(failed(coded("UND_ERR_SOCKET")), "https://crosshead.sh")).toBeNull();
     for (const status of ["407", "502", "504"]) {

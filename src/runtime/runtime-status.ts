@@ -573,7 +573,8 @@ export const buildDoctorReport = async (paths: RuntimePaths, profileName?: strin
 					const hosted = describeHostedFailure(error);
 					signInError = error instanceof TypeError && /fetch failed/i.test(error.message)
 						? describeFetchFailure(error)
-						: hosted.errorClass === "http" ? `HTTP ${hosted.status}${hosted.code ? ` ${hosted.code}` : ""}` : String(hosted.errorClass);
+						: hosted.errorClass === "http" ? `HTTP ${hosted.status}${hosted.code ? ` ${hosted.code}` : ""}`
+							: hosted.errorClass === "Error" ? "the service's sign-in challenge could not be used" : String(hosted.errorClass);
 				}
 			}
 			// A profile set up while the service was unreachable has never held a session. Say so,

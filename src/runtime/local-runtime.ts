@@ -1306,15 +1306,16 @@ const DEFAULT_HOSTED_HOSTS = new Set(["crosshead.sh", "www.crosshead.sh"]);
  */
 export const hostedServiceUnreachableReason = (error: unknown, apiBase: string): string | null => {
 	if (!(error instanceof Error) || error instanceof HostedOnlyBotsRequestError) return null;
+	let host = "";
+	try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
+	// This machine cannot be "offline" from itself: any failure to reach a loopback address,
+	// including a timeout, is a wrong port or a stopped or hung local server, which setup must report.
+	if (/^(localhost\.?|.+\.localhost\.?|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\])$/i.test(host)) return null;
 	if (error.name === "TimeoutError" || error.name === "AbortError") return "timed out";
 	if (error.name !== "TypeError" || !/fetch failed/i.test(error.message)) return null;
 	const causes = fetchCauses(error.cause);
 	const codes = causes.flatMap((cause) => (cause.code ? [cause.code] : []));
-	let host = "";
-	try { host = new URL(apiBase).hostname; } catch { /* an invalid URL fails elsewhere */ }
-	// Nothing listening on this machine is a wrong port or a stopped local server, not being offline.
-	const loopback = /^(localhost|127(\.\d{1,3}){3}|\[?::1\]?)$/i.test(host);
-	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code) && !(loopback && code === "ECONNREFUSED"));
+	const unreachable = codes.find((code) => NETWORK_UNREACHABLE_CODES.has(code));
 	if (unreachable) return unreachable;
 	// Only a proxy that forbids the destination means "not from here". 407 is missing proxy
 	// credentials and 502/504 usually a host the proxy could not resolve: both need fixing, not waiting.
@@ -1364,11 +1365,16 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				if (reason === null) {
 					// Name the real cause: a bare "fetch failed" hides a typo in --api-base or a certificate problem.
 					if (error instanceof TypeError && /fetch failed/i.test(error.message)) {
-						throw new Error(`Could not sign in to ${options.apiBase}: ${describeFetchFailure(error)}. Check --api-base${
-							/Proxy response/.test(describeFetchFailure(error)) ? " and the HTTPS_PROXY settings" : ""}.`, { cause: error });
+						const reason = describeFetchFailure(error);
+						throw new Error(`Could not sign in to ${options.apiBase}: ${reason}. Check --api-base${
+							reason.startsWith("proxy") ? " and the proxy settings (HTTPS_PROXY, NODE_USE_ENV_PROXY)" : ""}.`, { cause: error });
 					}
 					if (error instanceof HostedOnlyBotsRequestError && error.status === 404) {
-						throw new Error(`Could not sign in to ${options.apiBase}: it answered 404, so it is probably not a Crosshead service. Check --api-base.`, { cause: error });
+						// Keep the type, status and code: --json error output reports them.
+						throw new HostedOnlyBotsRequestError({
+							message: `Could not sign in to ${options.apiBase}: it answered 404, so it is probably not a Crosshead service. Check --api-base.`,
+							status: error.status, code: error.code, details: error.details, retryAfterMs: error.retryAfterMs,
+						});
 					}
 					throw error;
 				}

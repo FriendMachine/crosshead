@@ -131,6 +131,12 @@ export const setupProfileFromCli = async (argv: string[]): Promise<string> => {
 		npub: String(flags.npub ?? ""),
 		nsec: String(flags.nsec ?? ""),
 	});
+	if (flags.json) {
+		return JSON.stringify({
+			profile: profile.name, npub: profile.npub, apiBase: profile.apiBase, memoryMode: profile.memoryMode,
+			...(profile.registrationDeferred ? { registrationDeferred: true, registrationDeferredReason: profile.registrationDeferredReason ?? null } : {}),
+		}, null, 2);
+	}
 	return [`Configured runtime profile ${profile.name} for ${profile.npub}`, ...registrationDeferredLines(profile)].join("\n");
 };
 

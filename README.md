@@ -171,7 +171,8 @@ project.
 Setup does not need the hosted service to be reachable. If `crosshead.sh`
 cannot be reached (a sandbox with restricted egress, a CI job, a laptop
 offline), the profile is still created and setup prints `registration:
-deferred` with the network error. Capture and recall work locally at once, and
+deferred` with the network error (`--json` output carries
+`registrationDeferred` and `registrationDeferredReason`). Capture and recall work locally at once, and
 the profile tries to sign in on its next hosted request. That sign-in can still
 be refused; `crosshead doctor` reports a profile that has never signed in and
 why.
@@ -181,7 +182,8 @@ response that refuses the sign-in, a redirect, a certificate error, a refused
 connection to this machine (`localhost`, `127.0.0.1`), a proxy asking for
 credentials or failing upstream, or (for any `--api-base` other than
 `crosshead.sh`) a host name that does not exist. A proxy that refuses the
-destination (HTTP 403) counts as unreachable. A proxy that intercepts TLS and
+destination (HTTP 403) counts as unreachable; Node uses `HTTPS_PROXY` only when
+`NODE_USE_ENV_PROXY=1` is set, and otherwise connects directly. A proxy that intercepts TLS and
 answers with its own page or certificate is not recognised and fails setup;
 use the local-only profile below in that case.
 
