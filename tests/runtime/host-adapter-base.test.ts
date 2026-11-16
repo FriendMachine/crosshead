@@ -32,6 +32,12 @@ describe("host adapter hot-memory filtering", () => {
     expect(filterHotMemorySnapshotForWorkspace(snapshot, "repo:/fixture", true)?.scopes).toEqual([snapshot.scopes[1]]);
     expect(filterHotMemorySnapshotForWorkspace(snapshot, "repo:/other", true)).toBeNull();
   });
+  it("uses legacy shared memory only before the current project has its own state", () => {
+    const shared = { scope: "shared", content: JSON.stringify({ currentGoal: "other project work" }) };
+    const owned = { scope: "codex", content: JSON.stringify({ workspaceId: "repo:/fixture", currentGoal: "this project work" }) };
+    expect(filterHotMemorySnapshotForWorkspace({ scope: "all", scopes: [shared] }, "repo:/fixture")?.scopes).toEqual([shared]);
+    expect(filterHotMemorySnapshotForWorkspace({ scope: "all", scopes: [shared, owned] }, "repo:/fixture")?.scopes).toEqual([owned]);
+  });
   it("delivers the newer workspace copy once and accepts newer legacy-client updates", () => {
     const workspaceId = "repo:/tmp/project", runtime = "codex";
     const older = { workspaceId, runtime, updatedAt: "2026-10-20T00:00:00Z", lastTurn: { summary: "old finding" } };

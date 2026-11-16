@@ -81,7 +81,7 @@ export const filterHotMemorySnapshotForWorkspace = (
     const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(hotMemory));
     return entryWorkspaceId === workspaceId || (!workspaceOnly && !entryWorkspaceId) ? hotMemory : null;
   }
-  const scopes = scopedEntries.filter((entry) => {
+  let scopes = scopedEntries.filter((entry) => {
     if (!hasHotMemoryEntryContent(entry)) {
       return false;
     }
@@ -90,6 +90,12 @@ export const filterHotMemorySnapshotForWorkspace = (
   });
   if (scopes.length === 0) {
     return null;
+  }
+  // Once this project has its own hot state, a legacy shared doc may describe
+  // another project. Keep the shared fallback only until project state exists.
+  if (!workspaceOnly) {
+    const owned = scopes.filter((entry) => getWorkspaceId(parseHotMemoryEntryContent(entry)) === workspaceId);
+    if (owned.length > 0) scopes = owned;
   }
   // The legacy runtime alias and its retained workspace partition describe one
   // document. Inject the newest version once, under the readable runtime name.
