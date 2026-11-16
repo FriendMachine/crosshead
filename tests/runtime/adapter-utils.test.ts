@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import os from "node:os";
 import path from "node:path";
 import { runInNewContext } from "node:vm";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import {
   buildWrapperScript,
@@ -196,7 +196,7 @@ printf '%s\\n' "\${CODEX_HOME:-\${CLAUDE_CONFIG_DIR:-\${CLAUDE_CODE_HOME:-}}}" "
       },
     );
 
-    it.each(["codex", "claude"])("launches %s when the update check fails", host => {
+    it.each(["codex", "claude"])("defers %s when the update check fails", host => {
       const fixture = mkdtempSync(path.join(os.tmpdir(), "crosshead-failed-update-check-"));
       try {
         const runtimeHome = path.join(fixture, "runtime");
@@ -210,8 +210,30 @@ printf '%s\\n' "\${CODEX_HOME:-\${CLAUDE_CONFIG_DIR:-\${CLAUDE_CODE_HOME:-}}}" "
         writeFileSync(wrapper, host === "codex"
           ? renderCodexLaunchWrapper({ ...common, adapterName: "codex", codexBinary: hostBinary, skillName: "test" })
           : renderClaudeLaunchWrapper({ ...common, adapterName: "claude-code", claudeBinary: hostBinary, workspaceRoot: fixture }));
-        const output = execFileSync("bash", [wrapper], { encoding: "utf8", env: { PATH: process.env.PATH } });
-        expect(output).toContain("host launched");
+        const result = spawnSync("bash", [wrapper], { encoding: "utf8", env: { PATH: process.env.PATH } });
+        expect(result.status).toBe(1);
+        expect(result.stdout).not.toContain("host launched");
+        expect(result.stderr).toContain("retry host launch");
+      } finally { rmSync(fixture, { recursive: true, force: true }); }
+    });
+
+    it.each(["codex", "claude"])("defers %s launch when the update check is missing", host => {
+      const fixture = mkdtempSync(path.join(os.tmpdir(), "crosshead-locked-launch-"));
+      try {
+        const runtimeHome = path.join(fixture, "runtime");
+        const hostBinary = path.join(fixture, "host-stub");
+        const wrapper = path.join(fixture, "launcher");
+        mkdirSync(path.join(runtimeHome, "bin"), { recursive: true });
+        writeFileSync(hostBinary, "#!/bin/sh\nprintf 'host launched\\n'\n", { mode: 0o755 });
+        const common = { marker: "test", adapterVersion: "test", runtimeHome, hostHome: path.join(fixture, "host"),
+          profileName: "default", installedAt: "now", updatedAt: "now" };
+        writeFileSync(wrapper, host === "codex"
+          ? renderCodexLaunchWrapper({ ...common, adapterName: "codex", codexBinary: hostBinary, skillName: "test" })
+          : renderClaudeLaunchWrapper({ ...common, adapterName: "claude-code", claudeBinary: hostBinary, workspaceRoot: fixture }));
+        const result = spawnSync("bash", [wrapper], { encoding: "utf8", env: { PATH: process.env.PATH } });
+        expect(result.status).toBe(1);
+        expect(result.stdout).not.toContain("host launched");
+        expect(result.stderr).toContain("update check is unavailable");
       } finally { rmSync(fixture, { recursive: true, force: true }); }
     });
 

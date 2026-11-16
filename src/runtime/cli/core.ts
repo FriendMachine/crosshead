@@ -2,7 +2,7 @@ import { OnlyBotsLocalRuntimeDaemon, RuntimeAdapterName, RuntimeChannel, Runtime
 import path from "path";
 import { RUNTIME_ADAPTER_NAMES, ensureRuntimeHomeLayout, loadAdapterRecord, loadRuntimeConfig, resolveRuntimeHome } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
-import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, withRuntimeUpdateLock } from "../runtime-auto-update";
+import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, withRuntimeUpdateLock } from "../runtime-auto-update";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 import { inspectHostHookRegistrations } from "../host-hook-doctor";
 import { inspectWorkspaceHooks, workspaceBindingStatus } from "../workspace-hooks";
@@ -64,12 +64,16 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 	const channel = typeof flags.channel === "string" ? (flags.channel as RuntimeChannel) : config.channel;
 	const versionOverride = typeof flags.version === "string" ? flags.version : undefined;
 	const target = positionals[0];
+	const mutate = <T>(action: () => Promise<T>): Promise<T> => withRuntimeUpdateLock(paths.home, () => {
+		assertNoLiveRuntimeHosts(paths.home, flags.force === true);
+		return action();
+	});
 
 	if (target && RUNTIME_ADAPTER_NAMES.includes(target as RuntimeAdapterName)) {
 		const adapterName = target as RuntimeAdapterName;
 		const adapter = loadAdapterRecord(paths, adapterName);
 		const targetVersion = resolveAdapterTargetVersion(adapterName, channel, versionOverride);
-		await updateRuntimeAdapterVersion(paths.home, adapterName, targetVersion);
+		await mutate(() => updateRuntimeAdapterVersion(paths.home, adapterName, targetVersion));
 		return [
 			`Updated ${adapterName}`,
 			`channel: ${channel}`,
@@ -78,11 +82,12 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 	}
 
 	if (typeof flags["base-url"] === "string" || typeof flags.baseUrl === "string" || (!versionOverride && typeof flags.channel !== "string")) {
-		const result = await withRuntimeUpdateLock(paths.home, async () => {
+		const result = await mutate(async () => {
 			const updated = await updateManagedRuntimeRelease(paths.home, {
 				baseUrl: typeof flags["base-url"] === "string" ? flags["base-url"] : typeof flags.baseUrl === "string" ? flags.baseUrl : undefined,
 				trustedSha256: typeof flags.sha256 === "string" ? flags.sha256 : undefined,
 				restart: !flags["no-restart"],
+				beforeApply: () => assertNoLiveRuntimeHosts(paths.home, flags.force === true),
 			});
 			if (runtimeUpdatePolicy(paths.home).mode === "manual") runtimeUpdatePolicy(paths.home, "manual");
 			return updated;
@@ -90,7 +95,7 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 		return formatRuntimeReleaseUpdate(result);
 	}
 
-	const updated = await updateRuntimeCatalogInstall(paths.home, channel, versionOverride);
+	const updated = await mutate(() => updateRuntimeCatalogInstall(paths.home, channel, versionOverride));
 	return [
 		"Updated runtime install metadata",
 		`channel: ${channel}`,
@@ -109,11 +114,16 @@ export const rollbackFromCli = async (argv: string[]): Promise<string> => {
 		throw new Error("rollback requires --to <version>");
 	}
 	const target = positionals[0];
+	const runtimeHome = resolveRuntimeHome(home);
+	const mutate = <T>(action: () => Promise<T>): Promise<T> => withRuntimeUpdateLock(runtimeHome, () => {
+		assertNoLiveRuntimeHosts(runtimeHome, flags.force === true);
+		return action();
+	});
 	if (target && RUNTIME_ADAPTER_NAMES.includes(target as RuntimeAdapterName)) {
-		await rollbackRuntimeAdapterVersion(resolveRuntimeHome(home), target as RuntimeAdapterName, targetVersion);
+		await mutate(() => rollbackRuntimeAdapterVersion(runtimeHome, target as RuntimeAdapterName, targetVersion));
 		return `Rolled back ${target} to ${targetVersion}`;
 	}
-	await rollbackRuntimeCoreVersion(resolveRuntimeHome(home), targetVersion);
+	await mutate(() => rollbackRuntimeCoreVersion(runtimeHome, targetVersion));
 	return `Rolled back runtime core to ${targetVersion}`;
 };
 
