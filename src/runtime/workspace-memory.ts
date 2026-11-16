@@ -58,9 +58,12 @@ export const filterHotMemorySnapshotForWorkspace = (
     };
     const normalize = (entry: Record<string, unknown>): Record<string, unknown> | null => {
       const content = parseHotMemoryEntryContent(entry);
-      if (!content || !equivalent(getWorkspaceId(content), entry.updated_at ?? content.updatedAt ?? content.occurredAt)) return null;
+      // A hosted server can change updated_at. Legacy adoption must use the timestamp
+      // inside the verified client signature; local files may use their local mtime.
+      const observedAt = entry.integrity === "verified" ? entry.signed_at : entry.updated_at ?? content?.updatedAt ?? content?.occurredAt;
+      if (!content || !equivalent(getWorkspaceId(content), observedAt)) return null;
       const checkpoints = Array.isArray(content.continuityCheckpoints)
-	? content.continuityCheckpoints.filter(isRecord).filter(checkpoint => equivalent(getWorkspaceId(checkpoint), checkpoint.occurredAt ?? entry.updated_at ?? content.updatedAt))
+	? content.continuityCheckpoints.filter(isRecord).filter(checkpoint => equivalent(getWorkspaceId(checkpoint), checkpoint.occurredAt ?? observedAt))
 	  .map(checkpoint => ({ ...checkpoint, workspaceId })) : undefined;
       return { ...entry, content: JSON.stringify({ ...content, workspaceId,
 	...(checkpoints ? { continuityCheckpoints: checkpoints } : {}) }) };
@@ -78,7 +81,7 @@ export const filterHotMemorySnapshotForWorkspace = (
     const entryWorkspaceId = getWorkspaceId(parseHotMemoryEntryContent(hotMemory));
     return entryWorkspaceId === workspaceId || (!workspaceOnly && !entryWorkspaceId) ? hotMemory : null;
   }
-  const scopes = scopedEntries.filter((entry) => {
+  let scopes = scopedEntries.filter((entry) => {
     if (!hasHotMemoryEntryContent(entry)) {
       return false;
     }
@@ -87,6 +90,12 @@ export const filterHotMemorySnapshotForWorkspace = (
   });
   if (scopes.length === 0) {
     return null;
+  }
+  // Once this project has its own hot state, a legacy shared doc may describe
+  // another project. Keep the shared fallback only until project state exists.
+  if (!workspaceOnly) {
+    const owned = scopes.filter((entry) => getWorkspaceId(parseHotMemoryEntryContent(entry)) === workspaceId);
+    if (owned.length > 0) scopes = owned;
   }
   // The legacy runtime alias and its retained workspace partition describe one
   // document. Inject the newest version once, under the readable runtime name.

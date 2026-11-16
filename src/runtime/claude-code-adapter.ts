@@ -42,11 +42,12 @@ import {
   parseArgs,
   sanitizeString,
   shellQuote,
-  summarizeHotMemory,
+  summarizeHotMemorySnapshot,
   summarizeJudgmentEntries,
   writeManagedFile,
 } from "./adapter-utils";
 import {
+  filterHotMemorySnapshotForWorkspace,
   HostRuntimeAdapterBase,
   type HostAdapterCompactEventRequest,
   type HostAdapterIdentity,
@@ -959,28 +960,31 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
 
   async createHandoff(input: ClaudeCodeAdapterHandoffCreateRequest): Promise<ClaudeCodeAdapterHandoffCreateResult> {
     const profileName = input.profileName ?? this.config.profileName;
+    const workspaceId = input.workspaceId ?? `repo:${path.resolve(input.workspaceRoot)}`;
     const needsHotSummary = !input.memory?.hotSummary;
-    const needsWarmIds = !input.memory?.warmIds || input.memory.warmIds.length === 0;
-    const needsJudgment =
+    // Hosted warm and judgment views are profile-wide and have no trustworthy project filter.
+    const needsWarmIds = !this.config.workspaceOnly && (!input.memory?.warmIds || input.memory.warmIds.length === 0);
+    const needsJudgment = !this.config.workspaceOnly && (
       !input.memory?.selfModelIds ||
       input.memory.selfModelIds.length === 0 ||
       !input.reasoning?.currentTheory ||
       !input.reasoning?.openQuestions ||
       input.reasoning.openQuestions.length === 0 ||
       !input.reasoning?.rejectedPaths ||
-      !input.reasoning.unresolvedRisks;
+      !input.reasoning.unresolvedRisks);
     const needsIdentity = !input.identity?.npub;
     const needsPolicyRef = !input.policy?.policyRef;
 
     const targetRuntime = input.targetRuntime ?? "codex";
     const targetLabel = targetRuntime === "codex" ? "Codex" : "Claude Code";
     const warnings: string[] = [];
-    const [hot, warm, judgment, status] = await Promise.all([
-      needsHotSummary ? this.client.readHotMemory(profileName) : Promise.resolve(null),
+    const [rawHot, warm, judgment, status] = await Promise.all([
+      needsHotSummary ? this.client.readHotMemory(profileName, "all") : Promise.resolve(null),
       optionalHostedRead(needsWarmIds, () => this.client.listWarmMemory(profileName, { status: "active" }), "Warm memory", warnings),
       optionalHostedRead(needsJudgment, () => this.client.inspectContinuityJudgment(profileName), "Continuity judgment", warnings),
       needsIdentity || needsPolicyRef ? this.client.status(profileName) : Promise.resolve(null),
     ]);
+    const hot = filterHotMemorySnapshotForWorkspace(rawHot, workspaceId, this.config.workspaceOnly, this.config.legacyUnscoped, this.config.legacyBefore);
 
     const snapshot =
       judgment?.snapshot && typeof judgment.snapshot === "object" && !Array.isArray(judgment.snapshot)
@@ -1044,7 +1048,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
         nextAction: input.reasoning?.nextAction ?? null,
       },
       memory: {
-        hotSummary: input.memory?.hotSummary ?? summarizeHotMemory(hot?.content),
+	hotSummary: input.memory?.hotSummary ?? summarizeHotMemorySnapshot(hot, this.config.workspaceOnly ? "claude-code" : "shared"),
         warmIds: input.memory?.warmIds ?? activeWarmIds,
         coldChunkIds: input.memory?.coldChunkIds ?? [],
         projectModelIds: input.memory?.projectModelIds ?? [],
@@ -1085,6 +1089,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
     const plainTextSummary = buildPlainTextContinuationSummary(translation, targetRuntime);
     const restatementComparison = compareContinuityRestatement(materialization.startupContext, translation, targetRuntime);
     const created = (await this.client.createHandoff({
+      profileName,
       translation,
       maxBytes: input.maxBytes,
     })) as { handoff?: HandoffStoredRecord };

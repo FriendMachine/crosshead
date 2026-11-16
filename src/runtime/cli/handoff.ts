@@ -1,8 +1,93 @@
 import path from "path";
 import { OnlyBotsLocalRuntimeDaemon, formatHandoffExportResult, formatHandoffImportResult, formatHandoffInspection, formatHandoffOutcomeResult, formatHandoffVerification, parseArgs, parseJsonFlag } from "../local-runtime";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, linkSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { randomUUID } from "crypto";
 import { parseAllowedSigners } from "../handoff-import";
+import { HANDOFF_CAPSULE_DEFAULT_MAX_BYTES } from "../handoff-capsules";
 import { workspaceProjectRoot } from "../workspace-identity";
+import { resolveRuntimePaths } from "../runtime-persistence";
+import { readWorkspaceHookPolicy, workspaceHookForInvocation } from "../workspace-hooks";
+
+type HandoffHost = "codex" | "claude-code";
+
+// Pretty-printed JSON is larger than the signed capsule's 16 KiB canonical budget.
+const HANDOFF_CAPSULE_FILE_MAX_BYTES = HANDOFF_CAPSULE_DEFAULT_MAX_BYTES * 8;
+const HANDOFF_CREATE_INPUT_MAX_BYTES = 1024 * 1024;
+
+const readJsonFileBounded = (filePath: string, maxBytes: number): Record<string, unknown> => {
+	const fd = openSync(path.resolve(filePath), constants.O_RDONLY | constants.O_NONBLOCK);
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || stat.size > maxBytes) throw new Error(`Handoff file must be a regular file no larger than ${maxBytes} bytes`);
+		const buffer = Buffer.alloc(maxBytes + 1);
+		let length = 0;
+		while (length < buffer.length) {
+			const count = readSync(fd, buffer, length, buffer.length - length, null);
+			if (count === 0) break;
+			length += count;
+		}
+		if (length > maxBytes) throw new Error(`Handoff file must be no larger than ${maxBytes} bytes`);
+		return JSON.parse(buffer.toString("utf8", 0, length)) as Record<string, unknown>;
+	} finally {
+		closeSync(fd);
+	}
+};
+
+const writeCapsuleFile = (outputFile: string, capsule: unknown, force: boolean): void => {
+	const rendered = `${JSON.stringify(capsule, null, 2)}\n`;
+	if (Buffer.byteLength(rendered) > HANDOFF_CAPSULE_FILE_MAX_BYTES) {
+		throw new Error(`Handoff capsule file exceeds ${HANDOFF_CAPSULE_FILE_MAX_BYTES} bytes`);
+	}
+	const temporary = path.join(path.dirname(outputFile), `.${path.basename(outputFile)}.${randomUUID()}.tmp`);
+	try {
+		writeFileSync(temporary, rendered, { mode: 0o600, flag: "wx" });
+		chmodSync(temporary, 0o600);
+		if (force) renameSync(temporary, outputFile);
+		else linkSync(temporary, outputFile);
+	} finally {
+		try { unlinkSync(temporary); } catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+};
+
+const scopedWorkspaceId = (root: string, requested: string | undefined): string => {
+	const canonical = `repo:${root}`;
+	if (requested !== undefined && requested !== canonical) {
+		throw new Error(`This scoped workspace uses ${canonical}. Remove the workspace-id override or use the bound project.`);
+	}
+	return canonical;
+};
+
+const scopedHandoffBinding = (home: string | undefined, host: HandoffHost, directory: string, profileName: string | undefined, hostHome: string | undefined) => {
+	const paths = resolveRuntimePaths(home);
+	const policy = readWorkspaceHookPolicy(paths);
+	if (!policy) return null;
+	let selected: ReturnType<typeof workspaceHookForInvocation> = null;
+	for (const binding of policy.bindings) {
+		if (binding.host !== host) continue;
+		const match = workspaceHookForInvocation(policy, host, binding.id, directory);
+		if (!match) continue;
+		if (selected) throw new Error(`Multiple ${host} bindings apply to this workspace. Run crosshead workspace check to repair the configuration.`);
+		selected = match;
+	}
+	if (!selected) return null;
+	if (profileName !== undefined && profileName !== selected.binding.profile) {
+		throw new Error(`This workspace uses profile ${selected.binding.profile} for ${host}. Choose that profile or reconfigure the workspace.`);
+	}
+	if (hostHome && path.resolve(hostHome) !== selected.binding.hostHome) {
+		throw new Error(`This workspace uses ${selected.binding.hostHome} as its ${host} home. Remove the host-home override or reconfigure the workspace.`);
+	}
+	return {
+		home: paths.home,
+		hostHome: selected.binding.hostHome,
+		root: selected.root,
+		profileName: selected.binding.profile,
+		sourceExcerpts: selected.binding.sourceExcerpts,
+		legacyUnscoped: selected.binding.legacyUnscoped ?? false,
+		legacyBefore: selected.binding.legacyBefore,
+	};
+};
 
 export const handoffFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
@@ -116,23 +201,31 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		let result: Record<string, unknown>;
 		if (sourceRuntime === "codex") {
 			const { CodexRuntimeAdapter } = await import("../codex-adapter");
-			const adapter = CodexRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "codex", workspaceRoot, profileName, typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined);
+			const adapter = scoped ? CodexRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : CodexRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
 			});
 			result = (await adapter.createHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
+				hostHome: scoped?.hostHome ?? (typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else if (sourceRuntime === "claude-code") {
 			const { ClaudeCodeRuntimeAdapter } = await import("../claude-code-adapter");
-			const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "claude-code", workspaceRoot, profileName, typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined);
+			const adapter = scoped ? ClaudeCodeRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.root, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : ClaudeCodeRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
 			});
 			result = (await adapter.createHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
+				hostHome: scoped?.hostHome ?? (typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else {
 			throw new Error("handoff export requires --source codex or --source claude-code");
@@ -141,11 +234,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		if (outputFile) {
 			const record = result.record as { capsule?: unknown } | undefined;
 			if (!record?.capsule) throw new Error("handoff export produced no capsule to write");
-			// mode applies only when the file is created, so a replaced file is narrowed explicitly too.
-			// Narrow an existing file before writing, so the capsule is never readable by others even briefly.
-			if (flags.force === true && existsSync(outputFile)) chmodSync(outputFile, 0o600);
-			writeFileSync(outputFile, `${JSON.stringify(record.capsule, null, 2)}\n`, { mode: 0o600, flag: flags.force === true ? "w" : "wx" });
-			chmodSync(outputFile, 0o600);
+			writeCapsuleFile(outputFile, record.capsule, flags.force === true);
 			result = { ...result, capsuleFile: outputFile };
 		}
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatHandoffExportResult(result as unknown as Record<string, unknown>);
@@ -162,7 +251,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 					: "";
 		const capsule =
 			filePath.trim().length > 0
-				? (JSON.parse(readFileSync(path.resolve(filePath), "utf8")) as Record<string, unknown>)
+				? readJsonFileBounded(filePath, HANDOFF_CAPSULE_FILE_MAX_BYTES)
 				: undefined;
 		if (!capsule && handoffId.trim().length === 0) {
 			throw new Error("handoff import requires --file <capsule.json> or --id <handoff_id>");
@@ -214,23 +303,31 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		let result: Record<string, unknown>;
 		if (targetRuntime === "claude-code") {
 			const { ClaudeCodeRuntimeAdapter } = await import("../claude-code-adapter");
-			const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "claude-code", sharedRequest.workspaceRoot, profileName, typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined);
+			const adapter = scoped ? ClaudeCodeRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.root, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : ClaudeCodeRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
 			});
 			result = (await adapter.importHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
+				hostHome: scoped?.hostHome ?? (typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else if (targetRuntime === "codex") {
 			const { CodexRuntimeAdapter } = await import("../codex-adapter");
-			const adapter = CodexRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "codex", sharedRequest.workspaceRoot, profileName, typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined);
+			const adapter = scoped ? CodexRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : CodexRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
 			});
 			result = (await adapter.importHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
+				hostHome: scoped?.hostHome ?? (typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else {
 			throw new Error("handoff import currently supports only --target claude-code or --target codex");
@@ -356,7 +453,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		if (inputPath.trim().length === 0) {
 			throw new Error("handoff create requires --input <translation.json>");
 		}
-		const payload = JSON.parse(readFileSync(path.resolve(inputPath), "utf8")) as Record<string, unknown>;
+		const payload = readJsonFileBounded(inputPath, HANDOFF_CREATE_INPUT_MAX_BYTES);
 		const result = await daemon.createHandoff(
 			{
 				...payload,
@@ -384,7 +481,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		if (filePath.trim().length === 0) {
 			throw new Error("handoff verify requires --file <capsule.json>");
 		}
-		const capsule = JSON.parse(readFileSync(path.resolve(filePath), "utf8")) as Record<string, unknown>;
+		const capsule = readJsonFileBounded(filePath, HANDOFF_CAPSULE_FILE_MAX_BYTES);
 		const result = await daemon.verifyHandoff({ capsule }, profileName);
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatHandoffVerification(result);
 	}
@@ -398,7 +495,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 					? flags["handoff-id"]
 					: "";
 		if (filePath.trim().length > 0) {
-			const capsule = JSON.parse(readFileSync(path.resolve(filePath), "utf8")) as Record<string, unknown>;
+			const capsule = readJsonFileBounded(filePath, HANDOFF_CAPSULE_FILE_MAX_BYTES);
 			const result = await daemon.inspectHandoff({ capsule }, profileName);
 			return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatHandoffInspection(result);
 		}

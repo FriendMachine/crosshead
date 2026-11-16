@@ -95,7 +95,9 @@ jobs:
         if: always()
         with:
           name: host-plugin-macos-results
-          path: ${{ runner.temp }}/crosshead-plugin-smoke/
+          path: |
+            ${{ runner.temp }}/crosshead-plugin-smoke/host-plugins-result.json
+            ${{ runner.temp }}/crosshead-plugin-smoke/logs/
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

@@ -3343,8 +3343,8 @@ export class OnlyBotsLocalRuntimeDaemon {
 			return manager.read(scope ?? "shared");
 		}
 		// Pass the scope through unchanged (undefined => the server's shared default), so internal
-		// callers like adapter handoff summaries keep the single-doc shape. The operator CLI opts
-		// into the cross-body union explicitly by passing scope=all.
+		// legacy callers keep the single-doc shape. Handoff and operator flows request
+		// the cross-body union explicitly with scope=all and filter it by workspace.
 		const result = await client.readHotMemory(scope);
 		await this.persistSession(resolvedProfileName, secret, client);
 		return result;

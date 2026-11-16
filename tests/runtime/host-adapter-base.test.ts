@@ -32,6 +32,12 @@ describe("host adapter hot-memory filtering", () => {
     expect(filterHotMemorySnapshotForWorkspace(snapshot, "repo:/fixture", true)?.scopes).toEqual([snapshot.scopes[1]]);
     expect(filterHotMemorySnapshotForWorkspace(snapshot, "repo:/other", true)).toBeNull();
   });
+  it("uses legacy shared memory only before the current project has its own state", () => {
+    const shared = { scope: "shared", content: JSON.stringify({ currentGoal: "other project work" }) };
+    const owned = { scope: "codex", content: JSON.stringify({ workspaceId: "repo:/fixture", currentGoal: "this project work" }) };
+    expect(filterHotMemorySnapshotForWorkspace({ scope: "all", scopes: [shared] }, "repo:/fixture")?.scopes).toEqual([shared]);
+    expect(filterHotMemorySnapshotForWorkspace({ scope: "all", scopes: [shared, owned] }, "repo:/fixture")?.scopes).toEqual([owned]);
+  });
   it("delivers the newer workspace copy once and accepts newer legacy-client updates", () => {
     const workspaceId = "repo:/tmp/project", runtime = "codex";
     const older = { workspaceId, runtime, updatedAt: "2026-10-20T00:00:00Z", lastTurn: { summary: "old finding" } };
@@ -121,6 +127,22 @@ describe("host adapter hot-memory filtering", () => {
     expect(filtered?.scopes).toEqual([
       { scope: "claude-code", workspaceId: "repo:/tmp/foreign", content: currentContent },
     ]);
+  });
+
+  it("uses the signed time when adopting legacy hosted memory", () => {
+    const workspaceId = "repo:/tmp/current/workspace";
+    const entry = {
+      scope: "shared",
+      content: JSON.stringify({ summary: "legacy note" }),
+      updated_at: "2025-01-01T00:00:00Z",
+      signed_at: "2027-01-01T00:00:00Z",
+      integrity: "verified",
+    };
+    const snapshot = { scope: "all", scopes: [entry] };
+    expect(filterHotMemorySnapshotForWorkspace(snapshot, workspaceId, true, true, "2026-01-01T00:00:00Z")).toBeNull();
+    expect(filterHotMemorySnapshotForWorkspace({ scope: "all", scopes: [{ ...entry, signed_at: undefined }] }, workspaceId, true, true, "2026-01-01T00:00:00Z")).toBeNull();
+    const old = { ...entry, signed_at: "2025-01-01T00:00:00Z", updated_at: "2027-01-01T00:00:00Z" };
+    expect(filterHotMemorySnapshotForWorkspace({ scope: "all", scopes: [old] }, workspaceId, true, true, "2026-01-01T00:00:00Z")?.scopes).toHaveLength(1);
   });
 });
 
