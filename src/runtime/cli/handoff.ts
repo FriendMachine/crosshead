@@ -8,6 +8,14 @@ import { readWorkspaceHookPolicy, workspaceHookForInvocation } from "../workspac
 
 type HandoffHost = "codex" | "claude-code";
 
+const scopedWorkspaceId = (root: string, requested: string | undefined): string => {
+	const canonical = `repo:${root}`;
+	if (requested !== undefined && requested !== canonical) {
+		throw new Error(`This scoped workspace uses ${canonical}. Remove the workspace-id override or use the bound project.`);
+	}
+	return canonical;
+};
+
 const scopedHandoffBinding = (home: string | undefined, host: HandoffHost, directory: string, profileName: string | undefined, hostHome: string | undefined) => {
 	const paths = resolveRuntimePaths(home);
 	const policy = readWorkspaceHookPolicy(paths);
@@ -159,6 +167,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 				...sharedRequest,
 				profileName: scoped?.profileName ?? sharedRequest.profileName,
 				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
 				hostHome: scoped?.hostHome ?? (typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else if (sourceRuntime === "claude-code") {
@@ -172,6 +181,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 				...sharedRequest,
 				profileName: scoped?.profileName ?? sharedRequest.profileName,
 				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
 				hostHome: scoped?.hostHome ?? (typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else {
@@ -263,6 +273,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 				...sharedRequest,
 				profileName: scoped?.profileName ?? sharedRequest.profileName,
 				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
 				hostHome: scoped?.hostHome ?? (typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else if (targetRuntime === "codex") {
@@ -276,6 +287,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 				...sharedRequest,
 				profileName: scoped?.profileName ?? sharedRequest.profileName,
 				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				workspaceId: scoped ? scopedWorkspaceId(scoped.root, sharedRequest.workspaceId) : sharedRequest.workspaceId,
 				hostHome: scoped?.hostHome ?? (typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else {

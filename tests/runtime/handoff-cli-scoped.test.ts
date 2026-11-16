@@ -65,11 +65,21 @@ it("exports and imports a signed handoff after normal scoped project setup", asy
 		expect(capsule.continuityIr.identity.npub).toBe(scopedIdentity.npub);
 		expect(capsule.continuityIr.memoryReferences.hotMemory.summary).toContain("checksum still fails on empty rows");
 		expect(JSON.stringify(capsule)).not.toContain("OTHER WORKSPACE SECRET");
+		const wrongWorkspace = await cli("handoff", "export", "--source", "codex", "--target", "claude-code",
+			"--workspace-root", project, "--workspace-id", otherWorkspaceId, "--session-id", "source-session",
+			"--prompt", "Export the other project", "--home", home);
+		expect(wrongWorkspace.status).not.toBe(0);
+		expect(JSON.parse(wrongWorkspace.stdout).error.message).toContain("workspace-id override");
+		expect(wrongWorkspace.stdout).not.toContain("OTHER WORKSPACE SECRET");
 
 		const imported = await cli("handoff", "import", "--target", "claude-code", "--file", capsuleFile,
 			"--workspace-root", project, "--home", home);
 		expect(imported.status, imported.stdout + imported.stderr).toBe(0);
 		expect(JSON.parse(imported.stdout)).toMatchObject({ accepted: true, savedToHotMemory: true, verification: { valid: true } });
+		const wrongImport = await cli("handoff", "import", "--target", "claude-code", "--file", capsuleFile,
+			"--workspace-root", project, "--workspace-id", otherWorkspaceId, "--home", home);
+		expect(wrongImport.status).not.toBe(0);
+		expect(JSON.parse(wrongImport.stdout).error.message).toContain("workspace-id override");
 
 		const wrongProfile = await cli("handoff", "export", "--source", "codex", "--target", "claude-code",
 			"--workspace-root", project, "--session-id", "source-session", "--prompt", "Wrong profile",
