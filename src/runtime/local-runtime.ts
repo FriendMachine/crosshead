@@ -24,6 +24,7 @@ import { spawn } from "child_process";
 import { schnorr } from "@noble/curves/secp256k1";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import * as tar from "tar";
+import semver from "semver";
 
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
@@ -929,12 +930,12 @@ const fetchBuffer = async (
 	}
 };
 
-export const fetchRuntimeReleaseArtifact = async (releaseUrl: string): Promise<Buffer> => {
+export const fetchRuntimeReleaseArtifact = async (releaseUrl: string, timeoutMs = 120_000): Promise<Buffer> => {
 	const parsed = new URL(releaseUrl);
 	return fetchBuffer(
 		releaseUrl,
 		RUNTIME_RELEASE_MAX_BYTES,
-		120_000,
+		timeoutMs,
 		parsed.hostname === "github.com"
 			? { allowedHosts: GITHUB_RELEASE_REDIRECT_HOSTS, maxRedirects: 3 }
 			: undefined
@@ -954,8 +955,9 @@ const parseInstallerReleaseMetadata = (
 	if (!releaseId || !releaseUrl || !releaseSha256) {
 		throw new Error("Installer script did not expose valid release id, URL, and SHA-256 metadata");
 	}
-	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(releaseId) || releaseId === "." || releaseId === "..") {
-		throw new Error("Installer script exposed an invalid release id");
+	const parsedId = releaseId.match(/^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?)-([a-f0-9]{12})$/);
+	if (!parsedId || !semver.valid(parsedId[1]) || parsedId[2] !== releaseSha256.slice(0, 12)) {
+		throw new Error("Installer script release ID does not match its version and SHA-256 digest");
 	}
 	return { releaseId, releaseUrl, releaseSha256 };
 };
@@ -1001,7 +1003,7 @@ const validateRuntimeReleaseArchive = async (tarballPath: string): Promise<void>
 	}
 };
 
-const runCommand = async (command: string, args: string[], cwd: string): Promise<void> =>
+export const runRuntimeInstallCommand = async (command: string, args: string[], cwd: string, timeoutMs = 120_000): Promise<void> =>
 	await new Promise<void>((resolve, reject) => {
 		const env = { ...process.env };
 		delete env.NODE_OPTIONS;
@@ -1011,20 +1013,36 @@ const runCommand = async (command: string, args: string[], cwd: string): Promise
 			cwd,
 			env,
 			stdio: ["ignore", "pipe", "pipe"],
+			detached: process.platform !== "win32",
 		});
 		let stderr = "";
+		let timedOut = false;
+		let closed = false;
+		const stop = (signal: NodeJS.Signals) => {
+			if (!child.pid || closed) return;
+			try {
+				if (process.platform === "win32") child.kill(signal);
+				else process.kill(-child.pid, signal);
+			} catch { /* Already stopped. */ }
+		};
+		const timer = setTimeout(() => {
+			timedOut = true;
+			stop("SIGTERM");
+			const killTimer = setTimeout(() => stop("SIGKILL"), 2_000);
+			killTimer.unref();
+		}, timeoutMs);
 		child.stdout.resume();
 		child.stderr.on("data", (chunk: Buffer | string) => {
 			stderr += typeof chunk === "string" ? chunk : chunk.toString("utf8");
 			if (stderr.length > 1024 * 1024) stderr = stderr.slice(-1024 * 1024);
 		});
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code === 0) {
-				resolve();
-				return;
-			}
-			reject(new Error(stderr.trim().length > 0 ? stderr.trim() : `${command} exited with code ${code ?? "unknown"}`));
+		child.on("error", error => { closed = true; clearTimeout(timer); reject(error); });
+		child.on("close", code => {
+			closed = true;
+			clearTimeout(timer);
+			if (timedOut) reject(new Error("Runtime dependency installation timed out"));
+			else if (code === 0) resolve();
+			else reject(new Error(stderr.trim().length > 0 ? stderr.trim() : `${command} exited with code ${code ?? "unknown"}`));
 		});
 	});
 
@@ -1610,7 +1628,9 @@ export const resolveReleaseUpdateBaseUrl = (paths: RuntimePaths, explicitBaseUrl
 const downloadRuntimeRelease = async (
 	paths: RuntimePaths,
 	explicitBaseUrl?: string,
-	trustedSha256?: string
+	trustedSha256?: string,
+	timeoutMs = 120_000,
+	expectedReleaseId?: string
 ): Promise<DownloadedRuntimeRelease> => {
 	const baseUrl = resolveReleaseUpdateBaseUrl(paths, explicitBaseUrl);
 	if (!trustedSha256 || !/^[a-f0-9]{64}$/.test(trustedSha256)) {
@@ -1620,6 +1640,9 @@ const downloadRuntimeRelease = async (
 	const { releaseId, releaseUrl, releaseSha256 } = parseInstallerReleaseMetadata(installerScript);
 	if (trustedSha256 !== releaseSha256) {
 		throw new Error("Trusted runtime release SHA-256 does not match the official release metadata");
+	}
+	if (expectedReleaseId && releaseId !== expectedReleaseId) {
+		throw new Error("Published runtime release changed after attestation verification");
 	}
 	let parsedReleaseUrl: URL;
 	try {
@@ -1641,7 +1664,7 @@ const downloadRuntimeRelease = async (
 	// Never trust an existing release directory merely because its name matches
 	// server metadata. Re-download and verify the operator-trusted digest before
 	// any file from that directory can be required or launched.
-	const tarball = await fetchRuntimeReleaseArtifact(releaseUrl);
+	const tarball = await fetchRuntimeReleaseArtifact(releaseUrl, timeoutMs);
 	const actualSha256 = createHash("sha256").update(tarball).digest("hex");
 	if (actualSha256 !== releaseSha256) {
 		throw new Error("Runtime release SHA-256 verification failed");
@@ -1671,9 +1694,14 @@ const downloadRuntimeRelease = async (
 				throw new Error(`Runtime release is missing required file ${requiredPath}`);
 			}
 		}
+		const expectedVersion = releaseId.slice(0, -13);
+		let packagedVersion: unknown;
+		try { packagedVersion = JSON.parse(readFileSync(path.join(stageRoot, "package.json"), "utf8")).version; }
+		catch { throw new Error("Runtime release package.json is invalid"); }
+		if (packagedVersion !== expectedVersion) throw new Error("Runtime release package version does not match the release ID");
 		const npmExecutable = path.join(path.dirname(process.execPath), process.platform === "win32" ? "npm.cmd" : "npm");
 		if (!existsSync(npmExecutable)) throw new Error(`Runtime update cannot find npm beside ${process.execPath}`);
-		await runCommand(npmExecutable, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], stageRoot);
+		await runRuntimeInstallCommand(npmExecutable, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--fetch-timeout=15000", "--fetch-retries=1"], stageRoot, timeoutMs);
 		rmSync(releaseRoot, { recursive: true, force: true });
 		renameSync(stageRoot, releaseRoot);
 	} finally {
@@ -1695,11 +1723,12 @@ const downloadRuntimeRelease = async (
 	};
 };
 
-export const inspectPublishedRuntimeRelease = async (home?: string): Promise<{ installed: string | null; available: string }> => {
+export const inspectPublishedRuntimeRelease = async (home?: string): Promise<{ installed: string | null; available: string; sha256: string }> => {
 	const paths = ensureRuntimeHomeLayout(home);
 	const baseUrl = resolveReleaseUpdateBaseUrl(paths);
 	const script = (await fetchBuffer(`${baseUrl}/install`, INSTALLER_SCRIPT_MAX_BYTES, 5000)).toString("utf8");
-	return { installed: inspectInstalledRuntimeRelease(paths).releaseId, available: parseInstallerReleaseMetadata(script).releaseId };
+	const release = parseInstallerReleaseMetadata(script);
+	return { installed: inspectInstalledRuntimeRelease(paths).releaseId, available: release.releaseId, sha256: release.releaseSha256 };
 };
 
 export const reapplyManagedRuntimeRelease = async (
@@ -1857,13 +1886,15 @@ export const updateManagedRuntimeRelease = async (
 		baseUrl?: string;
 		trustedSha256?: string;
 		restart?: boolean;
+		timeoutMs?: number;
+		expectedReleaseId?: string;
 	} = {}
 ): Promise<RuntimeReleaseUpdateResult> => {
 	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const previousRelease = inspectInstalledRuntimeRelease(paths);
 	const specs = await collectManagedAdapterReinstallSpecs(paths);
-	const release = await downloadRuntimeRelease(paths, options.baseUrl, options.trustedSha256);
+	const release = await downloadRuntimeRelease(paths, options.baseUrl, options.trustedSha256, options.timeoutMs, options.expectedReleaseId);
 	// A release must not leave launchers pointing at a half-applied installation.
 	// Keep credentials, memory and queued writes outside this file-level rollback.
 	const protectedFiles = new Set([

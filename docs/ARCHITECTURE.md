@@ -88,9 +88,11 @@ npm run typecheck && npm test
 Compatibility constraints from already-installed clients:
 
 - The installer and `crosshead update` read `RELEASE_ID`, `RELEASE_URL` and
-  `RELEASE_SHA256` from `/install`; the release URL must be on the same origin.
-  The updater additionally requires the operator to supply that SHA-256 from
-  an independent channel and never performs unattended installation.
+  `RELEASE_SHA256` from `/install`. The updater accepts only the official hosted
+  origin or the matching GitHub release asset. In `auto` mode, the updater
+  verifies GitHub's signed build attestation, release workflow identity, tag
+  and archive digest before installing on an idle host launch. In `manual`
+  mode, the operator supplies the trusted digest independently.
 - The tarball must contain `package.json`, `package-lock.json` and
   `dist/runtime/{cli,daemon,local-runtime,codex-adapter,claude-code-adapter,pi-adapter,codex-bridge,codex-hook,claude-code-bridge,claude-code-hook}.js`.
   Older clients `require()` some of these modules directly during updates.

@@ -196,6 +196,25 @@ printf '%s\\n' "\${CODEX_HOME:-\${CLAUDE_CONFIG_DIR:-\${CLAUDE_CODE_HOME:-}}}" "
       },
     );
 
+    it.each(["codex", "claude"])("launches %s when the update check fails", host => {
+      const fixture = mkdtempSync(path.join(os.tmpdir(), "crosshead-failed-update-check-"));
+      try {
+        const runtimeHome = path.join(fixture, "runtime");
+        const hostBinary = path.join(fixture, "host-stub");
+        const wrapper = path.join(fixture, "launcher");
+        mkdirSync(path.join(runtimeHome, "bin"), { recursive: true });
+        writeFileSync(path.join(runtimeHome, "bin", "onlybotsctl"), "#!/bin/sh\nexit 23\n", { mode: 0o755 });
+        writeFileSync(hostBinary, "#!/bin/sh\nprintf 'host launched\n'\n", { mode: 0o755 });
+        const common = { marker: "test", adapterVersion: "test", runtimeHome, hostHome: path.join(fixture, "host"),
+          profileName: "default", installedAt: "now", updatedAt: "now" };
+        writeFileSync(wrapper, host === "codex"
+          ? renderCodexLaunchWrapper({ ...common, adapterName: "codex", codexBinary: hostBinary, skillName: "test" })
+          : renderClaudeLaunchWrapper({ ...common, adapterName: "claude-code", claudeBinary: hostBinary, workspaceRoot: fixture }));
+        const output = execFileSync("bash", [wrapper], { encoding: "utf8", env: { PATH: process.env.PATH } });
+        expect(output).toContain("host launched");
+      } finally { rmSync(fixture, { recursive: true, force: true }); }
+    });
+
     it("quotes every configured Codex and Claude path as a single shell word", () => {
       const hostile = `/tmp/host'$(touch /tmp/crosshead-shell-injection)`;
       const common = { marker: "test", adapterVersion: "test", runtimeHome: hostile, hostHome: hostile,

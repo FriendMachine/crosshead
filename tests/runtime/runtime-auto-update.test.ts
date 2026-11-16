@@ -3,7 +3,8 @@ import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
 import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
-import { fetchRuntimeReleaseArtifact, inspectInstalledRuntimeRelease, isAllowedRuntimeReleaseUrl, parseWrapperScriptTarget, resolveReleaseUpdateBaseUrl, updateManagedRuntimeRelease } from "../../src/runtime/local-runtime";
+import { updateFromCli } from "../../src/runtime/cli/core";
+import { fetchRuntimeReleaseArtifact, inspectInstalledRuntimeRelease, isAllowedRuntimeReleaseUrl, parseWrapperScriptTarget, resolveReleaseUpdateBaseUrl, updateManagedRuntimeRelease, runRuntimeInstallCommand } from "../../src/runtime/local-runtime";
 import { shellQuote } from "../../src/runtime/adapter-utils";
 import { ensureRuntimeHomeLayout, writeJsonFile } from "../../src/runtime/runtime-persistence";
 
@@ -19,11 +20,29 @@ const setup = () => {
 	const deps = {
 		inspect: vi.fn(async () => ({ installed: "old", available: "new" })),
 		update: vi.fn(async () => ({ releaseId: "new" }) as any),
+		verify: vi.fn(async () => {}),
 		alive: (pid: number) => pid === 2001,
 		nativeHostsRunning: vi.fn(() => true),
 		now: () => Date.now(),
 	};
 	return { home, p, deps };
+};
+
+const oldRelease = `0.5.0-alpha.13-${"a".repeat(12)}`;
+const newRelease = `0.5.0-alpha.14-${"b".repeat(12)}`;
+const newDigest = "b".repeat(64);
+const autoSetup = () => {
+	const fixture = setup();
+	const runtime = path.join(fixture.p.libRuntime, oldRelease, "dist", "runtime");
+	mkdirSync(runtime, { recursive: true });
+	writeFileSync(path.join(runtime, "cli.js"), "");
+	writeFileSync(path.join(runtime, "daemon.js"), "");
+	writeFileSync(path.join(fixture.p.bin, "onlybotsctl"), `#!/bin/sh\nnode '${path.join(runtime, "cli.js")}' "$@"\n`);
+	writeFileSync(path.join(fixture.p.bin, "onlybotsd"), `#!/bin/sh\nnode '${path.join(runtime, "daemon.js")}' "$@"\n`);
+	fixture.deps.inspect.mockResolvedValue({ installed: oldRelease, available: newRelease, sha256: newDigest });
+	fixture.deps.update.mockResolvedValue({ releaseId: newRelease } as any);
+	fixture.deps.nativeHostsRunning.mockReturnValue(false);
+	return fixture;
 };
 
 describe("published runtime automatic updates", () => {
@@ -36,6 +55,27 @@ describe("published runtime automatic updates", () => {
 		expect(parseWrapperScriptTarget(path.join(p.bin, "onlybotsctl"))).toBe(target);
 		writeFileSync(path.join(p.bin, "onlybotsctl"), `#!/bin/sh\n${shellQuote(process.execPath)} ${shellQuote(target)} "$@"\n`);
 		expect(parseWrapperScriptTarget(path.join(p.bin, "onlybotsctl"))).toBe(target);
+	});
+	it("rejects hosted metadata that changes the attested release ID before downloading", async () => {
+		const { home } = setup();
+		const sha256 = "b".repeat(64);
+		const script = `RELEASE_ID="0.5.0-alpha.15-${sha256.slice(0, 12)}"\nRELEASE_URL="https://crosshead.sh/install/releases/crosshead-runtime.tgz"\nRELEASE_SHA256="${sha256}"\n`;
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(script));
+		try {
+			await expect(updateManagedRuntimeRelease(home, { trustedSha256: sha256, expectedReleaseId: newRelease }))
+				.rejects.toThrow("changed after attestation");
+			expect(fetchMock).toHaveBeenCalledOnce();
+		} finally { fetchMock.mockRestore(); }
+	});
+	it("rejects an installer release ID with a digest suffix that does not match metadata", async () => {
+		const { home } = setup();
+		const sha256 = "b".repeat(64);
+		const script = `RELEASE_ID="0.5.0-alpha.14-${"a".repeat(12)}"\nRELEASE_URL="https://crosshead.sh/install/releases/crosshead-runtime.tgz"\nRELEASE_SHA256="${sha256}"\n`;
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(script));
+		try {
+			await expect(updateManagedRuntimeRelease(home, { trustedSha256: sha256 })).rejects.toThrow("release ID does not match");
+			expect(fetchMock).toHaveBeenCalledOnce();
+		} finally { fetchMock.mockRestore(); }
 	});
 	it("rejects wrapper command substitution and custom executable update origins", async () => {
 		const { home, p } = setup();
@@ -147,31 +187,43 @@ describe("published runtime automatic updates", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(4);
 		fetchMock.mockRestore();
 	});
-	it("checks on the next idle launch, reports a trusted-install command, and throttles repeated checks", async () => {
-		const { home, deps } = setup();
-		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("crosshead update --sha256 <digest>");
+	it("installs a signed newer release on an idle launch and throttles subsequent checks", async () => {
+		const { home, deps } = autoSetup();
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).toHaveBeenCalledTimes(1);
-		expect(deps.update).not.toHaveBeenCalled();
+		expect(deps.verify).toHaveBeenCalledExactlyOnceWith("0.5.0-alpha.14", newDigest);
+		expect(deps.update).toHaveBeenCalledExactlyOnceWith(home, { trustedSha256: newDigest, timeoutMs: 45_000, expectedReleaseId: newRelease });
 	});
-	it("pins the installed release and permits switching back to automatic updates", async () => {
-		const { home, deps } = setup();
-		expect(runtimeUpdatePolicy(home, "pinned")).toEqual({ mode: "pinned", releaseId: "old" });
+	it("offers auto and manual CLI settings and migrates the legacy pinned mode", async () => {
+		const { home, p, deps } = autoSetup();
+		expect(JSON.parse(await updateFromCli(["--manual", "--home", home]))).toEqual({ mode: "manual", releaseId: oldRelease });
+		await maintainRuntimeBeforeLaunch(home, 2000, deps);
+		expect(deps.inspect).not.toHaveBeenCalled();
+		writeJsonFile(path.join(p.config, "updates.json"), { mode: "pinned", releaseId: oldRelease });
+		expect(runtimeUpdatePolicy(home)).toEqual({ mode: "manual", releaseId: oldRelease });
+		expect(JSON.parse(await updateFromCli(["--auto", "--home", home]))).toEqual({ mode: "auto", releaseId: null });
+		await maintainRuntimeBeforeLaunch(home, 2000, deps);
+		expect(deps.update).toHaveBeenCalledOnce();
+	});
+	it("rechecking auto explicitly clears a previous update check cooldown", async () => {
+		const { home, p, deps } = autoSetup();
+		writeJsonFile(path.join(p.state, "release-update.json"), { checkedAtMs: Date.now(), status: "current" });
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).not.toHaveBeenCalled();
 		runtimeUpdatePolicy(home, "auto");
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
-		expect(deps.inspect).toHaveBeenCalledOnce();
-		expect(deps.update).not.toHaveBeenCalled();
+		expect(deps.update).toHaveBeenCalledOnce();
 	});
 	it.each(["codex", "claude-code"])("defers while %s has an active hooked turn", async host => {
-		const { home, p, deps } = setup();
+		const { home, p, deps } = autoSetup();
 		writeJsonFile(path.join(p.state, `${host}-hook.json`), { activeTurns: { active: { turnId: "t" } } });
+		deps.nativeHostsRunning.mockReturnValue(true);
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).not.toHaveBeenCalled();
 	});
 	it("defers for a live idle host, but removes dead process leases", async () => {
-		const { home, p, deps } = setup();
+		const { home, p, deps } = autoSetup();
 		const leases = path.join(p.state, "host-processes"); mkdirSync(leases);
 		writeJsonFile(path.join(leases, "2001.json"), { pid: 2001 });
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
@@ -179,28 +231,28 @@ describe("published runtime automatic updates", () => {
 		deps.alive = () => false;
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).toHaveBeenCalledOnce();
-		expect(deps.update).not.toHaveBeenCalled();
+		expect(deps.update).toHaveBeenCalledOnce();
 	});
 	it("reports an update after an interrupted host exits without deleting its saved hook state", async () => {
-		const { home, p, deps } = setup();
+		const { home, p, deps } = autoSetup();
 		const file = path.join(p.state, "codex-hook.json");
 		writeJsonFile(file, { activeTurns: { interrupted: { turnId: "old" } } });
 		const before = readFileSync(file, "utf8");
 		deps.nativeHostsRunning.mockReturnValue(false);
-		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("is available");
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
 		expect(readFileSync(file, "utf8")).toBe(before);
 	});
 	it("waits for queued writes even when the interrupted host has exited", async () => {
-		const { home, p, deps } = setup();
+		const { home, p, deps } = autoSetup();
 		writeJsonFile(path.join(p.state, "queue.json"), { items: [{}] });
 		deps.nativeHostsRunning.mockReturnValue(false);
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.update).not.toHaveBeenCalled();
 	});
 	it("rechecks legacy host liveness after inspecting the release", async () => {
-		const { home, p, deps } = setup();
+		const { home, p, deps } = autoSetup();
 		writeJsonFile(path.join(p.state, "codex-hook.json"), { activeTurns: { old: {} } });
-		deps.nativeHostsRunning.mockReturnValueOnce(false).mockReturnValue(true);
+		deps.nativeHostsRunning.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
 		expect(deps.update).not.toHaveBeenCalled();
 	});
@@ -213,29 +265,85 @@ describe("published runtime automatic updates", () => {
 		expect(nativeHostProcessesRunning(2000, () => { throw new Error("ps unavailable"); })).toBe(true);
 	});
 	it("does not replace a release already current", async () => {
-		const { home, deps } = setup(); deps.inspect.mockResolvedValue({ installed: "old", available: "old" });
+		const { home, deps } = autoSetup(); deps.inspect.mockResolvedValue({ installed: oldRelease, available: oldRelease, sha256: "a".repeat(64) });
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.update).not.toHaveBeenCalled();
 	});
 	it("continues offline and records a throttled failure instead of blocking every launch", async () => {
-		const { home, deps } = setup(); deps.inspect.mockRejectedValue(new Error("offline"));
+		const { home, deps } = autoSetup(); deps.inspect.mockRejectedValue(new Error("offline"));
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("offline");
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).toHaveBeenCalledOnce();
 		expect(deps.update).not.toHaveBeenCalled();
 	});
 	it("rechecks active work after fetching release metadata", async () => {
-		const { home, p, deps } = setup();
-		deps.inspect.mockImplementation(async () => { writeJsonFile(path.join(p.state, "queue.json"), { items: [{}] }); return { installed: "old", available: "new" }; });
+		const { home, p, deps } = autoSetup();
+		deps.inspect.mockImplementation(async () => { writeJsonFile(path.join(p.state, "queue.json"), { items: [{}] }); return { installed: oldRelease, available: newRelease, sha256: newDigest }; });
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
 		expect(deps.update).not.toHaveBeenCalled();
 	});
+	it("never installs when the signed attestation cannot be verified", async () => {
+		const { home, p, deps } = autoSetup();
+		deps.verify.mockRejectedValue(new Error("untrusted signature"));
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("untrusted signature");
+		expect(deps.update).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(path.join(p.state, "release-update.json"), "utf8")).status).toBe("failed");
+	});
+	it.each([
+		{ available: `0.5.0-alpha.12-${"b".repeat(12)}`, sha256: newDigest },
+		{ available: `0.5.0-alpha.13-${"b".repeat(12)}`, sha256: newDigest },
+		{ available: newRelease, sha256: "c".repeat(64) },
+	])("rejects rollback, same-version replacement, or a release-ID digest mismatch", async release => {
+		const { home, deps } = autoSetup();
+		deps.inspect.mockResolvedValue({ installed: oldRelease, ...release });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("metadata is invalid");
+		expect(deps.verify).not.toHaveBeenCalled();
+		expect(deps.update).not.toHaveBeenCalled();
+	});
+	it("defers when a native host starts during signature verification without hook state", async () => {
+		const { home, deps } = autoSetup();
+		deps.nativeHostsRunning.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
+		expect(deps.verify).toHaveBeenCalledOnce();
+		expect(deps.update).not.toHaveBeenCalled();
+	});
+	it("defers when active work begins during signature verification", async () => {
+		const { home, p, deps } = autoSetup();
+		deps.verify.mockImplementation(async () => { writeJsonFile(path.join(p.state, "queue.json"), { items: [{}] }); });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
+		expect(deps.update).not.toHaveBeenCalled();
+	});
+	it("defers automatic installs while a different native host is running even without a lease", async () => {
+		const { home, deps } = autoSetup();
+		deps.nativeHostsRunning.mockReturnValue(true);
+		await maintainRuntimeBeforeLaunch(home, 2000, deps);
+		expect(deps.inspect).not.toHaveBeenCalled();
+	});
+	it("serializes policy changes with a running automatic install", async () => {
+		const { home, deps } = autoSetup();
+		let finish!: (value: any) => void;
+		deps.update.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+		const launch = maintainRuntimeBeforeLaunch(home, 2000, deps);
+		await vi.waitFor(() => expect(deps.update).toHaveBeenCalledOnce());
+		let changed = false;
+		const manual = updateFromCli(["--manual", "--home", home]).then(() => { changed = true; });
+		await new Promise(resolve => setTimeout(resolve, 30));
+		expect(changed).toBe(false);
+		finish({ releaseId: newRelease });
+		await launch;
+		await manual;
+		expect(runtimeUpdatePolicy(home).mode).toBe("manual");
+	});
+	it("bounds a stalled dependency installer and reaps its child", async () => {
+		await expect(runRuntimeInstallCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], process.cwd(), 100))
+			.rejects.toThrow("timed out");
+	});
 	it("serializes concurrent launchers recovering a dead updater lock", async () => {
-		const { home, p, deps } = setup();
+		const { home, p, deps } = autoSetup();
 		deps.alive = pid => pid === process.pid || pid === 2000 || pid === 2001;
 		writeJsonFile(path.join(p.state, "release-update.lock"), { pid: 999999 });
 		await Promise.all([maintainRuntimeBeforeLaunch(home, 2000, deps), maintainRuntimeBeforeLaunch(home, 2001, deps)]);
 		expect(deps.inspect).toHaveBeenCalledOnce();
-		expect(deps.update).not.toHaveBeenCalled();
+		expect(deps.update).toHaveBeenCalledOnce();
 	});
 });

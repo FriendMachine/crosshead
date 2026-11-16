@@ -90,13 +90,19 @@ scope change. Source excerpts are off for new bindings unless you choose
 Other hosts use `crosshead quickstart --adapter pi|omp|hermes|opencode`.
 
 The installer downloads one release tarball, checks its SHA-256 against the
-installer script, installs three npm dependencies (`@noble/curves`,
-`nostr-tools`, `tar`) with install scripts disabled, and writes the wrappers
-into `~/.crosshead/bin`. Installed runtimes check the fixed
-`https://crosshead.sh` release origin and notify when an update is available.
-They do not install remote code unattended. After obtaining the digest from an
-independent release channel, install with `crosshead update --sha256 <digest>`.
-`crosshead update --pin` disables automatic update checks.
+installer script, installs the runtime npm dependencies with install scripts
+disabled, and writes the wrappers into `~/.crosshead/bin`.
+
+`crosshead update --auto` enables automatic updates on idle host launches
+(the default), checking for a new release about once an hour and retrying failed checks after 30 minutes. Before installing, Crosshead verifies GitHub's signed
+build attestation for the exact archive digest and this repository's release
+workflow. If verification or download fails, the host still launches and the
+update is retried later. `crosshead update --manual` disables automatic
+updates. `crosshead update --policy` shows the current setting. The older
+`--pin` option remains an alias for `--manual`.
+
+For a manual install, obtain the digest from an independent release channel
+and run `crosshead update --sha256 <digest>`.
 
 To check that a release matches this source, compare the installer's
 `RELEASE_SHA256` with `SHA256SUMS` on the matching GitHub release. Public

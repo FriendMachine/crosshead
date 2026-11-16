@@ -475,7 +475,7 @@ export CROSSHEAD_HOME="$ONLYBOTS_HOME"
 export ONLYBOTS_RUNTIME_HOME=${shellQuote(config.runtimeHome)}
 
 if [[ -x ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} ]]; then
-  ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} update --check-on-launch --host-pid "$$" >&2
+  ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} update --check-on-launch --host-pid "$$" >&2 || printf 'Crosshead update check failed; continuing host launch.\n' >&2
 fi
 exec ${shellQuote(config.claudeBinary)} "$@"
 `;
