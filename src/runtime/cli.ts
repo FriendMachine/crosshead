@@ -312,7 +312,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead check-updates [--home <path>] [--channel stable|beta|canary] [--json]",
 				"crosshead apply [--home <path>] [--manifest <path>]",
 				"crosshead update --sha256 <trusted-release-digest> [--home <path>] [--no-restart]",
-				"crosshead update --pin|--auto|--policy [--home <path>]",
+				"crosshead update --manual|--auto|--policy [--home <path>]",
 				"crosshead update [adapter] [--home <path>] [--channel stable|beta|canary] [--version <version>]",
 				"crosshead rollback [adapter] --to <version> [--home <path>]",
 				"crosshead doctor [--home <path>] [--workspace-root <path>] [--json]",

@@ -73,7 +73,7 @@ await tar.t({
 				const pkg = JSON.parse(text);
 				if (pkg.version !== manifest.version) fail("package.json version does not match manifest");
 				if (pkg.license !== "Apache-2.0") fail("install package.json must declare Apache-2.0");
-				const allowed = new Set(["@noble/curves", "nostr-tools", "tar"]);
+				const allowed = new Set(["@noble/curves", "nostr-tools", "tar", "sigstore", "snappyjs", "semver"]);
 				for (const dep of Object.keys(pkg.dependencies ?? {})) {
 					if (!allowed.has(dep)) fail(`unexpected runtime dependency ${dep}; review and update the allowlist deliberately`);
 				}

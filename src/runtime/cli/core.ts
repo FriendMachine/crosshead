@@ -2,7 +2,7 @@ import { OnlyBotsLocalRuntimeDaemon, RuntimeAdapterName, RuntimeChannel, Runtime
 import path from "path";
 import { RUNTIME_ADAPTER_NAMES, ensureRuntimeHomeLayout, loadAdapterRecord, loadRuntimeConfig, resolveRuntimeHome } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
-import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy } from "../runtime-auto-update";
+import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, withRuntimeUpdateLock } from "../runtime-auto-update";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 import { inspectHostHookRegistrations } from "../host-hook-doctor";
 import { inspectWorkspaceHooks, workspaceBindingStatus } from "../workspace-hooks";
@@ -53,9 +53,11 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
 	const home = typeof flags.home === "string" ? flags.home : undefined;
 	if (flags["check-on-launch"]) return maintainRuntimeBeforeLaunch(home, Number(flags["host-pid"]));
-	if (flags.pin || flags.auto || flags.policy) {
-		if (flags.pin && flags.auto) throw new Error("Choose --pin or --auto");
-		return JSON.stringify(runtimeUpdatePolicy(home, flags.pin ? "pinned" : flags.auto ? "auto" : undefined), null, 2);
+	if (flags.manual || flags.pin || flags.auto || flags.policy) {
+		if (flags.auto && (flags.manual || flags.pin)) throw new Error("Choose --auto or --manual");
+		const mode = flags.manual || flags.pin ? "manual" : flags.auto ? "auto" : undefined;
+		const policy = mode ? await withRuntimeUpdateLock(home, () => runtimeUpdatePolicy(home, mode)) : runtimeUpdatePolicy(home);
+		return JSON.stringify(policy, null, 2);
 	}
 	const paths = ensureRuntimeHomeLayout(home);
 	const config = loadRuntimeConfig(paths);
@@ -76,12 +78,15 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 	}
 
 	if (typeof flags["base-url"] === "string" || typeof flags.baseUrl === "string" || (!versionOverride && typeof flags.channel !== "string")) {
-		const result = await updateManagedRuntimeRelease(paths.home, {
-			baseUrl: typeof flags["base-url"] === "string" ? flags["base-url"] : typeof flags.baseUrl === "string" ? flags.baseUrl : undefined,
-			trustedSha256: typeof flags.sha256 === "string" ? flags.sha256 : undefined,
-			restart: !flags["no-restart"],
+		const result = await withRuntimeUpdateLock(paths.home, async () => {
+			const updated = await updateManagedRuntimeRelease(paths.home, {
+				baseUrl: typeof flags["base-url"] === "string" ? flags["base-url"] : typeof flags.baseUrl === "string" ? flags.baseUrl : undefined,
+				trustedSha256: typeof flags.sha256 === "string" ? flags.sha256 : undefined,
+				restart: !flags["no-restart"],
+			});
+			if (runtimeUpdatePolicy(paths.home).mode === "manual") runtimeUpdatePolicy(paths.home, "manual");
+			return updated;
 		});
-		if (runtimeUpdatePolicy(paths.home).mode === "pinned") runtimeUpdatePolicy(paths.home, "pinned");
 		return formatRuntimeReleaseUpdate(result);
 	}
 

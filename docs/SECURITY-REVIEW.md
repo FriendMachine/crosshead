@@ -63,13 +63,16 @@ from it is in scope.
 
 ## Trust boundaries and entry points
 
-1. **Install and self-update.** The production installer still reads release
-   metadata and the tarball from one TLS origin. The client updater is pinned
-   to `https://crosshead.sh`, requires a SHA-256 supplied through an independent
-   channel, validates archive entries and runs
-   `npm ci --omit=dev --ignore-scripts`. Background checks are notification-
-   only. See `parseInstallerReleaseMetadata`, `validateRuntimeReleaseArchive`
-   and `src/runtime/runtime-auto-update.ts`.
+1. **Install and self-update.** The production installer reads release metadata
+   and checks the tarball digest. The updater reads metadata only from
+   `https://crosshead.sh`. In `auto` mode, an idle host launch verifies a
+   Sigstore build attestation for the exact digest, GitHub Actions release
+   workflow and tag before installing. In `manual` mode, the operator supplies
+   a trusted SHA-256 from an independent channel. Both paths validate archive
+   entries and run `npm ci --omit=dev --ignore-scripts` with install scripts
+   disabled. A failed update check does not prevent the host from launching.
+   See `src/runtime/release-attestation.ts`, `runtime-auto-update.ts`, and
+   `validateRuntimeReleaseArchive`.
 2. **Local daemon HTTP API.** It binds `127.0.0.1` on a configurable port
    (`src/runtime/local-runtime.ts:2042`). Requests require the
    `x-onlybots-local-token` header, including `/health`. The federation-status
