@@ -36,10 +36,6 @@ const renderOnlyBotsCtlCliError = (
 	error: unknown
 ): { stream: "stdout" | "stderr"; output: string; exitCode: number } => {
 	const message = error instanceof Error ? error.message : String(error);
-	// Launchers may continue after ordinary update failures reported as text by
-	// maintainRuntimeBeforeLaunch, but an exception means the host lease may not
-	// have been recorded. Reserve 75 so wrappers defer the host launch.
-	const exitCode = argv[0] === "update" && argv.includes("--check-on-launch") ? 75 : 1;
 	const hosted = error instanceof HostedOnlyBotsRequestError ? error : null;
 	const remediation = hosted
 		? buildRuntimeBillingRemediation({
@@ -65,14 +61,14 @@ const renderOnlyBotsCtlCliError = (
 				null,
 				2
 			),
-			exitCode,
+			exitCode: 1,
 		};
 	}
 
 	return {
 		stream: "stderr",
 		output: remediation ? `${message}\n${formatRuntimeBillingRemediation(remediation)}` : message,
-		exitCode,
+		exitCode: 1,
 	};
 };
 

@@ -467,17 +467,13 @@ export ONLYBOTS_HOME=${shellQuote(config.runtimeHome)}
 export CROSSHEAD_HOME="$ONLYBOTS_HOME"
 export ONLYBOTS_RUNTIME_HOME=${shellQuote(config.runtimeHome)}
 
-if [[ -x ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} ]]; then
-  if ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} update --check-on-launch --host-pid "$$" >&2; then
-    :
-  else
-    update_status=$?
-    if [[ "$update_status" -eq 75 ]]; then
-      printf 'Crosshead could not safely check for updates; retry host launch after the update finishes.\n' >&2
-      exit 75
-    fi
-    printf 'Crosshead update check failed; continuing host launch.\n' >&2
-  fi
+if [[ ! -x ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} ]]; then
+  printf 'Crosshead update check is unavailable; retry host launch after repairing the runtime.\n' >&2
+  exit 1
+fi
+if ! ${shellQuote(path.join(config.runtimeHome, "bin", "onlybotsctl"))} update --check-on-launch --host-pid "$$" >&2; then
+  printf 'Crosshead could not safely check for updates; retry host launch after the update finishes.\n' >&2
+  exit 1
 fi
 exec ${shellQuote(config.codexBinary)} --enable hooks "$@"
 `;
