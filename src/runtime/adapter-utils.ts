@@ -32,21 +32,41 @@ export const summarizeHotMemory = (value: unknown): string | null => {
   }
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
+    const checkpoints = Array.isArray(parsed.continuityCheckpoints)
+      ? parsed.continuityCheckpoints.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+      : null;
+    const latestCheckpoint = checkpoints?.sort((a, b) =>
+      (Date.parse(String(b.occurredAt)) || 0) - (Date.parse(String(a.occurredAt)) || 0))[0];
     const fields = [
       sanitizeString(parsed.currentGoal),
       parsed.latestTurn && typeof parsed.latestTurn === "object" && !Array.isArray(parsed.latestTurn)
         ? sanitizeString((parsed.latestTurn as Record<string, unknown>).summary)
         : null,
       sanitizeString(parsed.summary),
+      sanitizeString(latestCheckpoint?.summary) ?? sanitizeString(latestCheckpoint?.goal),
     ].filter((entry): entry is string => entry !== null);
     if (fields.length > 0) {
       return fields.join(" | ").slice(0, 280);
     }
+    if (checkpoints) return null;
   } catch {
     // Raw string hot-memory content is still usable.
   }
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length <= 280 ? normalized : `${normalized.slice(0, 277).trimEnd()}...`;
+};
+
+export const summarizeHotMemorySnapshot = (snapshot: Record<string, unknown> | null, preferredRuntime: string): string | null => {
+  if (!snapshot) return null;
+  const entries = (Array.isArray(snapshot.scopes) ? snapshot.scopes : [snapshot])
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry));
+  const preferred = (entry: Record<string, unknown>): boolean =>
+    entry.scope === preferredRuntime || String(entry.scope).startsWith(`ws-${preferredRuntime}-`);
+  for (const entry of [...entries.filter(preferred), ...entries.filter((candidate) => !preferred(candidate))]) {
+    const summary = summarizeHotMemory(entry.content);
+    if (summary) return summary;
+  }
+  return null;
 };
 
 export const summarizeJudgmentEntries = (value: unknown): string[] =>

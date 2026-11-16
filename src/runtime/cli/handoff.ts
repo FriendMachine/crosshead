@@ -3,6 +3,40 @@ import { OnlyBotsLocalRuntimeDaemon, formatHandoffExportResult, formatHandoffImp
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { parseAllowedSigners } from "../handoff-import";
 import { workspaceProjectRoot } from "../workspace-identity";
+import { resolveRuntimePaths } from "../runtime-persistence";
+import { readWorkspaceHookPolicy, workspaceHookForInvocation } from "../workspace-hooks";
+
+type HandoffHost = "codex" | "claude-code";
+
+const scopedHandoffBinding = (home: string | undefined, host: HandoffHost, directory: string, profileName: string | undefined, hostHome: string | undefined) => {
+	const paths = resolveRuntimePaths(home);
+	const policy = readWorkspaceHookPolicy(paths);
+	if (!policy) return null;
+	let selected: ReturnType<typeof workspaceHookForInvocation> = null;
+	for (const binding of policy.bindings) {
+		if (binding.host !== host) continue;
+		const match = workspaceHookForInvocation(policy, host, binding.id, directory);
+		if (!match) continue;
+		if (selected) throw new Error(`Multiple ${host} bindings apply to this workspace. Run crosshead workspace check to repair the configuration.`);
+		selected = match;
+	}
+	if (!selected) return null;
+	if (profileName !== undefined && profileName !== selected.binding.profile) {
+		throw new Error(`This workspace uses profile ${selected.binding.profile} for ${host}. Choose that profile or reconfigure the workspace.`);
+	}
+	if (hostHome && path.resolve(hostHome) !== selected.binding.hostHome) {
+		throw new Error(`This workspace uses ${selected.binding.hostHome} as its ${host} home. Remove the host-home override or reconfigure the workspace.`);
+	}
+	return {
+		home: paths.home,
+		hostHome: selected.binding.hostHome,
+		root: selected.root,
+		profileName: selected.binding.profile,
+		sourceExcerpts: selected.binding.sourceExcerpts,
+		legacyUnscoped: selected.binding.legacyUnscoped ?? false,
+		legacyBefore: selected.binding.legacyBefore,
+	};
+};
 
 export const handoffFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
@@ -116,23 +150,29 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		let result: Record<string, unknown>;
 		if (sourceRuntime === "codex") {
 			const { CodexRuntimeAdapter } = await import("../codex-adapter");
-			const adapter = CodexRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "codex", workspaceRoot, profileName, typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined);
+			const adapter = scoped ? CodexRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : CodexRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
 			});
 			result = (await adapter.createHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				hostHome: scoped?.hostHome ?? (typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else if (sourceRuntime === "claude-code") {
 			const { ClaudeCodeRuntimeAdapter } = await import("../claude-code-adapter");
-			const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "claude-code", workspaceRoot, profileName, typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined);
+			const adapter = scoped ? ClaudeCodeRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.root, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : ClaudeCodeRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
 			});
 			result = (await adapter.createHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				hostHome: scoped?.hostHome ?? (typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else {
 			throw new Error("handoff export requires --source codex or --source claude-code");
@@ -214,23 +254,29 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 		let result: Record<string, unknown>;
 		if (targetRuntime === "claude-code") {
 			const { ClaudeCodeRuntimeAdapter } = await import("../claude-code-adapter");
-			const adapter = ClaudeCodeRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "claude-code", sharedRequest.workspaceRoot, profileName, typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined);
+			const adapter = scoped ? ClaudeCodeRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.root, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : ClaudeCodeRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
 			});
 			result = (await adapter.importHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				hostHome: scoped?.hostHome ?? (typeof flags["claude-home"] === "string" ? flags["claude-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else if (targetRuntime === "codex") {
 			const { CodexRuntimeAdapter } = await import("../codex-adapter");
-			const adapter = CodexRuntimeAdapter.fromInstalled({
+			const scoped = scopedHandoffBinding(typeof flags.home === "string" ? flags.home : undefined, "codex", sharedRequest.workspaceRoot, profileName, typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined);
+			const adapter = scoped ? CodexRuntimeAdapter.forWorkspace(scoped.home, scoped.hostHome, scoped.profileName, scoped.sourceExcerpts, scoped.legacyUnscoped, scoped.legacyBefore) : CodexRuntimeAdapter.fromInstalled({
 				home: typeof flags.home === "string" ? flags.home : undefined,
 				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
 			});
 			result = (await adapter.importHandoff({
 				...sharedRequest,
-				hostHome: typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined,
+				profileName: scoped?.profileName ?? sharedRequest.profileName,
+				workspaceRoot: scoped?.root ?? sharedRequest.workspaceRoot,
+				hostHome: scoped?.hostHome ?? (typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined),
 			})) as unknown as Record<string, unknown>;
 		} else {
 			throw new Error("handoff import currently supports only --target claude-code or --target codex");
