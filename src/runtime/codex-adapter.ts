@@ -1067,7 +1067,7 @@ export class CodexRuntimeAdapter extends HostRuntimeAdapterBase {
         nextAction: input.reasoning?.nextAction ?? null,
       },
       memory: {
-        hotSummary: input.memory?.hotSummary ?? summarizeHotMemorySnapshot(hot, "codex"),
+	hotSummary: input.memory?.hotSummary ?? summarizeHotMemorySnapshot(hot, this.config.workspaceOnly ? "codex" : "shared"),
         warmIds: input.memory?.warmIds ?? activeWarmIds,
         coldChunkIds: input.memory?.coldChunkIds ?? [],
         projectModelIds: input.memory?.projectModelIds ?? [],

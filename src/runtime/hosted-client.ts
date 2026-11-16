@@ -12,6 +12,7 @@ import type {
   ContinuityClaimVerificationResult,
 } from "../protocol/continuity-claims";
 import { L402_IDEMPOTENCY_HEADER } from "../protocol/hosted-api";
+import { SHARED_HOT_SCOPE } from "../protocol/memory";
 
 export type HostedSession = {
   sessionToken: string;
@@ -383,7 +384,7 @@ export class HostedOnlyBotsClient {
   private async signMemory(content: string, scope?: string): Promise<string> {
     const unsigned: Omit<SignedMemoryEnvelope, "signature"> = {
       version: SIGNED_MEMORY_VERSION,
-      scope: scope ?? null,
+      scope: scope ?? SHARED_HOT_SCOPE,
       content,
       signedBy: this.config.npub,
       createdAt: new Date().toISOString(),
@@ -400,8 +401,11 @@ export class HostedOnlyBotsClient {
     try { value = JSON.parse(content); } catch { return null; }
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const envelope = value as Partial<SignedMemoryEnvelope>;
+    const resolvedScope = expectedScope ?? SHARED_HOT_SCOPE;
+    const validScope = envelope.scope === resolvedScope ||
+      (resolvedScope === SHARED_HOT_SCOPE && envelope.scope === null);
     if (envelope.version !== SIGNED_MEMORY_VERSION || envelope.signedBy !== this.config.npub ||
-		envelope.scope !== (expectedScope ?? null) || typeof envelope.content !== "string" ||
+		!validScope || (envelope.scope !== null && typeof envelope.scope !== "string") || typeof envelope.content !== "string" ||
 		typeof envelope.createdAt !== "string" || !Number.isFinite(Date.parse(envelope.createdAt)) ||
 		typeof envelope.signature !== "string" || !/^[0-9a-f]{128}$/i.test(envelope.signature)) return null;
     const decoded = nip19.decode(envelope.signedBy);

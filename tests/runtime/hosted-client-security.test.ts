@@ -149,7 +149,10 @@ describe("hosted client security boundaries", () => {
 	stored = String((await readJson(request)).content);
 	return json(response, 200, { ok: true });
       }
-      return json(response, 200, { content: stored });
+      if (request.url === "/v1/memory/hot?scope=all") {
+	return json(response, 200, { scope: "all", scopes: [{ scope: "shared", content: stored }] });
+      }
+      return json(response, 200, { scope: "shared", content: stored });
     });
     const client = new HostedOnlyBotsClient({
       apiBase: base, npub: signer.npub, nsec: signer.nsec,
@@ -157,10 +160,43 @@ describe("hosted client security boundaries", () => {
     });
     await client.writeHotMemory('{"goal":"safe"}');
     expect(stored).not.toContain(signer.nsec);
+    expect((JSON.parse(stored) as Record<string, unknown>).scope).toBe("shared");
     expect(await client.readHotMemory()).toMatchObject({ content: '{"goal":"safe"}', integrity: "verified" });
+    expect(await client.readHotMemory("all")).toMatchObject({
+      scopes: [{ scope: "shared", content: '{"goal":"safe"}', integrity: "verified" }],
+    });
     const envelope = JSON.parse(stored) as Record<string, unknown>;
     stored = JSON.stringify({ ...envelope, content: '{"goal":"server injected"}' });
     expect(await client.readHotMemory()).toMatchObject({ content: "", integrity: "rejected-unverified" });
+    expect(await client.readHotMemory("all")).toMatchObject({ scopes: [] });
+  });
+
+  it("reads legacy default-scope signatures as shared only", async () => {
+    const signer = identity();
+    const unsigned = {
+      version: "crosshead_signed_memory_v1",
+      scope: null,
+      content: '{"goal":"legacy"}',
+      signedBy: signer.npub,
+      createdAt: new Date().toISOString(),
+    };
+    const canonical = JSON.stringify(Object.fromEntries(Object.entries(unsigned).sort(([a], [b]) => a.localeCompare(b))));
+    const signature = Buffer.from(await schnorr.sign(new TextEncoder().encode(`crosshead-memory-v1\n${canonical}`), signer.secret)).toString("hex");
+    const stored = JSON.stringify({ ...unsigned, signature });
+    const base = await listen((request, response) => {
+      if (request.url === "/v1/memory/hot?scope=all") {
+	return json(response, 200, { scope: "all", scopes: [{ scope: "shared", content: stored }, { scope: "codex", content: stored }] });
+      }
+      return json(response, 200, { scope: "shared", content: stored });
+    });
+    const client = new HostedOnlyBotsClient({
+      apiBase: base, npub: signer.npub, nsec: signer.nsec,
+      session: { sessionToken: "session-test", expiresAt: new Date(Date.now() + 60_000).toISOString(), scopes: [] },
+    });
+    expect(await client.readHotMemory()).toMatchObject({ content: unsigned.content, integrity: "verified" });
+    expect(await client.readHotMemory("all")).toMatchObject({
+      scopes: [{ scope: "shared", content: unsigned.content, integrity: "verified" }],
+    });
   });
 
   it("drops unauthenticated hosted context text and bounds JSON responses", async () => {
