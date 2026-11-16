@@ -395,7 +395,7 @@ export class HostedOnlyBotsClient {
     return JSON.stringify({ ...unsigned, signature } satisfies SignedMemoryEnvelope);
   }
 
-  private async verifyMemory(content: unknown, expectedScope?: string): Promise<string | null> {
+  private async verifyMemory(content: unknown, expectedScope?: string): Promise<{ content: string; signedAt: string } | null> {
     if (typeof content !== "string" || content.length > MAX_JSON_RESPONSE_BYTES) return null;
     let value: unknown;
     try { value = JSON.parse(content); } catch { return null; }
@@ -422,7 +422,7 @@ export class HostedOnlyBotsClient {
       new TextEncoder().encode(this.memorySignaturePayload(unsigned)),
       decoded.data
     );
-    return valid ? envelope.content : null;
+    return valid ? { content: envelope.content, signedAt: envelope.createdAt } : null;
   }
 
   private async verifiedHotMemoryResponse(
@@ -434,15 +434,15 @@ export class HostedOnlyBotsClient {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
 		const entry = raw as Record<string, unknown>;
 		const scope = typeof entry.scope === "string" ? entry.scope : undefined;
-		const content = await this.verifyMemory(entry.content, scope);
-		if (content !== null) scopes.push({ ...entry, content, integrity: "verified" });
+		const verified = await this.verifyMemory(entry.content, scope);
+		if (verified !== null) scopes.push({ ...entry, content: verified.content, signed_at: verified.signedAt, integrity: "verified" });
       }
       return { ...data, scopes, integrity: "verified-client-signatures" };
     }
-    const content = await this.verifyMemory(data.content, expectedScope);
-    return content === null
+    const verified = await this.verifyMemory(data.content, expectedScope);
+    return verified === null
       ? { ...data, content: "", integrity: "rejected-unverified" }
-      : { ...data, content, integrity: "verified" };
+      : { ...data, content: verified.content, signed_at: verified.signedAt, integrity: "verified" };
   }
 
   // Header bag for L402 paid operations. The hosted API rejects paid POSTs without a valid

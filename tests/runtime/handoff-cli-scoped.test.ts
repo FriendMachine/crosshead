@@ -1,9 +1,9 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { generateRuntimeIdentity, OnlyBotsLocalRuntimeDaemon, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 import { writeLocalHotMemory } from "../../src/runtime/local-hot-memory";
@@ -43,6 +43,12 @@ it("exports and imports a signed handoff after normal scoped project setup", asy
 		expect(JSON.parse(setup.stdout).bindings).toHaveLength(2);
 		daemon = new OnlyBotsLocalRuntimeDaemon(home);
 		await daemon.start();
+		const projectWideJudgment = vi.spyOn(daemon, "inspectContinuityJudgment").mockResolvedValue({
+			snapshot: { projectModel: { currentDirection: [{ summary: "OTHER PROJECT PRIVATE DIRECTION" }] } },
+		});
+		const projectWideWarm = vi.spyOn(daemon, "listWarmMemory").mockResolvedValue({
+			entries: [{ id: "other-project-warm-id" }],
+		});
 		const state = resolveRuntimePaths(home).state;
 		const workspaceId = `repo:${project}`;
 		const otherWorkspaceId = `repo:${otherProject}`;
@@ -65,6 +71,28 @@ it("exports and imports a signed handoff after normal scoped project setup", asy
 		expect(capsule.continuityIr.identity.npub).toBe(scopedIdentity.npub);
 		expect(capsule.continuityIr.memoryReferences.hotMemory.summary).toContain("checksum still fails on empty rows");
 		expect(JSON.stringify(capsule)).not.toContain("OTHER WORKSPACE SECRET");
+		expect(JSON.stringify(capsule)).not.toContain("OTHER PROJECT PRIVATE DIRECTION");
+		expect(JSON.stringify(capsule)).not.toContain("other-project-warm-id");
+		expect(projectWideJudgment).not.toHaveBeenCalled();
+		expect(projectWideWarm).not.toHaveBeenCalled();
+		const oversizedFile = path.join(root, "oversized.json");
+		writeFileSync(oversizedFile, " ".repeat(128 * 1024 + 1));
+		for (const subcommand of ["import", "verify", "explain"]) {
+			const oversized = await cli("handoff", subcommand, "--file", oversizedFile, "--home", home);
+			expect(oversized.status).not.toBe(0);
+			expect(JSON.parse(oversized.stdout).error.message).toContain("no larger than 131072 bytes");
+		}
+		const preservedFile = path.join(root, "preserved.txt");
+		const forcedFile = path.join(root, "forced-capsule.json");
+		writeFileSync(preservedFile, "keep this file");
+		symlinkSync(preservedFile, forcedFile);
+		const forced = await cli("handoff", "export", "--source", "codex", "--target", "claude-code",
+			"--workspace-root", project, "--session-id", "source-session", "--prompt", "Export safely",
+			"--home", home, "--output", forcedFile, "--force");
+		expect(forced.status, forced.stdout + forced.stderr).toBe(0);
+		expect(readFileSync(preservedFile, "utf8")).toBe("keep this file");
+		expect(lstatSync(forcedFile).isSymbolicLink()).toBe(false);
+		expect(statSync(forcedFile).mode & 0o777).toBe(0o600);
 		const wrongWorkspace = await cli("handoff", "export", "--source", "codex", "--target", "claude-code",
 			"--workspace-root", project, "--workspace-id", otherWorkspaceId, "--session-id", "source-session",
 			"--prompt", "Export the other project", "--home", home);
@@ -87,6 +115,7 @@ it("exports and imports a signed handoff after normal scoped project setup", asy
 		expect(wrongProfile.status).not.toBe(0);
 		expect(JSON.parse(wrongProfile.stdout).error.message).toContain("This workspace uses profile work");
 	} finally {
+		vi.restoreAllMocks();
 		if (daemon) await daemon.stop();
 		rmSync(root, { recursive: true, force: true });
 	}

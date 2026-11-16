@@ -163,7 +163,7 @@ describe("hosted client security boundaries", () => {
     expect((JSON.parse(stored) as Record<string, unknown>).scope).toBe("shared");
     expect(await client.readHotMemory()).toMatchObject({ content: '{"goal":"safe"}', integrity: "verified" });
     expect(await client.readHotMemory("all")).toMatchObject({
-      scopes: [{ scope: "shared", content: '{"goal":"safe"}', integrity: "verified" }],
+      scopes: [{ scope: "shared", content: '{"goal":"safe"}', signed_at: expect.any(String), integrity: "verified" }],
     });
     const envelope = JSON.parse(stored) as Record<string, unknown>;
     stored = JSON.stringify({ ...envelope, content: '{"goal":"server injected"}' });

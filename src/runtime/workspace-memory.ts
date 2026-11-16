@@ -58,9 +58,12 @@ export const filterHotMemorySnapshotForWorkspace = (
     };
     const normalize = (entry: Record<string, unknown>): Record<string, unknown> | null => {
       const content = parseHotMemoryEntryContent(entry);
-      if (!content || !equivalent(getWorkspaceId(content), entry.updated_at ?? content.updatedAt ?? content.occurredAt)) return null;
+      // A hosted server can change updated_at. Legacy adoption must use the timestamp
+      // inside the verified client signature; local files may use their local mtime.
+      const observedAt = entry.integrity === "verified" ? entry.signed_at : entry.updated_at ?? content?.updatedAt ?? content?.occurredAt;
+      if (!content || !equivalent(getWorkspaceId(content), observedAt)) return null;
       const checkpoints = Array.isArray(content.continuityCheckpoints)
-	? content.continuityCheckpoints.filter(isRecord).filter(checkpoint => equivalent(getWorkspaceId(checkpoint), checkpoint.occurredAt ?? entry.updated_at ?? content.updatedAt))
+	? content.continuityCheckpoints.filter(isRecord).filter(checkpoint => equivalent(getWorkspaceId(checkpoint), checkpoint.occurredAt ?? observedAt))
 	  .map(checkpoint => ({ ...checkpoint, workspaceId })) : undefined;
       return { ...entry, content: JSON.stringify({ ...content, workspaceId,
 	...(checkpoints ? { continuityCheckpoints: checkpoints } : {}) }) };
