@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +12,7 @@ import { CodexRuntimeAdapter } from "../../src/runtime/codex-adapter";
 import { HANDOFF_IMPORT_COMMAND, handoffAgeRejection, handoffSignerRejection, parseAllowedSigners } from "../../src/runtime/handoff-import";
 import { buildWarmPromotionCandidates } from "../../src/runtime/warm-memory-promotion";
 import { LocalRuntimeClient } from "../../src/runtime/local-client";
-import { OnlyBotsLocalRuntimeDaemon, setupRuntimeProfile } from "../../src/runtime/local-runtime";
+import { OnlyBotsLocalRuntimeDaemon, formatHotMemoryForDisplay, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 
 // Each "machine" is a separate runtime home with its own daemon. Profiles point at an address
 // nothing listens on, so every hosted request fails the way it does with no network.
@@ -172,6 +173,89 @@ describe("handoff capsules between machines", () => {
     expect(() => parseAllowedSigners(`${other}, not-a-key`)).toThrow("not a valid npub: not-a-key");
     expect(parseAllowedSigners(true)).toEqual([]);
   });
+});
+
+// A real final response: what was done, the failed approach, then the failing tests and next step.
+// The old export kept only its first 280 characters.
+const longFinding = [
+  "Copied all 41,208 ledger rows into ledger_v2 with the batched copy step; row counts match.",
+  "Tried computing checksums inside the copy transaction; rejected, it held locks for 40 seconds.",
+  "x".repeat(600),
+  "Failing tests: tests/ledger/checksum.test.ts > empty rows and > null memo.",
+  "Next step: skip rows whose memo is empty before hashing, then rerun npm test -- checksum.",
+].join("\n");
+
+const waitForHot = async (target: Machine, expected: string): Promise<void> => {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (JSON.stringify(await target.client.readHotMemory("default", "all")).includes(expected)) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`hot memory never contained ${expected}`);
+};
+
+describe("what a handoff carries", () => {
+  it("carries the whole latest finding, not its first 280 characters", async () => {
+    const key = identity();
+    const laptop = await machine(key);
+    const sandbox = await machine(key);
+    await laptop.client.emitEvent({
+      eventId: "work-turn", runtime: "claude-code", type: "turn.completed", workspaceId, sessionId: "laptop-session", turnId: "t1",
+      payload: { goal: "Finish the ledger migration", summary: longFinding },
+    });
+    await waitForHot(laptop, "Next step: skip rows");
+
+    const exported = await laptop.claude.createHandoff({ ...exportRequest, transcript: undefined, targetRuntime: "claude-code" });
+    const hotSummary = exported.record.capsule.continuityIr.memoryReferences.hotMemory.summary ?? "";
+    expect(hotSummary).toContain("Request: Finish the ledger migration");
+    expect(hotSummary).toContain("Failing tests: tests/ledger/checksum.test.ts");
+    expect(hotSummary).toContain("Next step: skip rows whose memo is empty");
+    expect(exported.record.capsule.sizeBudget.withinBudget).toBe(true);
+
+    const imported = await sandbox.claude.importHandoff({ capsule: exported.record.capsule, workspaceRoot: project, sessionId: "handoff-import" });
+    expect(imported.savedToHotMemory).toBe(true);
+    const context = await laterSessionContext(sandbox, "claude-code", "Next step: skip rows whose memo is empty");
+    expect(context).toContain("Failing tests: tests/ledger/checksum.test.ts");
+    expect(context).toContain("Next step: skip rows whose memo is empty");
+
+    // The shell view an agent is pointed at shows the saved text, not field names and ids.
+    const shown = formatHotMemoryForDisplay(await laptop.client.readHotMemory("default", "all"));
+    expect(shown).toContain("Next step: skip rows whose memo is empty");
+    expect(shown).not.toContain("[truncated]");
+  }, 30_000);
+
+  it("starts the daemon for an import on a fresh machine, as hooks do", async () => {
+    const key = identity();
+    const laptop = await machine(key);
+    const capsuleFile = path.join(laptop.home, "capsule.json");
+    writeFileSync(capsuleFile, JSON.stringify((await laptop.claude.createHandoff({ ...exportRequest, targetRuntime: "claude-code" })).record.capsule));
+    // Set up but never started: the order a fresh sandbox uses.
+    const fresh = mkdtempSync(path.join(os.tmpdir(), "crosshead-handoff-fresh-"));
+    await setupRuntimeProfile({ home: fresh, profileName: "default", apiBase: "http://127.0.0.1:0", npub: key.npub, nsec: key.nsec, makeDefault: true });
+    const hostHome = path.join(fresh, "host");
+    mkdirSync(path.join(hostHome, "onlybots"), { recursive: true });
+    writeFileSync(path.join(hostHome, "onlybots", "claude-code-adapter.json"), JSON.stringify({
+      marker: "__onlybots_claude_code_adapter__", adapterName: "claude-code", adapterVersion: "0.3.0", runtimeHome: fresh,
+      hostHome, workspaceRoot: project, profileName: "default", claudeBinary: "claude",
+      installedAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z",
+    }));
+    const env = { ...process.env, CROSSHEAD_HOME: fresh, CLAUDE_CONFIG_DIR: hostHome, CROSSHEAD_HOOK_AUTOSTART: "1" };
+    for (const name of ["CROSSHEAD_PROFILE", "ONLYBOTS_PROFILE", "ONLYBOTS_HOME", "ONLYBOTS_RUNTIME_HOME"]) delete env[name];
+    const cli = (...args: string[]) => new Promise<{ status: number | null; output: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [path.resolve(__dirname, "../../dist/runtime/cli.js"), ...args, "--home", fresh], { cwd: project, env });
+      let output = "";
+      child.stdout.on("data", (chunk) => { output += String(chunk); });
+      child.stderr.on("data", (chunk) => { output += String(chunk); });
+      child.on("error", reject);
+      child.on("close", (status) => resolve({ status, output }));
+    });
+    cleanups.push(async () => {
+      await cli("stop");
+      rmSync(fresh, { recursive: true, force: true });
+    });
+    const imported = await cli("handoff", "import", "--target", "claude-code", "--file", capsuleFile, "--workspace-root", project, "--claude-home", hostHome, "--json");
+    expect(imported.status, imported.output).toBe(0);
+    expect(JSON.parse(imported.output)).toMatchObject({ accepted: true, savedToHotMemory: true });
+  }, 30_000);
 });
 
 describe("import safeguards", () => {

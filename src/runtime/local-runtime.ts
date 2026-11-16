@@ -32,7 +32,7 @@ import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHea
 import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession } from "./hosted-client";
 export { describeFetchFailure } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
-import { searchHotCheckpoints } from "./hot-continuity";
+import { readHotCheckpoints, searchHotCheckpoints } from "./hot-continuity";
 import {
 	RuntimeLifecycleManager,
 	type RuntimeLifecycleActivity,
@@ -5488,6 +5488,8 @@ export const formatWarmMemoryEvaluation = (
 	return lines.join("\n");
 };
 
+const HOT_DISPLAY_CHECKPOINTS = 3;
+
 const formatSingleHotContent = (rawContent: string): string => {
 	const content = rawContent.trim();
 	if (content.length === 0) {
@@ -5495,6 +5497,21 @@ const formatSingleHotContent = (rawContent: string): string => {
 	}
 	try {
 		const parsed = JSON.parse(content) as Record<string, unknown>;
+		// Hooks save checkpoints. Show their text, newest first: this is what an agent told to run
+		// `crosshead memory hot` needs, and a field summary would show only truncated ids.
+		const checkpoints = readHotCheckpoints(parsed?.continuityCheckpoints)
+			.sort((left, right) => (Date.parse(right.occurredAt) || 0) - (Date.parse(left.occurredAt) || 0));
+		if (checkpoints.length > 0) {
+			const shown = checkpoints.slice(0, HOT_DISPLAY_CHECKPOINTS).map((entry) => [
+				`${entry.origin === "remember" ? "Saved with remember" : "Checkpoint"} from ${entry.runtime} at ${entry.occurredAt}`,
+				entry.goal ? `Request: ${truncateForPresentation(entry.goal, 600)}` : null,
+				`Finding:\n${entry.summary}`,
+			].filter((line): line is string => line !== null).join("\n"));
+			const more = checkpoints.length > shown.length
+				? `\n\n${checkpoints.length - shown.length} older checkpoint(s) not shown; use crosshead memory search "<query>" or --json.`
+				: "";
+			return `${shown.join("\n\n")}${more}`;
+		}
 		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
 			return Object.keys(parsed)
 				.sort((left, right) => left.localeCompare(right))

@@ -14,6 +14,9 @@ import { randomUUID } from "crypto";
 import path from "path";
 
 import type { OperatorWorkspaceManifest } from "./operator-policy";
+import { selectHotCheckpoints } from "./hot-continuity";
+import { IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
+import { compactContinuitySummary } from "./summary-compaction";
 
 // Shared helpers for the host runtime adapters (claude-code, codex, pi). These were
 // previously duplicated per adapter, which let bug fixes land in one runtime and not the
@@ -54,6 +57,42 @@ export const summarizeHotMemory = (value: unknown): string | null => {
   }
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length <= 280 ? normalized : `${normalized.slice(0, 277).trimEnd()}...`;
+};
+
+// The handoff file's own budget is 16 KiB of canonical JSON, and an import saves
+// at most IMPORTED_HANDOFF_LIMIT characters of the rendered handoff. This leaves
+// room for the rest of the capsule in both.
+export const HANDOFF_HOT_SUMMARY_LIMIT = 5000;
+
+/**
+ * What a handoff file carries from hot memory: the latest saved request and the
+ * agent's final response for this workspace (plus a pending import or explicit
+ * save), at full length up to the limit. Observed source excerpts stay behind;
+ * the file travels to other machines. Falls back to the one-line summary for
+ * hot memory that holds no checkpoints.
+ */
+export const summarizeHotMemoryForHandoff = (
+  snapshot: Record<string, unknown> | null, preferredRuntime: string, limit: number = HANDOFF_HOT_SUMMARY_LIMIT
+): string | null => {
+  if (!snapshot) return null;
+  const entries = selectHotCheckpoints(snapshot, null);
+  if (entries.length === 0) return summarizeHotMemorySnapshot(snapshot, preferredRuntime);
+  const parts: string[] = [];
+  let remaining = limit;
+  for (const [index, entry] of entries.entries()) {
+    const label = entry.turnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) ? "Imported earlier" : entry.origin === "remember" ? "Explicitly saved" : "Latest work";
+    const heading = `${label} (${entry.runtime}, ${entry.occurredAt}):`;
+    const available = Math.floor(remaining / (entries.length - index)) - heading.length - 40;
+    if (available < 200) break;
+    const goal = entry.goal ? entry.goal.slice(0, Math.floor(available * 0.3)) : "";
+    const request = goal ? `\nRequest: ${goal}${goal.length < entry.goal.length || entry.goalTruncated ? " [request incomplete]" : ""}` : "";
+    const findingBudget = available - request.length;
+    const finding = entry.summary.length <= findingBudget ? entry.summary : compactContinuitySummary(entry.summary, findingBudget);
+    const part = `${heading}${request}\nFinding: ${finding}`;
+    parts.push(part);
+    remaining -= part.length + 2;
+  }
+  return parts.length > 0 ? parts.join("\n\n") : summarizeHotMemorySnapshot(snapshot, preferredRuntime);
 };
 
 export const summarizeHotMemorySnapshot = (snapshot: Record<string, unknown> | null, preferredRuntime: string): string | null => {
