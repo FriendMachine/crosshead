@@ -97,7 +97,9 @@ disabled, and writes the wrappers into `~/.crosshead/bin`.
 (the default), checking for a new release about once an hour and retrying failed checks after 30 minutes. Before installing, Crosshead verifies GitHub's signed
 build attestation for the exact archive digest and this repository's release
 workflow. If verification or download fails, the host still launches and the
-update is retried later. `crosshead update --manual` disables automatic
+update is retried later. If another install still holds the update lock and
+the launch check times out, launch is deferred; retry after the install
+finishes. `crosshead update --manual` disables automatic
 updates. `crosshead update --policy` shows the current setting. The older
 `--pin` option remains an alias for `--manual`.
 

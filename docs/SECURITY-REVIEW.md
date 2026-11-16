@@ -70,7 +70,8 @@ from it is in scope.
    workflow and tag before installing. In `manual` mode, the operator supplies
    a trusted SHA-256 from an independent channel. Both paths validate archive
    entries and run `npm ci --omit=dev --ignore-scripts` with install scripts
-   disabled. A failed update check does not prevent the host from launching.
+   disabled. Remote verification and download failures do not prevent host
+   launch; a failure to establish the update lock and host lease defers it.
    See `src/runtime/release-attestation.ts`, `runtime-auto-update.ts`, and
    `validateRuntimeReleaseArchive`.
 2. **Local daemon HTTP API.** It binds `127.0.0.1` on a configurable port

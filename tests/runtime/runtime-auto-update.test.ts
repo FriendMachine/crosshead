@@ -4,6 +4,7 @@ import path from "path";
 import { describe, expect, it, vi } from "vitest";
 import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
 import { updateFromCli } from "../../src/runtime/cli/core";
+import { runOnlyBotsCtlCliEntrypoint } from "../../src/runtime/cli";
 import { fetchRuntimeReleaseArtifact, inspectInstalledRuntimeRelease, isAllowedRuntimeReleaseUrl, parseWrapperScriptTarget, resolveReleaseUpdateBaseUrl, updateManagedRuntimeRelease, runRuntimeInstallCommand } from "../../src/runtime/local-runtime";
 import { shellQuote } from "../../src/runtime/adapter-utils";
 import { ensureRuntimeHomeLayout, writeJsonFile } from "../../src/runtime/runtime-persistence";
@@ -46,6 +47,14 @@ const autoSetup = () => {
 };
 
 describe("published runtime automatic updates", () => {
+	it("returns a distinct failure when launch safety was not established", async () => {
+		const exit = vi.fn();
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			await runOnlyBotsCtlCliEntrypoint(["update", "--check-on-launch", "--host-pid", "0"], exit);
+			expect(exit).toHaveBeenCalledExactlyOnceWith(75);
+		} finally { stderr.mockRestore(); }
+	});
 	it("detects the single-quoted wrapper emitted by the real installer", () => {
 		const { home, p } = setup();
 		expect(inspectInstalledRuntimeRelease(p).releaseId).toBe("old");
