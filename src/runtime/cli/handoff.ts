@@ -7,6 +7,7 @@ import { HANDOFF_CAPSULE_DEFAULT_MAX_BYTES } from "../handoff-capsules";
 import { workspaceProjectRoot } from "../workspace-identity";
 import { resolveRuntimePaths } from "../runtime-persistence";
 import { readWorkspaceHookPolicy, workspaceHookForInvocation } from "../workspace-hooks";
+import { ensureHookRuntime } from "../hook-runtime";
 
 type HandoffHost = "codex" | "claude-code";
 
@@ -94,6 +95,12 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 	const subcommand = positionals[0];
 	const profileName = typeof flags.profile === "string" ? flags.profile : undefined;
 	const daemon = new OnlyBotsLocalRuntimeDaemon(typeof flags.home === "string" ? flags.home : undefined);
+
+	// Export and import read and write memory through the daemon. A fresh machine runs them right
+	// after setup, before any hook has started it, so start it here the same way hooks do.
+	if (subcommand === "export" || subcommand === "import") {
+		await ensureHookRuntime(resolveRuntimePaths(typeof flags.home === "string" ? flags.home : undefined).home);
+	}
 
 	if (subcommand === "export") {
 		const sourceRuntime = typeof flags.source === "string" ? flags.source : "codex";

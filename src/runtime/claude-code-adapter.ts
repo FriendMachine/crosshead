@@ -42,7 +42,7 @@ import {
   parseArgs,
   sanitizeString,
   shellQuote,
-  summarizeHotMemorySnapshot,
+  summarizeHotMemoryForHandoff,
   summarizeJudgmentEntries,
   writeManagedFile,
 } from "./adapter-utils";
@@ -1053,7 +1053,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
         nextAction: input.reasoning?.nextAction ?? null,
       },
       memory: {
-	hotSummary: input.memory?.hotSummary ?? summarizeHotMemorySnapshot(hot, this.config.workspaceOnly ? "claude-code" : "shared"),
+	hotSummary: input.memory?.hotSummary ?? summarizeHotMemoryForHandoff(hot, this.config.workspaceOnly ? "claude-code" : "shared"),
         warmIds: input.memory?.warmIds ?? activeWarmIds,
         coldChunkIds: input.memory?.coldChunkIds ?? [],
         projectModelIds: input.memory?.projectModelIds ?? [],
