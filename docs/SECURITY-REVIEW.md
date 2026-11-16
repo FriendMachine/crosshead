@@ -72,6 +72,9 @@ from it is in scope.
    entries and run `npm ci --omit=dev --ignore-scripts` with install scripts
    disabled. Remote verification and download failures do not prevent host
    launch; a failure to establish the update lock and host lease defers it.
+   Operator updates and rollbacks check live host leases and native processes
+   under the update lock. Staged release installs recheck immediately before
+   applying. `--force` explicitly bypasses the active-host guard.
    See `src/runtime/release-attestation.ts`, `runtime-auto-update.ts`, and
    `validateRuntimeReleaseArchive`.
 2. **Local daemon HTTP API.** It binds `127.0.0.1` on a configurable port

@@ -62,6 +62,28 @@ export const runtimeHasActiveWork = (home: string, hostRunning = () => true): bo
 	return false;
 };
 
+/** Call while holding the update lock, before changing files used by a host. */
+export const assertNoLiveRuntimeHosts = (
+	home: string,
+	force = false,
+	ownerAlive = alive,
+	nativeHostsRunning = () => nativeHostProcessesRunning(process.pid)
+): void => {
+	if (force) return;
+	const leases = path.join(ensureRuntimeHomeLayout(home).state, "host-processes");
+	for (const file of existsSync(leases) ? readdirSync(leases) : []) {
+		if (!/^\d+\.json$/.test(file)) continue;
+		const pid = Number(file.slice(0, -5));
+		if (ownerAlive(pid)) {
+			throw new Error("A managed host is running; close it before updating, or use --force to update during its session");
+		}
+		rmSync(path.join(leases, file));
+	}
+	if (nativeHostsRunning()) {
+		throw new Error("A Codex or Claude host is running; close it before updating, or use --force to update during its session");
+	}
+};
+
 /** Serializes all release installs and update-policy writes across CLI processes. */
 export const withRuntimeUpdateLock = async <T>(home: string | undefined, action: () => Promise<T> | T, ownerAlive = alive): Promise<T> => {
 	const paths = ensureRuntimeHomeLayout(home);
@@ -141,7 +163,12 @@ export const maintainRuntimeBeforeLaunch = async (home: string | undefined, host
 			if (deps.nativeHostsRunning(hostPid) || hasActiveWork()) return "Crosshead update available; deferred while another host is active.";
 			await deps.verify(candidate[1], release.sha256);
 			if (deps.nativeHostsRunning(hostPid) || hasActiveWork()) return "Crosshead verified update available; deferred while another host is active.";
-			const updated = await deps.update(paths.home, { trustedSha256: release.sha256, timeoutMs: 45_000, expectedReleaseId: release.available });
+			const updated = await deps.update(paths.home, {
+				trustedSha256: release.sha256, timeoutMs: 45_000, expectedReleaseId: release.available,
+				beforeApply: () => {
+					if (deps.nativeHostsRunning(hostPid) || hasActiveWork()) throw new Error("A host became active during the update; retry after it exits");
+				},
+			});
 			if (updated.releaseId !== release.available) throw new Error("Installed release did not match the verified release");
 			writeJsonFile(stateFile, { checkedAtMs: deps.now(), installed: release.available, available: release.available, status: "updated" });
 			return `Crosshead automatically updated to ${candidate[1]} (signed release verified).`;

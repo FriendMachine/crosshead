@@ -104,7 +104,9 @@ updates. `crosshead update --policy` shows the current setting. The older
 `--pin` option remains an alias for `--manual`.
 
 For a manual install, obtain the digest from an independent release channel
-and run `crosshead update --sha256 <digest>`.
+and run `crosshead update --sha256 <digest>`. Operator updates and rollbacks
+refuse to change runtime files while a host is running. Close host sessions
+first, or use `--force` at the end of the command to update during a session.
 
 To check that a release matches this source, compare the installer's
 `RELEASE_SHA256` with `SHA256SUMS` on the matching GitHub release. Public

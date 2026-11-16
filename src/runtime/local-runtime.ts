@@ -1630,7 +1630,8 @@ const downloadRuntimeRelease = async (
 	explicitBaseUrl?: string,
 	trustedSha256?: string,
 	timeoutMs = 120_000,
-	expectedReleaseId?: string
+	expectedReleaseId?: string,
+	beforeApply?: () => void
 ): Promise<DownloadedRuntimeRelease> => {
 	const baseUrl = resolveReleaseUpdateBaseUrl(paths, explicitBaseUrl);
 	if (!trustedSha256 || !/^[a-f0-9]{64}$/.test(trustedSha256)) {
@@ -1702,6 +1703,7 @@ const downloadRuntimeRelease = async (
 		const npmExecutable = path.join(path.dirname(process.execPath), process.platform === "win32" ? "npm.cmd" : "npm");
 		if (!existsSync(npmExecutable)) throw new Error(`Runtime update cannot find npm beside ${process.execPath}`);
 		await runRuntimeInstallCommand(npmExecutable, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--fetch-timeout=15000", "--fetch-retries=1"], stageRoot, timeoutMs);
+		beforeApply?.();
 		rmSync(releaseRoot, { recursive: true, force: true });
 		renameSync(stageRoot, releaseRoot);
 	} finally {
@@ -1888,13 +1890,14 @@ export const updateManagedRuntimeRelease = async (
 		restart?: boolean;
 		timeoutMs?: number;
 		expectedReleaseId?: string;
+		beforeApply?: () => void;
 	} = {}
 ): Promise<RuntimeReleaseUpdateResult> => {
 	readWorkspaceHookPolicy(resolveRuntimePaths(home));
 	const paths = ensureRuntimeHomeLayout(home);
 	const previousRelease = inspectInstalledRuntimeRelease(paths);
 	const specs = await collectManagedAdapterReinstallSpecs(paths);
-	const release = await downloadRuntimeRelease(paths, options.baseUrl, options.trustedSha256, options.timeoutMs, options.expectedReleaseId);
+	const release = await downloadRuntimeRelease(paths, options.baseUrl, options.trustedSha256, options.timeoutMs, options.expectedReleaseId, options.beforeApply);
 	// A release must not leave launchers pointing at a half-applied installation.
 	// Keep credentials, memory and queued writes outside this file-level rollback.
 	const protectedFiles = new Set([
@@ -1920,6 +1923,7 @@ export const updateManagedRuntimeRelease = async (
 	const priorDaemon = loadDaemonState(paths);
 	let restartAttempted = false;
 	try {
+		options.beforeApply?.();
 		const reapplied = await reapplyManagedRuntimeRelease(paths, release, specs);
 		restartAttempted = options.restart !== false && priorDaemon.status === "running";
 		const daemon = await restartRuntimeDaemonIfNeeded(paths, release, options.restart !== false);

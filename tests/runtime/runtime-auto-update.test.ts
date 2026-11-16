@@ -2,8 +2,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs"
 import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
-import { maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
-import { updateFromCli } from "../../src/runtime/cli/core";
+import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
+import { rollbackFromCli, updateFromCli } from "../../src/runtime/cli/core";
 import { fetchRuntimeReleaseArtifact, inspectInstalledRuntimeRelease, isAllowedRuntimeReleaseUrl, parseWrapperScriptTarget, resolveReleaseUpdateBaseUrl, updateManagedRuntimeRelease, runRuntimeInstallCommand } from "../../src/runtime/local-runtime";
 import { shellQuote } from "../../src/runtime/adapter-utils";
 import { ensureRuntimeHomeLayout, writeJsonFile } from "../../src/runtime/runtime-persistence";
@@ -193,7 +193,26 @@ describe("published runtime automatic updates", () => {
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).toHaveBeenCalledTimes(1);
 		expect(deps.verify).toHaveBeenCalledExactlyOnceWith("0.5.0-alpha.14", newDigest);
-		expect(deps.update).toHaveBeenCalledExactlyOnceWith(home, { trustedSha256: newDigest, timeoutMs: 45_000, expectedReleaseId: newRelease });
+		expect(deps.update).toHaveBeenCalledExactlyOnceWith(home, expect.objectContaining({
+			trustedSha256: newDigest, timeoutMs: 45_000, expectedReleaseId: newRelease, beforeApply: expect.any(Function),
+		}));
+		deps.nativeHostsRunning.mockReturnValue(true);
+		expect(deps.update.mock.calls[0]![1].beforeApply).toThrow("A host became active");
+	});
+	it("blocks release, catalog and rollback changes while a managed host is live", async () => {
+		const { home, p } = autoSetup();
+		const leases = path.join(p.state, "host-processes");
+		mkdirSync(leases, { recursive: true });
+		writeJsonFile(path.join(leases, `${process.pid}.json`), { pid: process.pid });
+		await expect(updateFromCli(["--home", home, "--sha256", newDigest])).rejects.toThrow("managed host is running");
+		await expect(updateFromCli(["--home", home, "--channel", "stable"])).rejects.toThrow("managed host is running");
+		await expect(rollbackFromCli(["--home", home, "--to", "0.3.0"])).rejects.toThrow("managed host is running");
+		await expect(updateFromCli(["--home", home, "--force"])).rejects.toThrow("requires --sha256");
+	});
+	it("checks direct native hosts even without a launcher lease", () => {
+		const { home } = setup();
+		expect(() => assertNoLiveRuntimeHosts(home, false, () => false, () => true)).toThrow("Codex or Claude host is running");
+		expect(() => assertNoLiveRuntimeHosts(home, true, () => false, () => true)).not.toThrow();
 	});
 	it("offers auto and manual CLI settings and migrates the legacy pinned mode", async () => {
 		const { home, p, deps } = autoSetup();
