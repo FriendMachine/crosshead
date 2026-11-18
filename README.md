@@ -129,8 +129,11 @@ disabled, and writes the wrappers into `~/.crosshead/bin`.
 
 `crosshead update --auto` enables automatic updates (the default). The daemon
 and each managed host launch check for a new release about once an hour, and
-install it once no host has run a hook for 10 minutes. Sessions that are open
-but idle do not block an update; their next prompt uses the new release.
+install it once every Codex and Claude Code turn has stopped and no host hook
+has run for 10 minutes. Sessions that are open but idle do not block an
+update; their next prompt uses the new release. A turn that was cancelled
+without stopping counts as in progress for two hours. A daemon that runs the
+organizational worker is never updated automatically.
 Failed checks are retried after 30 minutes, and the last outcome is recorded
 in `~/.crosshead/state/release-update.json`. Before installing, Crosshead verifies GitHub's signed
 build attestation for the exact archive digest and this repository's release

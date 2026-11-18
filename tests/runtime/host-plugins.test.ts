@@ -512,6 +512,8 @@ describe("hook dispatch", () => {
 		process.env.CODEX_HOME = f.codexHome;
 		const payload = JSON.stringify({ session_id: "s1", cwd: f.workspace });
 		const claudeStart = await captureStdout(() => runOnlyBotsClaudeCodeHookCli(["SessionStart", "--home", f.home, "--claude-home", f.claudeHome, "--via", "plugin"], payload));
+		// Every hook stamps the marker automatic updates use to wait for quiet hosts.
+		expect(Date.now() - JSON.parse(readFileSync(path.join(f.home, "state", "host-activity.json"), "utf8")).at).toBeLessThan(60_000);
 		expect(JSON.parse(claudeStart)).toEqual({ systemMessage: spec.pluginSetupHint("claude-code") });
 		expect(await captureStdout(() => runOnlyBotsClaudeCodeHookCli(["Stop", "--home", f.home, "--claude-home", f.claudeHome, "--via", "plugin"], payload))).toBe("");
 		const codexStart = await captureStdout(() => runOnlyBotsCodexHookCli(["SessionStart", "--home", f.home, "--via", "plugin"], payload));

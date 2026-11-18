@@ -65,8 +65,9 @@ from it is in scope.
 
 1. **Install and self-update.** The production installer reads release metadata
    and checks the tarball digest. The updater reads metadata only from
-   `https://crosshead.sh`. In `auto` mode, the daemon's detached updater or a host launch, once no
-   host has run a hook for ten minutes (open idle sessions do not block it), verifies a
+   `https://crosshead.sh`. In `auto` mode an update runs from the daemon's
+   detached updater or a host launch, once every turn has stopped and no host
+   hook has run for ten minutes. Open idle sessions do not block it. It verifies a
    Sigstore build attestation for the exact digest, GitHub Actions release
    workflow and tag before installing. In `manual` mode, the operator supplies
    a trusted SHA-256 from an independent channel. Both paths validate archive

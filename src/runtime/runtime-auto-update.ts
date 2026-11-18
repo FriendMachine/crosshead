@@ -2,7 +2,7 @@ import { existsSync, openSync, closeSync, readFileSync, readdirSync, rmSync, mkd
 import path from "path";
 import { execFileSync } from "child_process";
 import { ensureRuntimeHomeLayout, writeJsonFile, sanitizeLogValue, writeRuntimeLog } from "./runtime-persistence";
-import { AUTO_UPDATE_CHECK_INTERVAL_MS, AUTO_UPDATE_FAILED_RETRY_MS, AUTO_UPDATE_IDLE_MS, hostHooksRunning, hostsIdle } from "./runtime-idle-update";
+import { AUTO_UPDATE_CHECK_INTERVAL_MS, AUTO_UPDATE_FAILED_RETRY_MS, AUTO_UPDATE_IDLE_MS, daemonRunsOrganizationalWorker, hostHooksRunning, hostsIdle } from "./runtime-idle-update";
 import { inspectInstalledRuntimeRelease, inspectPublishedRuntimeRelease, updateManagedRuntimeRelease } from "./local-runtime";
 import { verifyGitHubReleaseAttestation } from "./release-attestation";
 import semver from "semver";
@@ -118,14 +118,18 @@ const idleUpdateDeps = (): IdleUpdateDeps => ({
 	now: () => Date.now(),
 });
 
+class HostBecameActive extends Error {}
+
 /** Installs a newer attested release once every host has been quiet for
- * AUTO_UPDATE_IDLE_MS. Sessions that are open but idle do not block it. Every
+ * AUTO_UPDATE_IDLE_MS and no turn is in progress. Sessions that are open but
+ * idle do not block it. Every
  * outcome that reached the network is recorded in release-update.json. Call
  * while holding the update lock. */
 const installWhenIdle = async (paths: ReturnType<typeof ensureRuntimeHomeLayout>, excludePid: number, deps: IdleUpdateDeps): Promise<string> => {
 	const policy = runtimeUpdatePolicy(paths.home);
 	const installed = inspectInstalledRuntimeRelease(paths).releaseId;
 	if (policy.mode === "manual" || (process.env.CROSSHEAD_AUTO_UPDATE ?? process.env.ONLYBOTS_AUTO_UPDATE) === "0") return "";
+	if (daemonRunsOrganizationalWorker(paths)) return "";
 	if (!installed) return "Crosshead automatic update skipped: this install does not identify a managed release. Repair it with crosshead update --sha256 <trusted-digest>.";
 	const queued = (): boolean => {
 		const queueFile = path.join(paths.state, "queue.json");
@@ -161,13 +165,17 @@ const installWhenIdle = async (paths: ReturnType<typeof ensureRuntimeHomeLayout>
 		const updated = await deps.update(paths.home, {
 			trustedSha256: release.sha256, timeoutMs: 45_000, expectedReleaseId: release.available,
 			beforeApply: () => {
-				if (busy()) throw new Error("A host became active during the update; it will retry when hosts are idle");
+				if (busy()) throw new HostBecameActive("A host became active during the update");
 			},
 		});
 		if (updated.releaseId !== release.available) throw new Error("Installed release did not match the verified release");
 		writeJsonFile(stateFile, { checkedAtMs: deps.now(), installed: release.available, available: release.available, previous: installed, status: "updated" });
 		return `Crosshead automatically updated to ${candidate[1]} (signed release verified).`;
 	} catch (error) {
+		if (error instanceof HostBecameActive) {
+			writeJsonFile(stateFile, { ...state, installed, status: "deferred", deferredAtMs: deps.now() });
+			return "Crosshead verified update available; deferred because a host became active during the install.";
+		}
 		const message = sanitizeLogValue(error instanceof Error ? error.message : String(error));
 		writeJsonFile(stateFile, { checkedAtMs: deps.now(), status: "failed", error: message });
 		return `Crosshead automatic update failed: ${message}. Check with crosshead doctor; retry with crosshead update --sha256 <trusted-digest>.`;

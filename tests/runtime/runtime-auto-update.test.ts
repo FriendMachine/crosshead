@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
 import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, maintainRuntimeWhenIdle, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
-import { AUTO_UPDATE_IDLE_MS, hostHooksRunning, idleUpdateCheckDue, lastHostActivityMs, recordHostActivity, startIdleUpdateTimer } from "../../src/runtime/runtime-idle-update";
+import { AUTO_UPDATE_IDLE_MS, AUTO_UPDATE_TURN_MAX_MS, hostHooksRunning, hostTurnInProgress, idleUpdateCheckDue, lastHostActivityMs, recordHostActivity, startIdleUpdateTimer } from "../../src/runtime/runtime-idle-update";
 import { rollbackFromCli, updateFromCli } from "../../src/runtime/cli/core";
 import { fetchRuntimeReleaseArtifact, inspectInstalledRuntimeRelease, isAllowedRuntimeReleaseUrl, parseWrapperScriptTarget, resolveReleaseUpdateBaseUrl, updateManagedRuntimeRelease, runRuntimeInstallCommand } from "../../src/runtime/local-runtime";
 import { shellQuote } from "../../src/runtime/adapter-utils";
@@ -298,18 +298,65 @@ describe("published runtime automatic updates", () => {
 		runtimeUpdatePolicy(home, "auto");
 		recordHostActivity(p, 1);
 		const launch = vi.fn(() => process.pid);
-		const timer = startIdleUpdateTimer(p, () => "/runtime/cli.js", 5, launch);
+		const timer = startIdleUpdateTimer(p, () => "/runtime/cli.js", 5, 60_000, launch);
 		try {
 			await vi.waitFor(() => expect(launch).toHaveBeenCalledWith("/runtime/cli.js"));
 			await new Promise(resolve => setTimeout(resolve, 40));
 			expect(launch).toHaveBeenCalledOnce(); // The first updater is still alive.
 		} finally { clearInterval(timer); }
+		// An updater that exits without recording a check is not restarted on every poll.
+		const dead = vi.fn(() => 2 ** 30);
+		const bounded = startIdleUpdateTimer(p, () => "/runtime/cli.js", 5, 60_000, dead);
+		try {
+			await vi.waitFor(() => expect(dead).toHaveBeenCalled());
+			await new Promise(resolve => setTimeout(resolve, 40));
+			expect(dead).toHaveBeenCalledOnce();
+		} finally { clearInterval(bounded); }
+	});
+	it("treats a prompt without a Stop as a turn in progress until it ages out", async () => {
+		const { home, p, deps } = autoSetup();
+		const started = Date.now();
+		writeJsonFile(path.join(p.state, "claude-code-hook.json"), { activeTurns: { t: { turnId: "t", updatedAt: new Date(started).toISOString() } } });
+		// Quiet for well over ten minutes, but the turn never stopped.
+		deps.now = () => started + AUTO_UPDATE_TURN_MAX_MS - 1000;
+		expect(hostTurnInProgress(p, deps.now())).toBe(true);
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toBe("");
+		expect(deps.inspect).not.toHaveBeenCalled();
+		expect(idleUpdateCheckDue(p, deps.now())).toBe(false);
+		// A cancelled turn never gets Stop; its marker must not block forever.
+		deps.now = () => started + AUTO_UPDATE_TURN_MAX_MS;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+	});
+	it("updates ten minutes after Stop clears the turn", async () => {
+		const { home, p, deps } = autoSetup();
+		const file = path.join(p.state, "codex-hook.json");
+		writeJsonFile(file, { activeTurns: { t: { turnId: "t", updatedAt: new Date().toISOString() } } });
+		writeJsonFile(file, { activeTurns: {} });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toBe("");
+		deps.now = () => Date.now() + AUTO_UPDATE_IDLE_MS + 1000;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+	});
+	it("never restarts a daemon that runs the organizational worker", async () => {
+		const { home, p, deps } = autoSetup();
+		writeJsonFile(path.join(p.state, "daemon.json"), { status: "running", organizationalWorkerConfigPath: "/etc/worker.json" });
+		expect(idleUpdateCheckDue(p, Date.now())).toBe(false);
+		expect(await maintainRuntimeWhenIdle(home, deps)).toBe("");
+		expect(deps.inspect).not.toHaveBeenCalled();
+	});
+	it("records a deferral, not a failure, when a host becomes active as files are about to change", async () => {
+		const { home, p, deps } = autoSetup();
+		deps.update.mockImplementation(async (_home: string, options: any) => { recordHostActivity(p); options.beforeApply(); return { releaseId: newRelease } as any; });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred because a host became active");
+		const state = JSON.parse(readFileSync(path.join(p.state, "release-update.json"), "utf8"));
+		expect(state.status).toBe("deferred");
+		expect(state.checkedAtMs).toBeUndefined();
 	});
 	it("treats only running Crosshead hook processes as activity, and fails closed", () => {
 		const prefix = `2000 node /home/u/.crosshead/lib/runtime/r/dist/runtime/cli.js host-hook codex Stop\n`;
 		expect(hostHooksRunning(2000, () => prefix + "2002 claude\n2003 codex app-server\n2004 node /r/dist/runtime/cli.js update --check-idle")).toBe(false);
 		expect(hostHooksRunning(1, () => prefix)).toBe(true);
 		expect(hostHooksRunning(1, () => "2002 node /r/dist/runtime/claude-code-hook.js Stop")).toBe(true);
+		expect(hostHooksRunning(1, () => "2002 node /r/dist/runtime/native-host-hook.js --host hermes")).toBe(true);
 		expect(hostHooksRunning(1, () => { throw new Error("ps unavailable"); })).toBe(true);
 	});
 	it("updates despite a stale active-turn marker without deleting saved hook state", async () => {
