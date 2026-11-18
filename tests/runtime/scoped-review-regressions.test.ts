@@ -15,6 +15,7 @@ import { runOnlyBotsCodexHookCli } from "../../src/runtime/codex-hook";
 import { runOnlyBotsClaudeCodeHookCli } from "../../src/runtime/claude-code-hook";
 import { renderRuntimeStartupContext } from "../../src/runtime/startup-context";
 import { LocalRuntimeClient } from "../../src/runtime/local-client";
+import * as hookRuntime from "../../src/runtime/hook-runtime";
 import { runOnlyBotsCtlCli } from "../../src/runtime/cli";
 
 const repo = path.resolve(__dirname, "../..");
@@ -111,6 +112,64 @@ it.each([["codex", runOnlyBotsCodexHookCli], ["claude-code", runOnlyBotsClaudeCo
   expect(warning).toHaveBeenCalledTimes(2); expect(warning.mock.calls.flat().join(" ")).toContain("workspace check");
   expect(existsSync(path.join(f.paths.profiles, "work.json"))).toBe(false);
   expect(existsSync(path.join(f.paths.state, "lifecycle-events.jsonl"))).toBe(false);
+});
+
+it("skips automatic subagent hooks while allowing parent and side-thread hooks", async () => {
+  const f = fixture();
+  await profile(f.home, "work");
+  f.cli("quickstart", "--scope", "project", "--adapter", "both", "--profile", "work", "--source-excerpts", "on", "--no-start");
+  const ensure = vi.spyOn(hookRuntime, "ensureHookRuntime").mockRejectedValue(new Error("normal hook reached the daemon"));
+  const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const bindings = inspectWorkspaceHooks(f.home).bindings;
+  expect(bindings.map(binding => binding.host).sort()).toEqual(["claude-code", "codex"]);
+  for (const binding of bindings) {
+    const hook = binding.host === "codex" ? runOnlyBotsCodexHookCli : runOnlyBotsClaudeCodeHookCli;
+    const invoke = (event: string, extra: Record<string, string>) => hook(
+      [event, "--home", f.home, "--binding", binding.id],
+      JSON.stringify({ cwd: f.project, session_id: "parent", turn_id: "turn", prompt: "Review the migration", ...extra })
+    );
+    ensure.mockClear();
+    for (const event of ["UserPromptSubmit", "PreCompact", "PostCompact", "Stop", "PostToolUse", "PostToolUseFailure"]) {
+      await expect(invoke(event, { agent_id: "child", agent_type: "reviewer" })).resolves.toBeUndefined();
+    }
+    expect(ensure).not.toHaveBeenCalled();
+    expect(stdout).not.toHaveBeenCalled();
+    await expect(invoke("SessionStart", { source: "fork" })).rejects.toThrow("normal hook reached the daemon");
+    await expect(invoke("UserPromptSubmit", { agent_type: "reviewer" })).rejects.toThrow("normal hook reached the daemon");
+  }
+});
+
+it("searches hot memory only inside the explicitly selected workspace and profile", async () => {
+  const f = fixture();
+  const work = await profile(f.home, "work");
+  const other = await profile(f.home, "other");
+  const workspaceId = `repo:${f.second}`;
+  const otherWorkspaceId = `repo:${f.project}`;
+  const checkpoint = (workspaceId: string | null, summary: string) => ({
+    workspaceId, runtime: "codex", occurredAt: "2026-11-18T00:00:00.000Z", summary,
+  });
+  writeLocalHotMemory(f.paths.state, JSON.stringify({
+    workspaceId,
+    continuityCheckpoints: [
+      checkpoint(workspaceId, "Migration cursor uses the last imported row"),
+      checkpoint(otherWorkspaceId, "Migration cursor from another workspace"),
+      checkpoint(null, "Migration cursor from unscoped memory"),
+    ],
+  }), "codex", work);
+  writeLocalHotMemory(f.paths.state, JSON.stringify({
+    workspaceId: otherWorkspaceId,
+    continuityCheckpoints: [checkpoint(otherWorkspaceId, "Migration cursor in a different workspace document")],
+  }), "claude-code", work);
+  writeLocalHotMemory(f.paths.state, JSON.stringify({
+    workspaceId,
+    continuityCheckpoints: [checkpoint(workspaceId, "Migration cursor from a different profile")],
+  }), "codex", other);
+
+  const result = JSON.parse(f.cli("memory", "search", "migration cursor", "--workspace-root", f.second, "--profile", "work", "--json"));
+  expect(result.scope).toBe("local_hot_memory");
+  expect(result.workspaceId).toBe(workspaceId);
+  expect(result.results.map((entry: { text: string }) => entry.text)).toEqual(["Migration cursor uses the last imported row"]);
+  expect(f.run("memory", "search", "migration cursor", "--workspace-root").stderr).toContain("requires a directory");
 });
 
 it("routes workspace link by the first positional after flags", async () => {

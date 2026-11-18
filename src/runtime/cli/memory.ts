@@ -1,5 +1,8 @@
 import { LocalRuntimeClient } from "../local-client";
 import { HOT_SCOPE_ALL } from "../../protocol/memory";
+import { searchHotCheckpoints } from "../hot-continuity";
+import { workspaceDirectoryPath } from "../workspace-identity";
+import { filterHotMemorySnapshotForWorkspace } from "../workspace-memory";
 import { OnlyBotsLocalRuntimeDaemon, buildMemorySearchPresentation, formatHotMemoryForDisplay, formatMemorySearchPresentation, formatWarmMemoryEntryForDisplay, formatWarmMemoryEvaluation, parseArgs, summarizeRecentWarmMemoryOutcomes, truncateForPresentation } from "../local-runtime";
 
 export const memoryFromCli = async (argv: string[]): Promise<string> => {
@@ -127,14 +130,28 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 		if (query.length === 0) {
 			throw new Error("memory search requires a query");
 		}
-		const result = await daemon.searchMemory(
-			{
-				query,
-				top_k: typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10,
-				include_system: flags["include-system"] === true || flags.includeSystem === true,
-			},
-			profileName
-		);
+		const topK = typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10;
+		const workspaceRoot = flags["workspace-root"];
+		let result: Record<string, unknown>;
+		if (workspaceRoot !== undefined) {
+			if (typeof workspaceRoot !== "string" || !workspaceRoot.trim()) {
+				throw new Error("memory search --workspace-root requires a directory");
+			}
+			const workspaceId = `repo:${workspaceDirectoryPath(workspaceRoot)}`;
+			const hot = await daemon.readHotMemory(profileName, HOT_SCOPE_ALL);
+			const scopedHot = filterHotMemorySnapshotForWorkspace(hot, workspaceId, true);
+			const results = searchHotCheckpoints(scopedHot, query, topK || 10, workspaceId);
+			result = { scope: "local_hot_memory", workspaceId, query, count: results.length, results };
+		} else {
+			result = await daemon.searchMemory(
+				{
+					query,
+					top_k: topK,
+					include_system: flags["include-system"] === true || flags.includeSystem === true,
+				},
+				profileName
+			);
+		}
 		if (result.scope === "local_hot_memory") {
 			if (flags.json || flags.debug) return JSON.stringify(result, null, 2);
 			const matches = Array.isArray(result.results) ? result.results as Array<Record<string, unknown>> : [];
@@ -145,7 +162,7 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 		}
 		const presentation = buildMemorySearchPresentation(
 			query,
-			typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10,
+			topK,
 			result
 		);
 		if (flags.debug) {

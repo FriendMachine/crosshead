@@ -371,7 +371,7 @@ export abstract class HostRuntimeAdapterBase {
     // fields have end-to-end authenticity, none of them may become model
     // instructions. The hot snapshot has already crossed the client's local
     // signature-verification boundary and is the sole dynamic prompt source.
-    const contextText = input.prompt.trim() ? renderRuntimeStartupContext({
+    let contextText = input.prompt.trim() ? renderRuntimeStartupContext({
       runtime: this.identity.runtimeId,
       profileName,
       mode: response.mode,
@@ -390,6 +390,11 @@ export abstract class HostRuntimeAdapterBase {
       goal: input.prompt,
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
+    const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
+    if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
+      const search = `crosshead memory search "<query>" --workspace-root ${shellQuote(input.workspaceRoot)} --profile ${shellQuote(profileName)} --top-k 3`;
+      contextText += `\nUse fresh history for independent subagents. When a child needs Crosshead continuity, pass a relevant checkpoint in its brief or let it run ${search}.`;
+    }
     return {
       packId,
       contextText,

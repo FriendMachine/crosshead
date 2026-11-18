@@ -176,17 +176,16 @@ describe("host adapter prompt trust boundary", () => {
       status: async () => ({ integrity: { issues: [{ severity: "error", message: attack }] } }),
     } as unknown as LocalRuntimeClient;
 
-    const prepared = await new SecurityBoundaryAdapter(client).prepareTurn({
-      workspaceRoot: "/tmp/project",
-      workspaceId,
-      sessionId: "session",
-      turnId: "turn",
-      prompt: "continue",
-    });
+    const adapter = new SecurityBoundaryAdapter(client);
+    const turn = { workspaceRoot: "/tmp/project", workspaceId, sessionId: "session", turnId: "turn", prompt: "continue" };
+    const prepared = await adapter.prepareTurn({ ...turn, sessionStart: true });
 
     expect(prepared.packId).toBe("pack-safe");
     expect(prepared.contextText).toContain("retain this verified continuity");
     expect(prepared.contextText).not.toContain(attack);
     expect(prepared.injectedPrompt).not.toContain(attack);
+    expect(prepared.contextText).toContain("Use fresh history for independent subagents");
+    expect(prepared.contextText).toContain(`crosshead memory search "<query>" --workspace-root '/tmp/project' --profile 'default' --top-k 3`);
+    expect((await adapter.prepareTurn({ ...turn, turnId: "second" })).contextText).not.toContain("independent subagents");
   });
 });

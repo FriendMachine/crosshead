@@ -340,7 +340,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead memory hot [--inspect] [--home <path>] [--profile <name>] [--json|--debug]",
 				"crosshead memory warm [--home <path>] [--profile <name>] [--type <type>] [--status <status>] [--include-system] [--json|--debug]",
 				"crosshead memory evaluate [--home <path>] [--profile <name>] [--lines 200] [--limit 50] [--apply] [--include-system] [--json|--debug]",
-				"crosshead memory search <query> [--home <path>] [--profile <name>] [--top-k <n>] [--include-system] [--json|--debug]",
+				"crosshead memory search <query> [--workspace-root <path>] [--home <path>] [--profile <name>] [--top-k <n>] [--include-system] [--json|--debug]",
 				"crosshead memory export [--home <path>] [--profile <name>]",
 				"crosshead memory mode <off|manual|assist|auto> [--home <path>] [--profile <name>]",
 		"crosshead messages state [--home <path>] [--profile <name>] [--statuses <csv>] [--priorities <csv>] [--context-id <id>] [--message-type <chat|inbox_event>] [--unread-only true|false] [--include-terminal true|false] [--limit <n>] [--json|--debug]",
