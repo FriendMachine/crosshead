@@ -1,3 +1,4 @@
+import { accountFromCli } from "./cli/account";
 import { organizationJoinFromCli, signChallengeFromCli, signDeletionChallengeFromCli } from "./cli/organization";
 import { installCodexFromCli, uninstallCodexFromCli } from "./codex-adapter";
 import { installClaudeCodeFromCli, uninstallClaudeCodeFromCli } from "./claude-code-adapter";
@@ -101,7 +102,7 @@ export const runOnlyBotsCtlCli = async (
 	}
 	const profileCommands = new Set([
 		"setup", "keygen", "status", "doctor", "memory", "messages", "billing", "public", "context",
-		"agent", "lineage", "passport", "workspace", "handoff", "sign-challenge", "sign-deletion-challenge", "organization", "quickstart", "onboard",
+		"account", "agent", "lineage", "passport", "workspace", "handoff", "sign-challenge", "sign-deletion-challenge", "organization", "quickstart", "onboard",
 	]);
 	// Without an explicit or environment profile, use the directory's workspace
 	// override so manual commands read the same memory as that directory's hooks.
@@ -171,6 +172,9 @@ export const runOnlyBotsCtlCli = async (
 			break;
 		case "events":
 			output = await eventsFromCli(rest);
+			break;
+		case "account":
+			output = await accountFromCli(rest);
 			break;
 		case "workspace":
 			output = await (parseArgs(rest).positionals[0] === "link" ? workspaceFromCli(rest) : workspaceHooksFromCli(rest));
@@ -329,6 +333,8 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead update [adapter] [--home <path>] [--channel stable|beta|canary] [--version <version>] [--force]",
 				"crosshead rollback [adapter] --to <version> [--home <path>] [--force]",
 				"crosshead doctor [--home <path>] [--workspace-root <path>] [--json]",
+				"crosshead account link [--profile <name> | --profiles <a,b> | --all-profiles] [--no-browser] [--no-wait] [--timeout <seconds>] [--json]  # link agents to your console account in one approval",
+				"crosshead account link --resume <request-id> [--json]",
 				"crosshead workspace add --workspace-root <path> --adapter codex|claude-code|both --profile <name> [--source-excerpts on|off] [--replace-user-hooks] [--dry-run] [--json]",
 				"crosshead workspace profile set|clear [--workspace-root <path>] [--profile <name>] [--dry-run] [--json]  # this directory and below use another profile",
 				"crosshead workspace remove --workspace-root <path> [--adapter codex|claude-code|both] [--dry-run] [--json]",
