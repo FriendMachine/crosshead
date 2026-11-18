@@ -26,6 +26,8 @@ import { buildRuntimeBillingRemediation, formatRuntimeBillingRemediation } from 
 import { HostedOnlyBotsRequestError } from "./hosted-client";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
 import { resolveCrossheadProfile } from "./runtime-env";
+import { recordHostActivity } from "./runtime-idle-update";
+import { resolveRuntimePaths } from "./runtime-persistence";
 import { workspaceProfileForDirectory } from "./workspace-hooks";
 
 const homeFlag = (args: string[]): string | undefined => {
@@ -261,7 +263,13 @@ export const runOnlyBotsCtlCli = async (
 			const [host, ...args] = rest;
 			if (host !== "codex" && host !== "claude-code") throw new Error("Unknown Crosshead hook host");
 			const runHook = host === "codex" ? runOnlyBotsCodexHookCli : runOnlyBotsClaudeCodeHookCli;
-			await runHook(args).catch((error: unknown) => reportHookFailure(host, args[0], error));
+			// Automatic updates wait for hosts to be quiet; see runtime-idle-update.
+			const stampActivity = (): void => {
+				try { recordHostActivity(resolveRuntimePaths(homeFlag(args))); } catch { /* Never fail a hook. */ }
+			};
+			stampActivity();
+			try { await runHook(args).catch((error: unknown) => reportHookFailure(host, args[0], error)); }
+			finally { stampActivity(); }
 			return;
 		}
 		case "start":

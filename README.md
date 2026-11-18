@@ -127,8 +127,12 @@ The installer downloads one release tarball, checks its SHA-256 against the
 installer script, installs the runtime npm dependencies with install scripts
 disabled, and writes the wrappers into `~/.crosshead/bin`.
 
-`crosshead update --auto` enables automatic updates on idle host launches
-(the default), checking for a new release about once an hour and retrying failed checks after 30 minutes. Before installing, Crosshead verifies GitHub's signed
+`crosshead update --auto` enables automatic updates (the default). The daemon
+and each managed host launch check for a new release about once an hour, and
+install it once no host has run a hook for 10 minutes. Sessions that are open
+but idle do not block an update; their next prompt uses the new release.
+Failed checks are retried after 30 minutes, and the last outcome is recorded
+in `~/.crosshead/state/release-update.json`. Before installing, Crosshead verifies GitHub's signed
 build attestation for the exact archive digest and this repository's release
 workflow. If verification or download fails, the host still launches and the
 update is retried later. If another install still holds the update lock and
