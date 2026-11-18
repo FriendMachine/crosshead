@@ -20,15 +20,21 @@ const DAEMON_POLL_MS = 5 * 60 * 1000;
 const hookStateFiles = (paths: RuntimePaths): string[] => {
 	const files = ["codex-hook.json", "claude-code-hook.json"].map(name => path.join(paths.state, name));
 	const scopedRoot = path.join(paths.state, "workspace-hooks");
-	try {
-		for (const binding of readdirSync(scopedRoot, { withFileTypes: true })) {
-			if (!binding.isDirectory()) continue;
-			for (const name of readdirSync(path.join(scopedRoot, binding.name))) {
-				// <hash>-startup.json and <hash>-resume.json are receipts, not turn state.
-				if (/^[a-f0-9]{64}\.json$/.test(name)) files.push(path.join(scopedRoot, binding.name, name));
-			}
+	// A directory that vanished has no turns. Any other error propagates so the
+	// caller defers: an unreadable binding may hold a turn in progress.
+	const list = <T>(read: () => T[]): T[] => {
+		try { return read(); } catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
 		}
-	} catch { /* No workspace bindings. */ }
+	};
+	for (const binding of list(() => readdirSync(scopedRoot, { withFileTypes: true }))) {
+		if (!binding.isDirectory()) continue;
+		for (const name of list(() => readdirSync(path.join(scopedRoot, binding.name)))) {
+			// <hash>-startup.json and <hash>-resume.json are receipts, not turn state.
+			if (/^[a-f0-9]{64}\.json$/.test(name)) files.push(path.join(scopedRoot, binding.name, name));
+		}
+	}
 	return files;
 };
 
@@ -80,7 +86,8 @@ export const hostTurnInProgress = (paths: RuntimePaths, now: number, maxAgeMs = 
 	const newestBySession = new Map<string, number>();
 	for (const file of hookStateFiles(paths)) {
 		let turns: unknown;
-		try { turns = readJson(file).activeTurns; } catch { continue; }
+		if (!existsSync(file)) continue;
+		turns = readJson(file).activeTurns; // Unreadable state defers the update.
 		if (!turns || typeof turns !== "object") continue;
 		for (const [key, turn] of Object.entries(turns as Record<string, { sessionId?: unknown; turnId?: unknown; updatedAt?: unknown }>)) {
 			if (typeof turn?.turnId !== "string" || !turn.turnId) continue;
@@ -94,8 +101,10 @@ export const hostTurnInProgress = (paths: RuntimePaths, now: number, maxAgeMs = 
 	return false;
 };
 
-export const hostsIdle = (paths: RuntimePaths, now: number, idleMs = AUTO_UPDATE_IDLE_MS): boolean =>
-	now - lastHostActivityMs(paths) >= idleMs && !hostTurnInProgress(paths, now);
+export const hostsIdle = (paths: RuntimePaths, now: number, idleMs = AUTO_UPDATE_IDLE_MS): boolean => {
+	try { return now - lastHostActivityMs(paths) >= idleMs && !hostTurnInProgress(paths, now); }
+	catch { return false; } // Unknown turn state must defer, never force an update.
+};
 
 /** The organizational worker is restarted only by its operator, never by an
  * unattended update. */
