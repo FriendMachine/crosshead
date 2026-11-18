@@ -22,6 +22,9 @@ export const resolveWorkspaceHookDispatch = (
   if ((policy && !selected) || (!policy && flags.binding !== undefined)) return null;
   if (isPostToolUse && !(selected?.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return null;
   const payload = readPayload();
+  // Both hosts can deliver ordinary turn and tool hooks on a child's behalf.
+  // agent_type alone can also describe Claude Code's top-level --agent session.
+  if (typeof payload?.agent_id === "string" && payload.agent_id.trim()) return null;
   const scoped = workspaceHookForInvocation(policy, host, flags.binding, directory(payload));
   if (scoped === null) return null;
   let legacyUnscoped = false;

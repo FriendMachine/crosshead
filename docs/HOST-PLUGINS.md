@@ -176,6 +176,34 @@ hooks.
 starts a fresh context like `startup`. Installer-written hooks from earlier
 versions keep their old matcher until the next install.
 
+## Subagent memory
+
+Crosshead skips automatic recall and capture for Codex and Claude Code hooks
+that identify a subagent. Subagent isolation requires [Codex 0.134.0 or
+later](https://github.com/openai/codex/releases/tag/rust-v0.134.0). Earlier
+versions can report child activity with the same hook fields as the parent.
+For independent work, choose a fresh spawn in Codex or a named non-fork agent
+in Claude Code. Give the agent the task, relevant
+files and applicable constraints. A full-history fork can inherit Crosshead
+context already in the parent's chat. Crosshead handles Claude Code's manual
+compaction hooks. It skips automatic compaction and the compaction
+`SessionStart` because older Claude Code releases can report those events as
+if they came from the parent. Regular prompt and completion hooks still run.
+
+For a task that needs continuity, the parent can pass a relevant checkpoint or
+delegate a search using the command from the Crosshead attachment. It specifies
+the attached runtime home, the parent workspace's absolute root and an explicit
+profile, so it works from a child worktree or a different shell environment.
+
+```sh
+/path/to/runtime/bin/crosshead memory search-workspace "migration cursor" --workspace-root /path/to/project --profile work --home /path/to/runtime --top-k 3
+```
+
+`search-workspace` searches local hot checkpoints in the
+selected workspace and profile. Hosted profiles read through the attached
+daemon's local hot sync. During a rollback to legacy hosted memory, or when
+the session uses a custom workspace ID, pass a saved checkpoint in the brief.
+
 ## Verification
 
 ```sh
