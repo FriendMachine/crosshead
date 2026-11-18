@@ -202,13 +202,16 @@ export const ownSessionTurnId = (state: HookState, payloadSessionId: string | nu
     .filter((turn) => turn.sessionId === payloadSessionId && turn.turnId)
     .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
     .at(-1);
-  return own?.turnId ?? (state.sessionId === payloadSessionId ? state.turnId : null);
+  // SessionStart replaces the top-level session but keeps the previous turn,
+  // so the top-level turn is not proof that this session started it.
+  return own?.turnId ?? null;
 };
 
 /** Never finish, compact or clear a turn that another session started. */
-export const ownSessionTurnState = (payloadSessionId: string | null, selected: HookTurnState): HookTurnState =>
+export const ownSessionTurnState = (state: HookState, payloadSessionId: string | null, selected: HookTurnState): HookTurnState =>
   payloadSessionId && selected.sessionId && selected.sessionId !== payloadSessionId
-    ? { ...selected, sessionId: payloadSessionId, turnId: null, prompt: null, packId: null, lastContextReadAt: null }
+    ? { sessionId: payloadSessionId, turnId: null, prompt: null, packId: null, lastContextReadAt: null,
+        workspaceRoot: state.workspaceRoot, workspaceId: state.workspaceId, updatedAt: selected.updatedAt }
     : selected;
 
 const saveHookTurnState = (stateFile: string, state: HookState, turn: HookTurnState): void => {
@@ -537,7 +540,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
 		const requestedSessionId = payloadSessionId ?? state.sessionId ?? null;
 		const requestedTurnId =
 		  pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ?? ownSessionTurnId(state, payloadSessionId);
-		const turnState = ownSessionTurnState(payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
+		const turnState = ownSessionTurnState(state, payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
 		const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
 		const turnId = turnState.turnId ?? requestedTurnId ?? null;
     const turnWorkspaceRoot = turnState.workspaceRoot;
@@ -576,7 +579,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
 		const requestedSessionId = payloadSessionId ?? state.sessionId ?? null;
 		const requestedTurnId =
 		  pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ?? ownSessionTurnId(state, payloadSessionId);
-		const turnState = ownSessionTurnState(payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
+		const turnState = ownSessionTurnState(state, payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
 		const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
 		const turnId = turnState.turnId ?? requestedTurnId ?? null;
     const turnWorkspaceRoot = turnState.workspaceRoot;
@@ -673,7 +676,7 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     const requestedSessionId = payloadSessionId ?? state.sessionId ?? null;
     const requestedTurnId =
       pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ?? ownSessionTurnId(state, payloadSessionId);
-    const turnState = ownSessionTurnState(payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
+    const turnState = ownSessionTurnState(state, payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
     const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
     const turnId = turnState.turnId ?? requestedTurnId ?? buildSyntheticTurnId();
     const turnWorkspaceRoot = turnState.workspaceRoot;

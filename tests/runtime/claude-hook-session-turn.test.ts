@@ -21,9 +21,15 @@ describe("Claude Code turn selection without a payload turn ID", () => {
 		expect(ownSessionTurnId(state, "C")).toBeNull();
 		expect(ownSessionTurnId(state, null)).toBe("b1");
 	});
+	it("does not trust the top-level turn after SessionStart replaced only the session", () => {
+		// B started a session while A's turn was the file's latest: top level is { sessionId: B, turnId: a1 }.
+		const afterStart = { ...a1, sessionId: "B", activeTurns: { "A:a1": a1 } } as any;
+		expect(ownSessionTurnId(afterStart, "B")).toBeNull();
+	});
 	it("never hands one session another session's turn to finish or clear", () => {
-		expect(ownSessionTurnState("A", a1)).toBe(a1);
-		expect(ownSessionTurnState(null, b1)).toBe(b1);
-		expect(ownSessionTurnState("C", b1)).toMatchObject({ sessionId: "C", turnId: null, prompt: null, packId: null, workspaceRoot: "/repo", workspaceId: "w" });
+		expect(ownSessionTurnState(state, "A", a1)).toBe(a1);
+		expect(ownSessionTurnState(state, null, b1)).toBe(b1);
+		const elsewhere = { ...b1, workspaceRoot: "/other", workspaceId: "o" };
+		expect(ownSessionTurnState(state, "C", elsewhere)).toMatchObject({ sessionId: "C", turnId: null, prompt: null, packId: null, workspaceRoot: "/repo", workspaceId: "w" });
 	});
 });

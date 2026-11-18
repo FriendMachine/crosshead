@@ -87,7 +87,7 @@ export const hostTurnInProgress = (paths: RuntimePaths, now: number, maxAgeMs = 
 	for (const file of hookStateFiles(paths)) {
 		let turns: unknown;
 		if (!existsSync(file)) continue;
-		turns = readJson(file).activeTurns; // Unreadable state defers the update.
+		turns = readJson(file)?.activeTurns; // Unreadable state defers the update.
 		if (!turns || typeof turns !== "object") continue;
 		for (const [key, turn] of Object.entries(turns as Record<string, { sessionId?: unknown; turnId?: unknown; updatedAt?: unknown }>)) {
 			if (typeof turn?.turnId !== "string" || !turn.turnId) continue;
