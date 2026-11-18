@@ -138,7 +138,7 @@ const decodeNpub = (npub: string): Uint8Array => {
   return new Uint8Array(Buffer.from(decoded.data, "hex"));
 };
 
-const normalizeApiBase = (apiBase: string): { serviceBaseUrl: string; apiBaseUrl: string } => {
+export const normalizeApiBase = (apiBase: string): { serviceBaseUrl: string; apiBaseUrl: string } => {
   const parsed = new URL(apiBase);
   const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
   if (parsed.username || parsed.password || parsed.search || parsed.hash ||

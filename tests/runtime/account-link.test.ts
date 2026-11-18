@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -22,11 +22,11 @@ const readJson = async (request: IncomingMessage): Promise<Record<string, unknow
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> : {};
 };
 
-type Fake = { base: string; joins: Array<{ npub: string; body: Record<string, unknown> }>; statusPolls: number; approveAfter: number; available: boolean; creatorNpub?: string };
+type Fake = { base: string; joins: Array<{ npub: string; body: Record<string, unknown> }>; statusPolls: number; approveAfter: number; available: boolean; creatorNpub?: string; decision: "approved" | "denied"; badUrl: boolean; rejectJoins: boolean; failStatusOnce: boolean };
 
 /** A hosted API that issues sessions per npub and implements the account link contract. */
 const fakeService = async (): Promise<Fake> => {
-  const fake: Fake = { base: "", joins: [], statusPolls: 0, approveAfter: 2, available: true };
+  const fake: Fake = { base: "", joins: [], statusPolls: 0, approveAfter: 2, available: true, decision: "approved", badUrl: false, rejectJoins: false, failStatusOnce: false };
   const sessions = new Map<string, string>();
   let counter = 0;
   const server = createServer(async (request, response) => {
@@ -50,19 +50,23 @@ const fakeService = async (): Promise<Fake> => {
       fake.joins.push({ npub: caller, body });
       return json(response, 201, {
         request_id: "11111111-2222-4333-8444-555555555555", user_code: "BCDF-GHJK", poll_secret: "xhlp_secret",
-        verification_url: `${fake.base}/account/link?code=BCDF-GHJK`, verification_url_base: `${fake.base}/account/link`,
+        verification_url: fake.badUrl ? "https://evil.example/account/link?code=BCDF-GHJK&calc.exe" : `${fake.base}/account/link?code=BCDF-GHJK`, verification_url_base: `${fake.base}/account/link`,
         expires_at: new Date(Date.now() + 600_000).toISOString(), interval_seconds: 0,
       });
     }
     if (url === "/v1/account-links/11111111-2222-4333-8444-555555555555/agents") {
       if (!caller) return json(response, 401, { error: { code: "unauthorized", message: "no session" } });
-      if (body.poll_secret !== "xhlp_secret") return json(response, 404, { error: { code: "not_found", message: "Not found" } });
+      if (body.poll_secret !== "xhlp_secret" || fake.rejectJoins) return json(response, 404, { error: { code: "not_found", message: "Not found" } });
       fake.joins.push({ npub: caller, body });
       return json(response, 200, { request_id: "11111111-2222-4333-8444-555555555555", agent_count: fake.joins.length });
     }
     if (url === "/v1/account-links/11111111-2222-4333-8444-555555555555/status") {
       if (body.poll_secret !== "xhlp_secret" || request.headers.authorization) return json(response, 404, { error: { code: "not_found", message: "Not found" } });
       fake.statusPolls += 1;
+      if (fake.failStatusOnce) { fake.failStatusOnce = false; return json(response, 503, { error: { code: "unavailable", message: "try later" } }); }
+      if (fake.decision === "denied" && fake.statusPolls >= fake.approveAfter) {
+        return json(response, 200, { request_id: "11111111-2222-4333-8444-555555555555", status: "denied", expires_at: new Date(Date.now() + 600_000).toISOString(), account: null, organization: null, agents: [] });
+      }
       const approved = fake.statusPolls >= fake.approveAfter;
       return json(response, 200, {
         request_id: "11111111-2222-4333-8444-555555555555", status: approved ? "approved" : "pending", expires_at: new Date(Date.now() + 600_000).toISOString(),
@@ -96,7 +100,7 @@ const runCli = (args: string[], env: NodeJS.ProcessEnv) => new Promise<{ status:
 it("links several local agents through one approval, each proving its own key", async () => {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "crosshead-account-link-")));
   const home = path.join(root, "runtime");
-  const env = { PATH: process.env.PATH, HOME: root, CROSSHEAD_HOOK_AUTOSTART: "0" };
+  const env = { PATH: process.env.PATH, HOME: root, CROSSHEAD_HOOK_AUTOSTART: "0", CROSSHEAD_ACCOUNT_LINK_MIN_INTERVAL_MS: "50" };
   const fake = await fakeService();
   try {
     for (const [name, extra] of [["alpha", []], ["beta", ["--no-default"]], ["offline", ["--no-default"]]] as const) {
@@ -111,7 +115,8 @@ it("links several local agents through one approval, each proving its own key", 
     const npubOf = (name: string) => JSON.parse(readFileSync(path.join(home, "config/profiles", `${name}.json`), "utf8")).npub as string;
 
     const result = await runCli(["account", "link", "--all-profiles", "--no-browser", "--json", "--home", home], env);
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.stderr).toBe(3); // approved, but beta couldn't join the organization
+    expect(result.stdout + result.stderr).not.toContain("xhlp_secret");
     const intro = JSON.parse(result.stderr.trim().split("\n").at(-1)!);
     expect(intro).toMatchObject({ status: "pending", user_code: "BCDF-GHJK", verification_url: `${fake.base}/account/link?code=BCDF-GHJK`, profiles: ["alpha", "beta"], browser_opened: false });
     const final = JSON.parse(result.stdout);
@@ -128,7 +133,8 @@ it("links several local agents through one approval, each proving its own key", 
     // Text output names the account, organization and each agent's outcome.
     fake.joins.length = 0; fake.statusPolls = 0;
     const text = await runCli(["account", "link", "--profiles", "alpha,beta", "--no-browser", "--home", home], env);
-    expect(text.status, text.stderr).toBe(0);
+    expect(text.status, text.stderr).toBe(3);
+    expect(text.stderr).toContain("crosshead account link --resume 11111111-2222-4333-8444-555555555555");
     expect(text.stderr).toContain("enter code BCDF-GHJK");
     expect(text.stdout).toContain("Linked to pat@example.test in Example Org.");
     expect(text.stdout).toContain("agent_alpha: linked; added to the organization, paid from organization credits");
@@ -140,9 +146,29 @@ it("links several local agents through one approval, each proving its own key", 
     expect(started.status, started.stderr).toBe(0);
     expect(JSON.parse(started.stdout)).toMatchObject({ status: "pending", resume_command: "crosshead account link --resume 11111111-2222-4333-8444-555555555555" });
     expect(fake.statusPolls).toBe(0);
+    const saved = path.join(home, "state/account-links/11111111-2222-4333-8444-555555555555.json");
+    expect(statSync(saved).mode & 0o777).toBe(0o600);
+    fake.failStatusOnce = true; // a transient error while polling is retried
     const resumed = await runCli(["account", "link", "--resume", "11111111-2222-4333-8444-555555555555", "--json", "--home", home], env);
     expect(resumed.status, resumed.stderr).toBe(0);
     expect(JSON.parse(resumed.stdout).status).toBe("approved");
+    expect(existsSync(saved)).toBe(false);
+
+    // A denial exits 1; an untrusted approval URL is never used, and a rejected join skips only that profile.
+    fake.joins.length = 0; fake.statusPolls = 0; fake.decision = "denied"; fake.badUrl = true; fake.rejectJoins = true;
+    const denied = await runCli(["account", "link", "--profiles", "alpha,beta", "--no-browser", "--json", "--home", home], env);
+    expect(denied.status, denied.stderr).toBe(1);
+    const deniedIntro = JSON.parse(denied.stderr.trim().split("\n").at(-1)!);
+    expect(deniedIntro.verification_url).toBe(`${fake.base}/account/link`);
+    expect(deniedIntro.profiles).toEqual(["alpha"]);
+    expect(deniedIntro.skipped).toEqual([{ profile: "beta", reason: "the request was not found or its secret was rejected" }]);
+    expect(JSON.parse(denied.stdout).status).toBe("denied");
+    fake.decision = "approved"; fake.badUrl = false; fake.rejectJoins = false;
+
+    // Flags without values are errors, not silent defaults.
+    const bare = await runCli(["account", "link", "--resume", "--home", home], env);
+    expect(bare.status).not.toBe(0);
+    expect(bare.stderr).toContain("--resume needs a value");
 
     // A service without the feature gets a pointer to the console instead.
     fake.available = false;
