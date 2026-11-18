@@ -518,6 +518,10 @@ export const handleRuntimeDaemonRequest = async (
 				sendJson(response, 200, await daemon.hotSyncControl(await readBody(request)));
 				return;
 			}
+			if (request.method === "GET" && url.pathname === "/v1/memory/local-hot") {
+				sendJson(response, 200, await daemon.readProfileLocalHotMemory(url.searchParams.get("profile") ?? ""));
+				return;
+			}
 			if (request.method === "GET" && url.pathname === "/v1/memory/hot") {
 				sendJson(
 					response,

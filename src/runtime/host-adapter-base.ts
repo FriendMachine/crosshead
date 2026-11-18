@@ -1,4 +1,5 @@
 import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
+import { workspaceDirectoryPath } from "./workspace-identity";
 import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
 export { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { existsSync } from "fs";
@@ -371,7 +372,7 @@ export abstract class HostRuntimeAdapterBase {
     // fields have end-to-end authenticity, none of them may become model
     // instructions. The hot snapshot has already crossed the client's local
     // signature-verification boundary and is the sole dynamic prompt source.
-    const contextText = input.prompt.trim() ? renderRuntimeStartupContext({
+    let contextText = input.prompt.trim() ? renderRuntimeStartupContext({
       runtime: this.identity.runtimeId,
       profileName,
       mode: response.mode,
@@ -390,6 +391,22 @@ export abstract class HostRuntimeAdapterBase {
       goal: input.prompt,
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
+    const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
+    if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
+      const home = this.config.runtimeHome;
+      const cli = home ? path.join(home, "bin", "crosshead") : null;
+      const freshAgent = this.identity.runtimeId === "codex"
+	? 'Use a fresh, non-forked subagent for independent work (fork_turns: "none" or fork_context: false, depending on the tool).'
+	: "Use a named, non-forked subagent for independent work.";
+      contextText += `\n${freshAgent} When a child needs Crosshead continuity, pass a relevant checkpoint in its brief.`;
+      let matchesWorkspace = false;
+      try { matchesWorkspace = workspaceId === `repo:${workspaceDirectoryPath(input.workspaceRoot)}`; }
+      catch { /* The checkpoint handoff also works without an accessible local root. */ }
+      if (home && cli && existsSync(cli) && matchesWorkspace) {
+	const search = `${shellQuote(cli)} memory search-workspace "<query>" --workspace-root ${shellQuote(input.workspaceRoot)} --profile ${shellQuote(profileName)} --home ${shellQuote(home)} --top-k 3`;
+	contextText += ` You can also let it run ${search}.`;
+      }
+    }
     return {
       packId,
       contextText,

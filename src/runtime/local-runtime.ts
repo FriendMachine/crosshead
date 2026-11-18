@@ -29,7 +29,7 @@ import semver from "semver";
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
-import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession } from "./hosted-client";
+import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession, type AccountLinkRequest, type AccountLinkStatus } from "./hosted-client";
 export { describeFetchFailure } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { readHotCheckpoints, searchHotCheckpoints } from "./hot-continuity";
@@ -113,7 +113,7 @@ import {
 	type PublicDiscoveryEvent,
 } from "../protocol/public-discovery";
 import { normalizePersistentAgentId, sanitizePersistentAgentToken } from "./persistent-agent-utils";
-import { resolveOnlyBotsHome } from "./runtime-env";
+import { isRuntimeProfileName, resolveOnlyBotsHome } from "./runtime-env";
 import {
 	adapterFile,
 	adapterSnapshotDir,
@@ -2640,6 +2640,38 @@ export class OnlyBotsLocalRuntimeDaemon {
 		return result;
 	}
 
+	async createAccountLinkRequest(
+		request: { clientLabel?: string; agentId?: string; displayName?: string }, profileName?: string
+	): Promise<AccountLinkRequest> {
+		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({ profileName });
+		const result = await client.createAccountLinkRequest({
+			...(request.clientLabel ? { client_label: request.clientLabel } : {}),
+			...(request.agentId ? { agent_id: request.agentId } : {}),
+			...(request.displayName ? { display_name: request.displayName } : {}),
+		});
+		await this.persistSession(resolvedProfileName, secret, client);
+		writeRuntimeLog(this.paths, "account.link.requested", { profileName: resolvedProfileName });
+		return result;
+	}
+
+	async joinAccountLinkRequest(
+		requestId: string, pollSecret: string, request: { agentId?: string; displayName?: string }, profileName?: string
+	): Promise<Record<string, unknown>> {
+		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({ profileName });
+		const result = await client.joinAccountLinkRequest(requestId, {
+			poll_secret: pollSecret,
+			...(request.agentId ? { agent_id: request.agentId } : {}),
+			...(request.displayName ? { display_name: request.displayName } : {}),
+		});
+		await this.persistSession(resolvedProfileName, secret, client);
+		return result;
+	}
+
+	async getAccountLinkStatus(requestId: string, pollSecret: string, profileName?: string): Promise<AccountLinkStatus> {
+		const { client } = await this.withProfileBody({ profileName });
+		return client.getAccountLinkStatus(requestId, pollSecret);
+	}
+
 	async joinOrganization(request: { code: string; agentId?: string }, profileName?: string): Promise<Record<string, unknown>> {
 		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({ profileName });
 		const result = await client.joinOrganization({
@@ -3365,7 +3397,9 @@ export class OnlyBotsLocalRuntimeDaemon {
 		throw new Error("Invalid hot-sync control action");
 	}
 
-	async readHotMemory(profileName?: string, scope?: string): Promise<Record<string, unknown>> {
+	async readHotMemory(
+		profileName?: string, scope?: string, { allowHostedFallback = true } = {}
+	): Promise<Record<string, unknown>> {
 		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({
 			profileName,
 		});
@@ -3377,12 +3411,20 @@ export class OnlyBotsLocalRuntimeDaemon {
 			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
 			return manager.read(scope ?? "shared");
 		}
+		if (!allowHostedFallback) {
+			throw new Error("Workspace memory search requires local hot sync for hosted profiles. Pass a saved checkpoint in the task brief while hot sync is disabled.");
+		}
 		// Pass the scope through unchanged (undefined => the server's shared default), so internal
 		// legacy callers keep the single-doc shape. Handoff and operator flows request
 		// the cross-body union explicitly with scope=all and filter it by workspace.
 		const result = await client.readHotMemory(scope);
 		await this.persistSession(resolvedProfileName, secret, client);
 		return result;
+	}
+
+	async readProfileLocalHotMemory(profileName: string): Promise<Record<string, unknown>> {
+		if (!isRuntimeProfileName(profileName)) throw new Error("Local hot memory requires an explicit profile");
+		return this.readHotMemory(profileName, "all", { allowHostedFallback: false });
 	}
 
 	async listWarmMemory(

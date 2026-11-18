@@ -378,6 +378,11 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     () => readStdinJson(stdinOverride), payload => resolveHookWorkspaceRoot(payload, {}, false));
   if (!dispatch) return;
   const { paths, runtimeHome, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure } = dispatch;
+  const event = normalizedEventName.replace(/_/g, "");
+  // Older Claude Code releases send child auto-compactions with the exact
+  // parent payload. Only the manual trigger identifies a parent compaction.
+  if ((event === "precompact" || event === "postcompact") && pickCompactionTrigger(payload) !== "manual") return;
+  if (event === "sessionstart" && pickString(payload, ["source", "payload.source"]) === "compact") return;
   const viaPlugin = isPluginHookInvocation(flags);
   const hostHome = scoped?.binding.hostHome ??
     (typeof flags["claude-home"] === "string" ? flags["claude-home"] : viaPlugin ? resolvePluginHostHome("claude-code", runtimeHome) : undefined);

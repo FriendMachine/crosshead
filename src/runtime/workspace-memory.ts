@@ -116,3 +116,13 @@ export const filterHotMemorySnapshotForWorkspace = (
   }
   return { ...hotMemory, scopes: [...other, ...selected.values()] };
 };
+
+/** Search the checkpoint bodies of normalized local scopes, without traversing snapshot metadata. */
+export const workspaceHotCheckpointBodies = (hotMemory: Record<string, unknown>, workspaceId: string): unknown[] => {
+  const scopes = filterHotMemorySnapshotForWorkspace(hotMemory, workspaceId, true)?.scopes;
+  if (!Array.isArray(scopes)) return [];
+  return scopes.filter(isRecord).flatMap((scope) => {
+    const checkpoints = parseHotMemoryEntryContent(scope)?.continuityCheckpoints;
+    return Array.isArray(checkpoints) ? checkpoints : [];
+  });
+};
