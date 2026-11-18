@@ -1,6 +1,8 @@
 import { LocalRuntimeClient } from "../local-client";
 import { HOT_SCOPE_ALL } from "../../protocol/memory";
 import { searchHotCheckpoints } from "../hot-continuity";
+import { isLocalOnlyRuntimeProfile, readLocalHotMemory } from "../local-hot-memory";
+import { loadProfile, resolveRuntimePaths } from "../runtime-persistence";
 import { workspaceDirectoryPath } from "../workspace-identity";
 import { isRuntimeProfileName } from "../runtime-env";
 import { workspaceHotCheckpointBodies } from "../workspace-memory";
@@ -126,26 +128,33 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 		return formatWarmMemoryEvaluation(report, recentOutcomes);
 	}
 
-	if (subcommand === "search") {
+	if (subcommand === "search" || subcommand === "search-workspace") {
 		const query = positionals.slice(1).join(" ").trim();
 		if (query.length === 0) {
-			throw new Error("memory search requires a query");
+			throw new Error(`memory ${subcommand} requires a query`);
 		}
 		const topK = typeof flags["top-k"] === "string" ? Number(flags["top-k"]) : 10;
-		const workspaceRoot = flags["workspace-root"];
 		let result: Record<string, unknown>;
-		if (workspaceRoot !== undefined) {
+		if (subcommand === "search-workspace") {
+			const workspaceRoot = flags["workspace-root"];
 			if (typeof workspaceRoot !== "string" || !workspaceRoot.trim()) {
-				throw new Error("memory search --workspace-root requires a directory");
+				throw new Error("memory search-workspace requires --workspace-root <directory>");
 			}
 			if (!isRuntimeProfileName(profileName)) {
-				throw new Error("memory search --workspace-root requires an explicit --profile <name>");
+				throw new Error("memory search-workspace requires an explicit --profile <name>");
 			}
 			if (flags.home !== undefined && (typeof flags.home !== "string" || !flags.home.trim())) {
-				throw new Error("memory search --home requires a directory");
+				throw new Error("memory search-workspace --home requires a directory");
 			}
 			const workspaceId = `repo:${workspaceDirectoryPath(workspaceRoot)}`;
-			const hot = await daemon.readHotMemory(profileName, HOT_SCOPE_ALL, { allowHostedFallback: false });
+			const paths = resolveRuntimePaths(typeof flags.home === "string" ? flags.home : undefined);
+			const profile = loadProfile(paths, profileName);
+			if (!profile) throw new Error(`Unknown runtime profile: ${profileName}`);
+			// For hosted profiles the attached daemon owns the sync policy. A separate
+			// route keeps older daemons from treating this as an ordinary hosted read.
+			const hot = isLocalOnlyRuntimeProfile(profile)
+				? readLocalHotMemory(paths.state, HOT_SCOPE_ALL, profile)
+				: await new LocalRuntimeClient({ home: paths.home }).readProfileLocalHotMemory(profileName);
 			const continuityCheckpoints = workspaceHotCheckpointBodies(hot, workspaceId);
 			const results = searchHotCheckpoints({ continuityCheckpoints }, query, topK || 10, workspaceId);
 			result = { scope: "local_hot_memory", workspaceId, query, count: results.length, results };
@@ -202,7 +211,7 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 		return `Set memory mode for ${profile.name} to ${profile.memoryMode}`;
 	}
 
-	throw new Error("memory subcommand must be one of: hot, warm, evaluate, search, export, mode");
+	throw new Error("memory subcommand must be one of: hot, warm, evaluate, search, search-workspace, export, mode");
 };
 
 export const workspaceFromCli = async (argv: string[]): Promise<string> => {

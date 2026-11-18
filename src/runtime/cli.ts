@@ -107,7 +107,7 @@ export const runOnlyBotsCtlCli = async (
 	// override so manual commands read the same memory as that directory's hooks.
 	const setupCommands = new Set(["setup", "keygen", "workspace", "quickstart", "onboard"]);
 	const memoryArgs = command === "memory" ? parseArgs(rest) : null;
-	const delegatedSearch = memoryArgs?.positionals[0] === "search" && memoryArgs.flags["workspace-root"] !== undefined;
+	const delegatedSearch = memoryArgs?.positionals[0] === "search-workspace";
 	const profile = delegatedSearch ? undefined : resolveCrossheadProfile() ?? (command && !setupCommands.has(command)
 		? workspaceProfileForDirectory(homeFlag(rest), process.cwd()) ?? undefined : undefined);
 	if (profile && command && profileCommands.has(command) &&
@@ -343,7 +343,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead memory warm [--home <path>] [--profile <name>] [--type <type>] [--status <status>] [--include-system] [--json|--debug]",
 				"crosshead memory evaluate [--home <path>] [--profile <name>] [--lines 200] [--limit 50] [--apply] [--include-system] [--json|--debug]",
 				"crosshead memory search <query> [--home <path>] [--profile <name>] [--top-k <n>] [--include-system] [--json|--debug]",
-				"crosshead memory search <query> --workspace-root <path> --profile <name> [--home <path>] [--top-k <n>] [--json|--debug]",
+				"crosshead memory search-workspace <query> --workspace-root <path> --profile <name> [--home <path>] [--top-k <n>] [--json|--debug]",
 				"crosshead memory export [--home <path>] [--profile <name>]",
 				"crosshead memory mode <off|manual|assist|auto> [--home <path>] [--profile <name>]",
 		"crosshead messages state [--home <path>] [--profile <name>] [--statuses <csv>] [--priorities <csv>] [--context-id <id>] [--message-type <chat|inbox_event>] [--unread-only true|false] [--include-terminal true|false] [--limit <n>] [--json|--debug]",

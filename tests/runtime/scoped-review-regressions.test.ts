@@ -17,9 +17,7 @@ import { renderRuntimeStartupContext } from "../../src/runtime/startup-context";
 import { LocalRuntimeClient } from "../../src/runtime/local-client";
 import * as hookRuntime from "../../src/runtime/hook-runtime";
 import { runOnlyBotsCtlCli } from "../../src/runtime/cli";
-import { memoryFromCli } from "../../src/runtime/cli/memory";
 import { getHotSyncManager, stopHotSyncManagers } from "../../src/runtime/hot-sync-manager";
-import { HostedOnlyBotsClient } from "../../src/runtime/hosted-client";
 
 const repo = path.resolve(__dirname, "../..");
 const cliFile = path.join(repo, "dist/runtime/cli.js"), daemonFile = path.join(repo, "dist/runtime/daemon.js");
@@ -149,12 +147,24 @@ it("isolates marked child hooks during an active parent turn and keeps Codex for
     for (const event of ["UserPromptSubmit", "PreCompact", "PostCompact", "Stop", "PostToolUse", "PostToolUseFailure"]) {
       await invoke(event, { ...read, agent_id: "child", agent_type: "reviewer" });
     }
+    if (binding.host === "claude-code") {
+      // Claude Code 2.1.319 reports child auto-compactions with the parent's
+      // session fields and omits agent_id, including on SessionStart(compact).
+      await invoke("PreCompact", { trigger: "auto" });
+      await invoke("SessionStart", { source: "compact" });
+      await invoke("PostCompact", { trigger: "auto" });
+    }
     expect(ensure).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
     expect(stdout).not.toHaveBeenCalled();
 
     await invoke("PostToolUse", read);
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.completed", sessionId: "parent" }));
+    await invoke("PreCompact", { trigger: "manual" });
+    await invoke("PostCompact", { trigger: "manual" });
+    for (const type of ["compact.started", "compact.completed"]) {
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type, sessionId: "parent" }));
+    }
   }
 
   const binding = bindings.find(binding => binding.host === "codex")!;
@@ -193,14 +203,14 @@ it("searches hot memory only inside the explicitly selected workspace and profil
     continuityCheckpoints: [checkpoint(workspaceId, "Migration cursor from a different profile")],
   }), "codex", other);
 
-  const result = JSON.parse(f.cli("memory", "search", "migration cursor", "--workspace-root", f.second, "--profile", "work", "--json"));
+  const result = JSON.parse(f.cli("memory", "search-workspace", "migration cursor", "--workspace-root", f.second, "--profile", "work", "--json"));
   expect(result.scope).toBe("local_hot_memory");
   expect(result.workspaceId).toBe(workspaceId);
   expect(result.results.map((entry: { text: string }) => entry.text)).toEqual(["Migration cursor uses the last imported row"]);
-  expect(f.run("memory", "search", "migration cursor", "--workspace-root").stderr).toContain("requires a directory");
+  expect(f.run("memory", "search-workspace", "migration cursor", "--workspace-root").stderr).toContain("requires --workspace-root");
   Object.assign(f.env, { CROSSHEAD_PROFILE: "work" });
   for (const profileArgs of [[], ["--profile"], ["--profile="]]) {
-    expect(f.run("memory", "search", "migration cursor", "--workspace-root", f.second, ...profileArgs).stderr)
+    expect(f.run("memory", "search-workspace", "migration cursor", "--workspace-root", f.second, ...profileArgs).stderr)
       .toContain("requires an explicit --profile");
   }
 });
@@ -208,7 +218,7 @@ it("searches hot memory only inside the explicitly selected workspace and profil
 it("keeps hosted profiles isolated during local search and refuses legacy hosted fallback", async () => {
   const f = fixture();
   const identity = generateRuntimeIdentity();
-  const origin = "https://crosshead.invalid";
+  const origin = "http://127.0.0.1:9";
   const workspaceId = `repo:${f.project}`;
   for (const [profileName, summary] of [["work", "Migration cursor from the work profile"], ["other", "Migration cursor from another profile"]]) {
     const local = await setupRuntimeProfile({ home: f.home, profileName, apiBase: "http://127.0.0.1:0", ...identity });
@@ -219,16 +229,31 @@ it("keeps hosted profiles isolated during local search and refuses legacy hosted
     });
   }
   await stopHotSyncManagers(f.paths.state);
-  Object.assign(f.env, { CROSSHEAD_HOT_SYNC_ENABLED: "true" });
-  const args = ["search", "migration cursor", "--workspace-root", f.project, "--profile", "work", "--json"];
-  const result = JSON.parse(f.cli("memory", ...args));
-  expect(result.results.map((entry: { text: string }) => entry.text)).toEqual(["Migration cursor from the work profile"]);
+  const args = ["memory", "search-workspace", "migration cursor", "--workspace-root", f.project, "--profile", "work"];
+  // The daemon's decision wins even when the child shell has the opposite
+  // setting. Seed signed local data so an accidental read during rollback is visible.
+  vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "true");
+  Object.assign(f.env, { CROSSHEAD_HOT_SYNC_ENABLED: "false" });
+  await startDetachedRuntimeDaemon({ home: f.home, port: 0, daemonScriptPath: daemonFile });
+  try {
+    const result = JSON.parse(f.cli(...args, "--json"));
+    expect(result.results.map((entry: { text: string }) => entry.text)).toEqual(["Migration cursor from the work profile"]);
+  } finally {
+    await stopDetachedRuntimeDaemon(f.home);
+  }
 
   vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "false");
-  const hosted = vi.spyOn(HostedOnlyBotsClient.prototype, "readHotMemory").mockResolvedValue({});
-  await expect(memoryFromCli([...args, "--home", f.home])).rejects.toThrow("requires local hot sync");
-  expect(hosted).not.toHaveBeenCalled();
-});
+  Object.assign(f.env, { CROSSHEAD_HOT_SYNC_ENABLED: "true" });
+  await startDetachedRuntimeDaemon({ home: f.home, port: 0, daemonScriptPath: daemonFile });
+  try {
+    const rejected = f.run(...args);
+    expect(rejected.status).toBe(1);
+    expect(rejected.stderr).toContain("requires local hot sync");
+    expect(rejected.stdout).toBe("");
+  } finally {
+    await stopDetachedRuntimeDaemon(f.home);
+  }
+}, 15000);
 
 it("routes workspace link by the first positional after flags", async () => {
   const request = vi.spyOn(LocalRuntimeClient.prototype, "hotSyncControl").mockResolvedValue({ workspaceId: "fixture-link" });

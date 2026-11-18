@@ -113,7 +113,7 @@ import {
 	type PublicDiscoveryEvent,
 } from "../protocol/public-discovery";
 import { normalizePersistentAgentId, sanitizePersistentAgentToken } from "./persistent-agent-utils";
-import { resolveOnlyBotsHome } from "./runtime-env";
+import { isRuntimeProfileName, resolveOnlyBotsHome } from "./runtime-env";
 import {
 	adapterFile,
 	adapterSnapshotDir,
@@ -3388,6 +3388,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const result = await client.readHotMemory(scope);
 		await this.persistSession(resolvedProfileName, secret, client);
 		return result;
+	}
+
+	async readProfileLocalHotMemory(profileName: string): Promise<Record<string, unknown>> {
+		if (!isRuntimeProfileName(profileName)) throw new Error("Local hot memory requires an explicit profile");
+		return this.readHotMemory(profileName, "all", { allowHostedFallback: false });
 	}
 
 	async listWarmMemory(

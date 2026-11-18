@@ -197,6 +197,10 @@ export class LocalRuntimeClient {
     });
   }
 
+  async readProfileLocalHotMemory(profileName: string): Promise<Record<string, unknown>> {
+    return this.request("GET", "/v1/memory/local-hot", { query: { profile: profileName } });
+  }
+
   async readHotMemory(profileName?: string, scope?: string): Promise<Record<string, unknown>> {
     return this.request<Record<string, unknown>>("GET", "/v1/memory/hot", {
       query: {
