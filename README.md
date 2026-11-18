@@ -307,6 +307,39 @@ the local daemon and workspace memory with the existing adapters. See
 [native host setup and verification](docs/NATIVE-HOSTS.md) for custom homes,
 uninstall commands, supported versions, and Docker tests.
 
+## Count tokens locally
+
+Token counting starts off for each profile. To enable it for a profile that
+already has Claude Code or Codex hooks configured:
+
+```sh
+crosshead usage on --profile work
+crosshead usage --profile work
+crosshead usage --all-profiles --json
+crosshead usage off --profile work
+```
+
+Start a new turn after enabling. Crosshead reads the host's reported usage
+when a connected turn finishes. The report shows today, the last 7 calendar
+days, and the last 30 calendar days in UTC, grouped by harness and model.
+When a host exposes a subagent transcript linked to the session, that usage
+appears under the same profile with a subagent label. Missing model information
+appears as `unknown`. Input includes reported cache reads and cache writes.
+Output includes reported reasoning. Those breakdowns are already part of the
+total.
+
+The counter stores token counts and attribution metadata in the runtime's
+private `state/usage/` directory. Workspace, session, and response identifiers
+are hashed. The counter keeps no transcript text and sends nothing over the
+network. It works with Crosshead memory mode off, provided the host's hooks
+are still installed. Turning counting off preserves the usage already recorded.
+Re-enabling starts counting with a new connected turn.
+
+Totals cover token records available to the installed Claude Code and Codex
+hooks. Runs without hooks, interrupted turns without a completion callback, and
+usage the host omits can be missing. Reports measure tokens and do not estimate
+your bill.
+
 ## Repository layout
 
 | Path | Contents |

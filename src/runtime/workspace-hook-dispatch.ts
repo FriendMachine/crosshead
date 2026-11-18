@@ -1,6 +1,7 @@
 import { isRuntimeProfileForBinding } from "./runtime-profile-validation";
 import type { HookHost } from "./host-hook-spec";
 import { loadProfile, resolveRuntimePaths } from "./runtime-persistence";
+import { tokenUsagePhase } from "./token-usage";
 import { taskEvidenceCaptureEnabled } from "./task-evidence";
 import { readWorkspacePolicyForHook, workspaceHookForInvocation } from "./workspace-hooks";
 
@@ -28,6 +29,7 @@ export const resolveWorkspaceHookDispatch = (
   const scoped = workspaceHookForInvocation(policy, host, flags.binding, directory(payload));
   if (scoped === null) return null;
   let legacyUnscoped = false;
+  let memoryOff = false;
   // A directory override can replace the selected binding's profile.
   const effective = scoped?.binding ?? selected;
   if (effective) {
@@ -39,8 +41,9 @@ export const resolveWorkspaceHookDispatch = (
       }
       return null;
     }
-    if (profile.memoryMode === "off") return null;
+    memoryOff = profile.memoryMode === "off";
+    if (memoryOff && !tokenUsagePhase(normalized)) return null;
     legacyUnscoped = effective.legacyUnscoped === true && effective.legacyNpub === profile.npub;
   }
-  return { paths, runtimeHome: paths.home, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure };
+  return { paths, runtimeHome: paths.home, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure, memoryOff };
 };

@@ -6,8 +6,9 @@ import path from "path";
 import { captureHotFinding } from "./hot-continuity";
 import { claimSessionStartContext, releaseSessionStartContext } from "./hook-session-context";
 import { readLastAssistantMessage } from "./hook-transcript";
+import { recordTokenUsageHook, tokenUsagePhase } from "./token-usage";
 
-import { ClaudeCodeRuntimeAdapter, findLegacyClaudeHookFiles, loadClaudeCodeAdapterConfig } from "./claude-code-adapter";
+import { ClaudeCodeRuntimeAdapter, findLegacyClaudeHookFiles, loadClaudeCodeAdapterConfig, resolveClaudeCodeHome } from "./claude-code-adapter";
 import { pluginSetupHint } from "./host-hook-spec";
 import {
   claudeSessionProjectDir,
@@ -387,6 +388,9 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     (typeof flags["claude-home"] === "string" ? flags["claude-home"] : viaPlugin ? resolvePluginHostHome("claude-code", runtimeHome) : undefined);
   const workspaceRoot = scoped?.root ?? resolveHookWorkspaceRoot(payload, flags);
   const workspaceId = scoped ? `repo:${workspaceRoot}` : resolveHookWorkspaceId(payload, flags, workspaceRoot);
+  let profileName = scoped?.binding.profile;
+  let memoryOff = dispatch.memoryOff;
+  const usagePhase = tokenUsagePhase(normalizedEventName);
   if (!scoped && eventName !== "help") {
     let installedConfig: ReturnType<typeof loadClaudeCodeAdapterConfig> | null = null;
     try {
@@ -401,8 +405,10 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       }
       return;
     }
-    if (loadProfile(paths, installedConfig.profileName)?.memoryMode === "off") return;
-    if (viaPlugin) {
+    profileName = installedConfig.profileName;
+    memoryOff = loadProfile(paths, profileName)?.memoryMode === "off";
+    if (memoryOff && !usagePhase) return;
+    if (viaPlugin && !memoryOff) {
       try {
         recordPluginInvocation(runtimeHome, "claude-code", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null, claudeUserConfigDir());
       } catch {
@@ -422,6 +428,15 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     });
     if (decision === "skip-duplicate") return;
   }
+  if (usagePhase && profileName) {
+    await recordTokenUsageHook({
+      phase: usagePhase,
+      paths, profileName, host: "claude-code", hostHome: resolveClaudeCodeHome(hostHome), workspace: workspaceId,
+      session: pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]),
+      file: pickString(payload, ["transcript_path", "transcriptPath", "conversation_path", "conversationPath"]),
+    });
+  }
+  if (memoryOff) return;
   const adapter = scoped
     ? ClaudeCodeRuntimeAdapter.forWorkspace(runtimeHome, scoped.binding.hostHome, workspaceRoot, scoped.binding.profile, scoped.binding.sourceExcerpts, legacyUnscoped, scoped.binding.legacyBefore)
     : ClaudeCodeRuntimeAdapter.fromInstalled({

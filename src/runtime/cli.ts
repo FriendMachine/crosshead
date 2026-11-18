@@ -12,6 +12,7 @@ import { trustFromCli } from "./trust-routing-cli";
 
 import { agentFromCli, lineageFromCli, passportFromCli } from "./cli/agent";
 import { billingFromCli } from "./cli/billing";
+import { usageFromCli } from "./cli/usage";
 import { capabilitiesFromCli, capabilityHelpLine } from "./cli/capabilities";
 import { contextFromCli } from "./cli/context";
 import { continuityFromCli } from "./cli/continuity";
@@ -101,7 +102,7 @@ export const runOnlyBotsCtlCli = async (
 		return;
 	}
 	const profileCommands = new Set([
-		"setup", "keygen", "status", "doctor", "memory", "messages", "billing", "public", "context",
+		"setup", "keygen", "status", "doctor", "memory", "usage", "messages", "billing", "public", "context",
 		"account", "agent", "lineage", "passport", "workspace", "handoff", "sign-challenge", "sign-deletion-challenge", "organization", "quickstart", "onboard",
 	]);
 	// Without an explicit or environment profile, use the directory's workspace
@@ -181,6 +182,9 @@ export const runOnlyBotsCtlCli = async (
 			break;
 		case "memory":
 			output = await memoryFromCli(rest);
+			break;
+		case "usage":
+			output = await usageFromCli(rest);
 			break;
 		case "messages":
 			output = await messagesFromCli(rest);
@@ -343,6 +347,8 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead logs [--home <path>] [--lines 50]",
 				"crosshead events [--home <path>] [--lines 50] [--json]",
 				"crosshead workspace link --name <shared-label> --workspace-root <path> [--home <path>] [--profile <name>]",
+				"crosshead usage [on|off] [--profile <name>] [--home <path>] [--json]",
+				"crosshead usage --all-profiles [--home <path>] [--json]",
 				"crosshead memory sync [--home <path>] [--profile <name>]",
 				"crosshead memory hot reset --scope <scope> [--home <path>] [--profile <name>]",
 				"crosshead memory hot [--inspect] [--home <path>] [--profile <name>] [--json|--debug]",
