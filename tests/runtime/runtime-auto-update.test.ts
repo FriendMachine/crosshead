@@ -327,6 +327,30 @@ describe("published runtime automatic updates", () => {
 		deps.now = () => started + AUTO_UPDATE_TURN_MAX_MS;
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
 	});
+	it("sees turns saved under workspace bindings, counts only a session's newest marker, and ignores compaction markers", () => {
+		const { p } = autoSetup();
+		const now = Date.now();
+		const iso = (ago: number) => new Date(now - ago).toISOString();
+		const scoped = path.join(p.state, "workspace-hooks", "binding-1");
+		mkdirSync(scoped, { recursive: true });
+		const state = path.join(scoped, `${"a".repeat(64)}.json`);
+		writeJsonFile(state, { activeTurns: { "s:t": { sessionId: "s", turnId: "t", updatedAt: iso(60_000) } } });
+		expect(hostTurnInProgress(p, now)).toBe(true);
+		expect(idleUpdateCheckDue(p, now + AUTO_UPDATE_IDLE_MS)).toBe(false);
+		// Receipts beside the state file are not turn state.
+		writeJsonFile(state, { activeTurns: {} });
+		writeJsonFile(path.join(scoped, `${"a".repeat(64)}-startup.json`), { activeTurns: { x: { sessionId: "x", turnId: "x", updatedAt: iso(0) } } });
+		expect(hostTurnInProgress(p, now)).toBe(false);
+		// A compaction between turns writes a marker with no turn ID that Stop never clears.
+		writeJsonFile(state, { activeTurns: { "s:-": { sessionId: "s", turnId: null, updatedAt: iso(0) } } });
+		expect(hostTurnInProgress(p, now)).toBe(false);
+		// Cancelled turns leave old markers; only the session's newest one is judged.
+		writeJsonFile(state, { activeTurns: {
+			"s:old": { sessionId: "s", turnId: "old", updatedAt: iso(AUTO_UPDATE_TURN_MAX_MS + 1000) },
+			"s:older": { sessionId: "s", turnId: "older", updatedAt: iso(AUTO_UPDATE_TURN_MAX_MS * 2) },
+		} });
+		expect(hostTurnInProgress(p, now)).toBe(false);
+	});
 	it("updates ten minutes after Stop clears the turn", async () => {
 		const { home, p, deps } = autoSetup();
 		const file = path.join(p.state, "codex-hook.json");

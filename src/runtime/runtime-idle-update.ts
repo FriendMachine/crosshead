@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import path from "path";
 import { execFileSync, spawn } from "child_process";
 import { writeJsonFile, type RuntimePaths } from "./runtime-persistence";
@@ -14,7 +14,23 @@ const DAEMON_RESPAWN_MS = 30 * 60 * 1000;
 export const AUTO_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 export const AUTO_UPDATE_FAILED_RETRY_MS = 30 * 60 * 1000;
 const DAEMON_POLL_MS = 5 * 60 * 1000;
-const HOOK_STATE_FILES = ["codex-hook.json", "claude-code-hook.json"];
+
+/** Hook state lives in the two unscoped files and, for workspace bindings (the
+ * quickstart default), in state/workspace-hooks/<binding>/<root-hash>.json. */
+const hookStateFiles = (paths: RuntimePaths): string[] => {
+	const files = ["codex-hook.json", "claude-code-hook.json"].map(name => path.join(paths.state, name));
+	const scopedRoot = path.join(paths.state, "workspace-hooks");
+	try {
+		for (const binding of readdirSync(scopedRoot, { withFileTypes: true })) {
+			if (!binding.isDirectory()) continue;
+			for (const name of readdirSync(path.join(scopedRoot, binding.name))) {
+				// <hash>-startup.json and <hash>-resume.json are receipts, not turn state.
+				if (/^[a-f0-9]{64}\.json$/.test(name)) files.push(path.join(scopedRoot, binding.name, name));
+			}
+		}
+	} catch { /* No workspace bindings. */ }
+	return files;
+};
 
 const activityFile = (paths: RuntimePaths): string => path.join(paths.state, "host-activity.json");
 const readJson = (file: string): any => JSON.parse(readFileSync(file, "utf8"));
@@ -33,8 +49,8 @@ export const lastHostActivityMs = (paths: RuntimePaths): number => {
 		const at = readJson(activityFile(paths)).at;
 		if (Number.isFinite(at)) newest = at;
 	} catch { /* Missing or partial marker: fall back to hook state below. */ }
-	for (const name of HOOK_STATE_FILES) {
-		try { newest = Math.max(newest, statSync(path.join(paths.state, name)).mtimeMs); } catch { /* Absent. */ }
+	for (const file of hookStateFiles(paths)) {
+		try { newest = Math.max(newest, statSync(file).mtimeMs); } catch { /* Absent. */ }
 	}
 	return newest;
 };
@@ -57,17 +73,24 @@ export const hostHooksRunning = (excludePid: number, processTable = (): string =
 
 /** True while some Codex or Claude Code turn has a prompt but no Stop yet. Tool
  * calls such as Edit and long model output run no hook, so quiet hooks alone
- * do not prove a turn has ended. */
+ * do not prove a turn has ended. A session runs one turn at a time, so only
+ * its newest marker counts: older ones belong to turns that were cancelled.
+ * Markers without a turn ID come from compaction between turns. */
 export const hostTurnInProgress = (paths: RuntimePaths, now: number, maxAgeMs = AUTO_UPDATE_TURN_MAX_MS): boolean => {
-	for (const name of HOOK_STATE_FILES) {
+	const newestBySession = new Map<string, number>();
+	for (const file of hookStateFiles(paths)) {
 		let turns: unknown;
-		try { turns = readJson(path.join(paths.state, name)).activeTurns; } catch { continue; }
+		try { turns = readJson(file).activeTurns; } catch { continue; }
 		if (!turns || typeof turns !== "object") continue;
-		for (const turn of Object.values(turns as Record<string, { updatedAt?: unknown }>)) {
-			const startedAt = typeof turn?.updatedAt === "string" ? Date.parse(turn.updatedAt) : NaN;
-			if (Number.isFinite(startedAt) && now - startedAt < maxAgeMs) return true;
+		for (const [key, turn] of Object.entries(turns as Record<string, { sessionId?: unknown; turnId?: unknown; updatedAt?: unknown }>)) {
+			if (typeof turn?.turnId !== "string" || !turn.turnId) continue;
+			const startedAt = typeof turn.updatedAt === "string" ? Date.parse(turn.updatedAt) : NaN;
+			if (!Number.isFinite(startedAt)) continue;
+			const session = typeof turn.sessionId === "string" && turn.sessionId ? turn.sessionId : key;
+			newestBySession.set(session, Math.max(newestBySession.get(session) ?? 0, startedAt));
 		}
 	}
+	for (const startedAt of newestBySession.values()) if (now - startedAt < maxAgeMs) return true;
 	return false;
 };
 

@@ -1,4 +1,3 @@
-import { recordHostActivity } from "./runtime-idle-update";
 import { resolveWorkspaceHookDispatch } from "./workspace-hook-dispatch";
 import { ensureHookRuntime, reportHookFailure } from "./hook-runtime";
 import { existsSync, readFileSync } from "fs";
@@ -380,8 +379,6 @@ export const runOnlyBotsCodexHookCli = async (
     () => readStdinJson(stdinOverride), payload => resolveHookWorkspaceRoot(payload, {}, false));
   if (!dispatch) return;
   const { paths, runtimeHome, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure } = dispatch;
-  // Automatic updates wait for hosts to be quiet; see runtime-idle-update.
-  recordHostActivity(paths);
   const viaPlugin = isPluginHookInvocation(flags);
   const hostHome = scoped?.binding.hostHome ??
     (typeof flags["codex-home"] === "string" ? flags["codex-home"] : viaPlugin ? resolvePluginHostHome("codex", runtimeHome) : undefined);

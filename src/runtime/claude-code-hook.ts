@@ -1,4 +1,3 @@
-import { recordHostActivity } from "./runtime-idle-update";
 import { resolveWorkspaceHookDispatch } from "./workspace-hook-dispatch";
 import { ensureHookRuntime, reportHookFailure } from "./hook-runtime";
 import { existsSync, readFileSync } from "fs";
@@ -379,8 +378,6 @@ export const runOnlyBotsClaudeCodeHookCli = async (
     () => readStdinJson(stdinOverride), payload => resolveHookWorkspaceRoot(payload, {}, false));
   if (!dispatch) return;
   const { paths, runtimeHome, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure } = dispatch;
-  // Automatic updates wait for hosts to be quiet; see runtime-idle-update.
-  recordHostActivity(paths);
   const event = normalizedEventName.replace(/_/g, "");
   // Older Claude Code releases send child auto-compactions with the exact
   // parent payload. Only the manual trigger identifies a parent compaction.
