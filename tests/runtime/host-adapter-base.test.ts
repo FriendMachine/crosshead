@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,10 +17,11 @@ class SecurityBoundaryAdapter extends HostRuntimeAdapterBase {
     wrapperVersionFallback: "test",
     requestLabel: "Codex",
   };
-  protected readonly config = { profileName: "default", hostHome: "/host", adapterVersion: "test" };
+  protected readonly config;
 
-  constructor(protected readonly client: LocalRuntimeClient) {
+  constructor(protected readonly client: LocalRuntimeClient, runtimeHome?: string) {
     super();
+    this.config = { profileName: "default", hostHome: "/host", adapterVersion: "test", runtimeHome };
   }
 
   protected async attachWorkspace(): Promise<void> {}
@@ -176,16 +180,27 @@ describe("host adapter prompt trust boundary", () => {
       status: async () => ({ integrity: { issues: [{ severity: "error", message: attack }] } }),
     } as unknown as LocalRuntimeClient;
 
-    const adapter = new SecurityBoundaryAdapter(client);
+    const runtimeHome = mkdtempSync(path.join(tmpdir(), "crosshead runtime "));
     const turn = { workspaceRoot: "/tmp/project", workspaceId, sessionId: "session", turnId: "turn", prompt: "continue" };
-    const prepared = await adapter.prepareTurn({ ...turn, sessionStart: true });
+    try {
+      const cli = path.join(runtimeHome, "bin", "crosshead");
+      mkdirSync(path.dirname(cli));
+      writeFileSync(cli, "", { mode: 0o700 });
+      const adapter = new SecurityBoundaryAdapter(client, runtimeHome);
+      const prepared = await adapter.prepareTurn({ ...turn, sessionStart: true });
 
-    expect(prepared.packId).toBe("pack-safe");
-    expect(prepared.contextText).toContain("retain this verified continuity");
-    expect(prepared.contextText).not.toContain(attack);
-    expect(prepared.injectedPrompt).not.toContain(attack);
-    expect(prepared.contextText).toContain("Use fresh history for independent subagents");
-    expect(prepared.contextText).toContain(`crosshead memory search "<query>" --workspace-root '/tmp/project' --profile 'default' --top-k 3`);
-    expect((await adapter.prepareTurn({ ...turn, turnId: "second" })).contextText).not.toContain("independent subagents");
+      expect(prepared.packId).toBe("pack-safe");
+      expect(prepared.contextText).toContain("retain this verified continuity");
+      expect(prepared.contextText).not.toContain(attack);
+      expect(prepared.injectedPrompt).not.toContain(attack);
+      expect(prepared.contextText).toContain("Use a fresh, non-forked subagent");
+      expect(prepared.contextText).toContain(`'${cli}' memory search "<query>" --workspace-root '/tmp/project' --profile 'default' --home '${runtimeHome}' --top-k 3`);
+      expect((await adapter.prepareTurn({ ...turn, turnId: "second" })).contextText).not.toContain("--workspace-root");
+      const embedded = await new SecurityBoundaryAdapter(client).prepareTurn({ ...turn, sessionStart: true });
+      expect(embedded.contextText).toContain("pass a relevant checkpoint");
+      expect(embedded.contextText).not.toContain("--workspace-root");
+    } finally {
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
   });
 });

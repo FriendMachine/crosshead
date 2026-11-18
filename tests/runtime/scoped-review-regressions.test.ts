@@ -8,7 +8,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { generateRuntimeIdentity, installRuntimeCore, setupRuntimeProfile, startDetachedRuntimeDaemon, stopDetachedRuntimeDaemon, updateManagedRuntimeRelease } from "../../src/runtime/local-runtime";
 import { readDaemonOwnershipState, daemonOwnerIsLive } from "../../src/runtime/daemon-ownership";
-import { configFile, loadRuntimeConfig, saveRuntimeConfig, resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
+import { configFile, loadRuntimeConfig, saveRuntimeConfig, resolveRuntimePaths, saveProfile } from "../../src/runtime/runtime-persistence";
 import { writeLocalHotMemory, readLocalHotMemory } from "../../src/runtime/local-hot-memory";
 import { inspectWorkspaceHooks } from "../../src/runtime/workspace-hooks";
 import { runOnlyBotsCodexHookCli } from "../../src/runtime/codex-hook";
@@ -17,6 +17,9 @@ import { renderRuntimeStartupContext } from "../../src/runtime/startup-context";
 import { LocalRuntimeClient } from "../../src/runtime/local-client";
 import * as hookRuntime from "../../src/runtime/hook-runtime";
 import { runOnlyBotsCtlCli } from "../../src/runtime/cli";
+import { memoryFromCli } from "../../src/runtime/cli/memory";
+import { getHotSyncManager, stopHotSyncManagers } from "../../src/runtime/hot-sync-manager";
+import { HostedOnlyBotsClient } from "../../src/runtime/hosted-client";
 
 const repo = path.resolve(__dirname, "../..");
 const cliFile = path.join(repo, "dist/runtime/cli.js"), daemonFile = path.join(repo, "dist/runtime/daemon.js");
@@ -114,28 +117,52 @@ it.each([["codex", runOnlyBotsCodexHookCli], ["claude-code", runOnlyBotsClaudeCo
   expect(existsSync(path.join(f.paths.state, "lifecycle-events.jsonl"))).toBe(false);
 });
 
-it("skips automatic subagent hooks while allowing parent and side-thread hooks", async () => {
+it("isolates marked child hooks during an active parent turn and keeps Codex fork hooks active", async () => {
   const f = fixture();
   await profile(f.home, "work");
   f.cli("quickstart", "--scope", "project", "--adapter", "both", "--profile", "work", "--source-excerpts", "on", "--no-start");
-  const ensure = vi.spyOn(hookRuntime, "ensureHookRuntime").mockRejectedValue(new Error("normal hook reached the daemon"));
+  const ensure = vi.spyOn(hookRuntime, "ensureHookRuntime").mockResolvedValue(undefined);
   const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  vi.spyOn(LocalRuntimeClient.prototype, "attachAdapter").mockResolvedValue({} as Awaited<ReturnType<LocalRuntimeClient["attachAdapter"]>>);
+  vi.spyOn(LocalRuntimeClient.prototype, "readHotMemory").mockResolvedValue({});
+  vi.spyOn(LocalRuntimeClient.prototype, "status").mockResolvedValue({ profile: { memoryMode: "assist" } } as Awaited<ReturnType<LocalRuntimeClient["status"]>>);
+  const emit = vi.spyOn(LocalRuntimeClient.prototype, "emitEvent").mockResolvedValue({ mode: "assist" } as Awaited<ReturnType<LocalRuntimeClient["emitEvent"]>>);
   const bindings = inspectWorkspaceHooks(f.home).bindings;
   expect(bindings.map(binding => binding.host).sort()).toEqual(["claude-code", "codex"]);
+
   for (const binding of bindings) {
     const hook = binding.host === "codex" ? runOnlyBotsCodexHookCli : runOnlyBotsClaudeCodeHookCli;
-    const invoke = (event: string, extra: Record<string, string>) => hook(
+    const invoke = (event: string, extra: Record<string, unknown> = {}) => hook(
       [event, "--home", f.home, "--binding", binding.id],
-      JSON.stringify({ cwd: f.project, session_id: "parent", turn_id: "turn", prompt: "Review the migration", ...extra })
+      JSON.stringify({ cwd: f.project, session_id: "parent", prompt: "Review migration.md", ...extra })
     );
+    await invoke("SessionStart", { source: "startup" });
+    await invoke("UserPromptSubmit", { agent_type: "reviewer" });
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "turn.started", sessionId: "parent" }));
+
+    const read = binding.host === "codex"
+      ? { tool_name: "exec_command", tool_input: { cmd: "cat migration.md", workdir: f.project }, tool_response: "Use the last imported row." }
+      : { tool_name: "Read", tool_input: { file_path: path.join(f.project, "migration.md") }, tool_response: { file: { content: "Use the last imported row." } } };
+    emit.mockClear();
     ensure.mockClear();
+    stdout.mockClear();
     for (const event of ["UserPromptSubmit", "PreCompact", "PostCompact", "Stop", "PostToolUse", "PostToolUseFailure"]) {
-      await expect(invoke(event, { agent_id: "child", agent_type: "reviewer" })).resolves.toBeUndefined();
+      await invoke(event, { ...read, agent_id: "child", agent_type: "reviewer" });
     }
     expect(ensure).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
     expect(stdout).not.toHaveBeenCalled();
-    await expect(invoke("SessionStart", { source: "fork" })).rejects.toThrow("normal hook reached the daemon");
-    await expect(invoke("UserPromptSubmit", { agent_type: "reviewer" })).rejects.toThrow("normal hook reached the daemon");
+
+    await invoke("PostToolUse", read);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.completed", sessionId: "parent" }));
+  }
+
+  const binding = bindings.find(binding => binding.host === "codex")!;
+  const args = ["--home", f.home, "--binding", binding.id];
+  const side = JSON.stringify({ cwd: f.project, session_id: "side", turn_id: "side-turn", source: "fork", prompt: "Explain the cursor" });
+  for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) await runOnlyBotsCodexHookCli([event, ...args], side);
+  for (const type of ["session.started", "turn.started", "turn.completed"]) {
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type, sessionId: "side" }));
   }
 });
 
@@ -155,6 +182,7 @@ it("searches hot memory only inside the explicitly selected workspace and profil
       checkpoint(otherWorkspaceId, "Migration cursor from another workspace"),
       checkpoint(null, "Migration cursor from unscoped memory"),
     ],
+    hotMemory: { continuityCheckpoints: [checkpoint(null, "Migration cursor from nested metadata")] },
   }), "codex", work);
   writeLocalHotMemory(f.paths.state, JSON.stringify({
     workspaceId: otherWorkspaceId,
@@ -170,6 +198,36 @@ it("searches hot memory only inside the explicitly selected workspace and profil
   expect(result.workspaceId).toBe(workspaceId);
   expect(result.results.map((entry: { text: string }) => entry.text)).toEqual(["Migration cursor uses the last imported row"]);
   expect(f.run("memory", "search", "migration cursor", "--workspace-root").stderr).toContain("requires a directory");
+  Object.assign(f.env, { CROSSHEAD_PROFILE: "work" });
+  for (const profileArgs of [[], ["--profile"], ["--profile="]]) {
+    expect(f.run("memory", "search", "migration cursor", "--workspace-root", f.second, ...profileArgs).stderr)
+      .toContain("requires an explicit --profile");
+  }
+});
+
+it("keeps hosted profiles isolated during local search and refuses legacy hosted fallback", async () => {
+  const f = fixture();
+  const identity = generateRuntimeIdentity();
+  const origin = "https://crosshead.invalid";
+  const workspaceId = `repo:${f.project}`;
+  for (const [profileName, summary] of [["work", "Migration cursor from the work profile"], ["other", "Migration cursor from another profile"]]) {
+    const local = await setupRuntimeProfile({ home: f.home, profileName, apiBase: "http://127.0.0.1:0", ...identity });
+    saveProfile(f.paths, { ...local, apiBase: origin });
+    const manager = getHotSyncManager({ stateDir: f.paths.state, origin, ...identity, profileName });
+    manager.capture("codex", {
+      id: randomUUID(), workspaceId, runtime: "codex", goal: "", summary, occurredAt: new Date().toISOString(),
+    });
+  }
+  await stopHotSyncManagers(f.paths.state);
+  Object.assign(f.env, { CROSSHEAD_HOT_SYNC_ENABLED: "true" });
+  const args = ["search", "migration cursor", "--workspace-root", f.project, "--profile", "work", "--json"];
+  const result = JSON.parse(f.cli("memory", ...args));
+  expect(result.results.map((entry: { text: string }) => entry.text)).toEqual(["Migration cursor from the work profile"]);
+
+  vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "false");
+  const hosted = vi.spyOn(HostedOnlyBotsClient.prototype, "readHotMemory").mockResolvedValue({});
+  await expect(memoryFromCli([...args, "--home", f.home])).rejects.toThrow("requires local hot sync");
+  expect(hosted).not.toHaveBeenCalled();
 });
 
 it("routes workspace link by the first positional after flags", async () => {

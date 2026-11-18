@@ -179,22 +179,23 @@ versions keep their old matcher until the next install.
 ## Subagent memory
 
 Crosshead skips automatic recall and capture for Codex and Claude Code hooks
-that identify a subagent. For an independent review, spawn with fresh history
-and give the agent the task, relevant files and applicable constraints. A
-full-history fork can inherit Crosshead context already in the parent's chat.
+that identify a subagent. For independent work, choose a fresh spawn in Codex
+or a named non-fork agent in Claude Code. Give the agent the task, relevant
+files and applicable constraints. A full-history fork can inherit Crosshead
+context already in the parent's chat.
 
-For a task that needs continuity, the parent can include a relevant checkpoint
-in the assignment or give that subagent a search to run. Pass the parent
-workspace's absolute root and the profile shown in its Crosshead attachment
-message, especially if the child uses a different worktree.
+For a task that needs continuity, the parent can pass a relevant checkpoint or
+delegate a search using the command from the Crosshead attachment. It specifies
+the attached runtime home, the parent workspace's absolute root and an explicit
+profile, so it works from a child worktree or a different shell environment.
 
 ```sh
-crosshead memory search "migration cursor" --workspace-root /path/to/project --profile work --top-k 3
+/path/to/runtime/bin/crosshead memory search "migration cursor" --workspace-root /path/to/project --profile work --home /path/to/runtime --top-k 3
 ```
 
-With `--workspace-root`, the command searches hot checkpoints for that
-workspace and profile and returns matching passages. The query stays in the
-CLI process. The parent can also run the search and pass along selected results.
+With `--workspace-root`, the command searches local hot checkpoints in the
+selected workspace and profile. Hosted profiles use local hot sync. During a
+rollback to legacy hosted memory, pass a saved checkpoint in the task brief.
 
 ## Verification
 

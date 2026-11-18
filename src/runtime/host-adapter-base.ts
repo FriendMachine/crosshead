@@ -392,8 +392,13 @@ export abstract class HostRuntimeAdapterBase {
     }) : "";
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
     if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
-      const search = `crosshead memory search "<query>" --workspace-root ${shellQuote(input.workspaceRoot)} --profile ${shellQuote(profileName)} --top-k 3`;
-      contextText += `\nUse fresh history for independent subagents. When a child needs Crosshead continuity, pass a relevant checkpoint in its brief or let it run ${search}.`;
+      const home = this.config.runtimeHome;
+      const cli = home ? path.join(home, "bin", "crosshead") : null;
+      contextText += "\nUse a fresh, non-forked subagent for independent work. When a child needs Crosshead continuity, pass a relevant checkpoint in its brief.";
+      if (home && cli && existsSync(cli)) {
+	const search = `${shellQuote(cli)} memory search "<query>" --workspace-root ${shellQuote(input.workspaceRoot)} --profile ${shellQuote(profileName)} --home ${shellQuote(home)} --top-k 3`;
+	contextText += ` You can also let it run ${search}.`;
+      }
     }
     return {
       packId,

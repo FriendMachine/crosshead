@@ -2,7 +2,8 @@ import { LocalRuntimeClient } from "../local-client";
 import { HOT_SCOPE_ALL } from "../../protocol/memory";
 import { searchHotCheckpoints } from "../hot-continuity";
 import { workspaceDirectoryPath } from "../workspace-identity";
-import { filterHotMemorySnapshotForWorkspace } from "../workspace-memory";
+import { isRuntimeProfileName } from "../runtime-env";
+import { workspaceHotCheckpointBodies } from "../workspace-memory";
 import { OnlyBotsLocalRuntimeDaemon, buildMemorySearchPresentation, formatHotMemoryForDisplay, formatMemorySearchPresentation, formatWarmMemoryEntryForDisplay, formatWarmMemoryEvaluation, parseArgs, summarizeRecentWarmMemoryOutcomes, truncateForPresentation } from "../local-runtime";
 
 export const memoryFromCli = async (argv: string[]): Promise<string> => {
@@ -137,10 +138,16 @@ export const memoryFromCli = async (argv: string[]): Promise<string> => {
 			if (typeof workspaceRoot !== "string" || !workspaceRoot.trim()) {
 				throw new Error("memory search --workspace-root requires a directory");
 			}
+			if (!isRuntimeProfileName(profileName)) {
+				throw new Error("memory search --workspace-root requires an explicit --profile <name>");
+			}
+			if (flags.home !== undefined && (typeof flags.home !== "string" || !flags.home.trim())) {
+				throw new Error("memory search --home requires a directory");
+			}
 			const workspaceId = `repo:${workspaceDirectoryPath(workspaceRoot)}`;
-			const hot = await daemon.readHotMemory(profileName, HOT_SCOPE_ALL);
-			const scopedHot = filterHotMemorySnapshotForWorkspace(hot, workspaceId, true);
-			const results = searchHotCheckpoints(scopedHot, query, topK || 10, workspaceId);
+			const hot = await daemon.readHotMemory(profileName, HOT_SCOPE_ALL, { allowHostedFallback: false });
+			const continuityCheckpoints = workspaceHotCheckpointBodies(hot, workspaceId);
+			const results = searchHotCheckpoints({ continuityCheckpoints }, query, topK || 10, workspaceId);
 			result = { scope: "local_hot_memory", workspaceId, query, count: results.length, results };
 		} else {
 			result = await daemon.searchMemory(

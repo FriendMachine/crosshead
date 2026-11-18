@@ -3365,7 +3365,9 @@ export class OnlyBotsLocalRuntimeDaemon {
 		throw new Error("Invalid hot-sync control action");
 	}
 
-	async readHotMemory(profileName?: string, scope?: string): Promise<Record<string, unknown>> {
+	async readHotMemory(
+		profileName?: string, scope?: string, { allowHostedFallback = true } = {}
+	): Promise<Record<string, unknown>> {
 		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({
 			profileName,
 		});
@@ -3376,6 +3378,9 @@ export class OnlyBotsLocalRuntimeDaemon {
 		if (profile && hotSyncEnabled()) {
 			const manager=getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:resolvedProfileName});
 			return manager.read(scope ?? "shared");
+		}
+		if (!allowHostedFallback) {
+			throw new Error("Workspace memory search requires local hot sync for hosted profiles. Pass a saved checkpoint in the task brief while hot sync is disabled.");
 		}
 		// Pass the scope through unchanged (undefined => the server's shared default), so internal
 		// legacy callers keep the single-doc shape. Handoff and operator flows request
