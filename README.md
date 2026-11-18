@@ -77,6 +77,28 @@ crosshead workspace profile clear --workspace-root ~/work/client
 Commands such as `crosshead memory hot` run in that tree use the same profile
 unless you pass `--profile` or set `CROSSHEAD_PROFILE`.
 
+To manage agents from the Crosshead console, link them to your account with one
+approval:
+
+```sh
+crosshead account link                 # this directory's profile
+crosshead account link --all-profiles  # every hosted profile on this machine
+```
+
+Each agent signs in with its own key and joins one request. Crosshead opens the
+approval page and also prints its address and a short code, which you can
+enter at `/account/link` if you sign up or sign in on another device. In the
+console you choose whether to add the agents to an organization and who pays
+for their work. Whoever approves the code becomes the owner of those agents,
+so approve only requests you just started and never share the code.
+
+One approval covers one service; profiles that use another service are listed
+with the command to link them separately. Agents and scripts should use
+`--no-wait --json`, which returns the code without blocking, then finish with
+`crosshead account link --resume <request-id>`. The command exits 0 when every
+agent was linked, 1 if the request was denied or expired, 2 if it is still
+waiting, and 3 if it was approved but some agents couldn't be linked or added.
+
 A bare `crosshead quickstart` in a terminal opens the setup wizard. Existing
 argument-based quickstart commands retain their legacy behavior; use an explicit
 `--scope` to select project, all-project, or manual setup from scripts.

@@ -138,7 +138,7 @@ const decodeNpub = (npub: string): Uint8Array => {
   return new Uint8Array(Buffer.from(decoded.data, "hex"));
 };
 
-const normalizeApiBase = (apiBase: string): { serviceBaseUrl: string; apiBaseUrl: string } => {
+export const normalizeApiBase = (apiBase: string): { serviceBaseUrl: string; apiBaseUrl: string } => {
   const parsed = new URL(apiBase);
   const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
   if (parsed.username || parsed.password || parsed.search || parsed.hash ||
@@ -229,6 +229,34 @@ type SignedMemoryEnvelope = {
   signedBy: string;
   createdAt: string;
   signature: string;
+};
+
+export type AccountLinkRequest = {
+  request_id: string;
+  user_code: string;
+  poll_secret: string;
+  verification_url: string;
+  verification_url_base: string;
+  expires_at: string;
+  interval_seconds: number;
+};
+
+export type AccountLinkAgentResult = {
+  npub: string;
+  agent_id: string | null;
+  linked: boolean;
+  organization: "attached" | "already_member" | "skipped" | "failed" | null;
+  funding_source: "agent" | "organization" | null;
+  error: string | null;
+};
+
+export type AccountLinkStatus = {
+  request_id: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  expires_at: string;
+  account: { display_name?: string | null; email?: string | null } | null;
+  organization: { id: string; name: string } | null;
+  agents: AccountLinkAgentResult[];
 };
 
 export class HostedOnlyBotsRequestError extends Error {
@@ -634,6 +662,38 @@ export class HostedOnlyBotsClient {
       body,
       auth: true,
       expectedStatuses: [200, 201],
+    });
+    return response.data;
+  }
+
+  /** Starts a console approval request that links this agent to a person's account. */
+  async createAccountLinkRequest(body: { client_label?: string; agent_id?: string; display_name?: string }): Promise<AccountLinkRequest> {
+    await this.ensureSession();
+    const response = await this.request<AccountLinkRequest>("/account-links", {
+      method: "POST",
+      body,
+      auth: true,
+      expectedStatuses: [201],
+    });
+    return response.data;
+  }
+
+  /** Adds this agent, proven by its own session, to a request another local profile started. */
+  async joinAccountLinkRequest(requestId: string, body: { poll_secret: string; agent_id?: string; display_name?: string }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>(`/account-links/${encodeURIComponent(requestId)}/agents`, {
+      method: "POST",
+      body,
+      auth: true,
+    });
+    return response.data;
+  }
+
+  /** Reads an account link request's decision. The poll secret is the credential. */
+  async getAccountLinkStatus(requestId: string, pollSecret: string): Promise<AccountLinkStatus> {
+    const response = await this.request<AccountLinkStatus>(`/account-links/${encodeURIComponent(requestId)}/status`, {
+      method: "POST",
+      body: { poll_secret: pollSecret },
     });
     return response.data;
   }
