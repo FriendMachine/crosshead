@@ -25,17 +25,19 @@ export const resolveWorkspaceHookDispatch = (
   const scoped = workspaceHookForInvocation(policy, host, flags.binding, directory(payload));
   if (scoped === null) return null;
   let legacyUnscoped = false;
-  if (selected) {
+  // A directory override can replace the selected binding's profile.
+  const effective = scoped?.binding ?? selected;
+  if (effective) {
     let profile: ReturnType<typeof loadProfile> = null;
-    try { profile = loadProfile(paths, selected.profile); } catch { /* Invalid profile also pauses the binding. */ }
-    if (!isRuntimeProfileForBinding(profile, selected.profile)) {
+    try { profile = loadProfile(paths, effective.profile); } catch { /* Invalid profile also pauses the binding. */ }
+    if (!isRuntimeProfileForBinding(profile, effective.profile)) {
       if (["sessionstart", "session_start", "userpromptsubmit", "user_prompt_submit"].includes(normalized)) {
-	console.error(`Crosshead profile ${selected.profile} is missing or invalid. Automatic memory is paused; run crosshead workspace check.`);
+	console.error(`Crosshead profile ${effective.profile} is missing or invalid. Automatic memory is paused; run crosshead workspace check.`);
       }
       return null;
     }
     if (profile.memoryMode === "off") return null;
-    legacyUnscoped = selected.legacyUnscoped === true && selected.legacyNpub === profile.npub;
+    legacyUnscoped = effective.legacyUnscoped === true && effective.legacyNpub === profile.npub;
   }
   return { paths, runtimeHome: paths.home, payload, scoped, legacyUnscoped, isPostToolUse, isToolFailure };
 };

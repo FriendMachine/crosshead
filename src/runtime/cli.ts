@@ -24,6 +24,13 @@ import { buildRuntimeBillingRemediation, formatRuntimeBillingRemediation } from 
 import { HostedOnlyBotsRequestError } from "./hosted-client";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
 import { resolveCrossheadProfile } from "./runtime-env";
+import { workspaceProfileForDirectory } from "./workspace-hooks";
+
+const homeFlag = (args: string[]): string | undefined => {
+	const index = args.findIndex((arg) => arg === "--home" || arg.startsWith("--home="));
+	if (index < 0) return undefined;
+	return args[index]!.startsWith("--home=") ? args[index]!.slice(7) : args[index + 1];
+};
 import { parseArgs } from "./adapter-utils";
 import { scopedQuickstartFromCli, uninstallWorkspaceHostFromCli, workspaceHooksFromCli } from "./cli/workspace";
 import { runOnlyBotsCodexHookCli } from "./codex-hook";
@@ -96,7 +103,11 @@ export const runOnlyBotsCtlCli = async (
 		"setup", "keygen", "status", "doctor", "memory", "messages", "billing", "public", "context",
 		"agent", "lineage", "passport", "workspace", "handoff", "sign-challenge", "sign-deletion-challenge", "organization", "quickstart", "onboard",
 	]);
-	const profile = resolveCrossheadProfile();
+	// Without an explicit or environment profile, use the directory's workspace
+	// override so manual commands read the same memory as that directory's hooks.
+	const setupCommands = new Set(["setup", "keygen", "workspace", "quickstart", "onboard"]);
+	const profile = resolveCrossheadProfile() ?? (command && !setupCommands.has(command)
+		? workspaceProfileForDirectory(homeFlag(rest), process.cwd()) ?? undefined : undefined);
 	if (profile && command && profileCommands.has(command) &&
 		!rest.some((arg) => arg === "--profile" || arg.startsWith("--profile="))) {
 		rest = [...rest, "--profile", profile];
@@ -317,6 +328,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead rollback [adapter] --to <version> [--home <path>] [--force]",
 				"crosshead doctor [--home <path>] [--workspace-root <path>] [--json]",
 				"crosshead workspace add --workspace-root <path> --adapter codex|claude-code|both --profile <name> [--source-excerpts on|off] [--replace-user-hooks] [--dry-run] [--json]",
+				"crosshead workspace profile set|clear [--workspace-root <path>] [--profile <name>] [--dry-run] [--json]  # this directory and below use another profile",
 				"crosshead workspace remove --workspace-root <path> [--adapter codex|claude-code|both] [--dry-run] [--json]",
 				"crosshead workspace repair [--dry-run] [--json] [--home <path>]",
 				"crosshead workspace list|check [--workspace-root <path>] [--json]",

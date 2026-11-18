@@ -65,6 +65,18 @@ crosshead workspace list
 crosshead workspace remove --workspace-root ../other-project
 ```
 
+To give a directory tree its own profile while keeping your scope, set a profile
+override. The nearest override above the session's directory wins, including
+inside nested Git repositories, and changes only Crosshead's own settings:
+
+```sh
+crosshead workspace profile set --workspace-root ~/work/client --profile client
+crosshead workspace profile clear --workspace-root ~/work/client
+```
+
+Commands such as `crosshead memory hot` run in that tree use the same profile
+unless you pass `--profile` or set `CROSSHEAD_PROFILE`.
+
 A bare `crosshead quickstart` in a terminal opens the setup wizard. Existing
 argument-based quickstart commands retain their legacy behavior; use an explicit
 `--scope` to select project, all-project, or manual setup from scripts.
