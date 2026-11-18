@@ -179,8 +179,11 @@ versions keep their old matcher until the next install.
 ## Subagent memory
 
 Crosshead skips automatic recall and capture for Codex and Claude Code hooks
-that identify a subagent. For independent work, choose a fresh spawn in Codex
-or a named non-fork agent in Claude Code. Give the agent the task, relevant
+that identify a subagent. Subagent isolation requires [Codex 0.134.0 or
+later](https://github.com/openai/codex/releases/tag/rust-v0.134.0). Earlier
+versions can report child activity with the same hook fields as the parent.
+For independent work, choose a fresh spawn in Codex or a named non-fork agent
+in Claude Code. Give the agent the task, relevant
 files and applicable constraints. A full-history fork can inherit Crosshead
 context already in the parent's chat. Crosshead handles Claude Code's manual
 compaction hooks. It skips automatic compaction and the compaction
