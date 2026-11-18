@@ -27,7 +27,10 @@ export type WorkspaceHookBinding = {
   legacyNpub?: string;
 };
 
-type HookPolicy = { version: 1; scope: HookScope; bindings: WorkspaceHookBinding[] };
+/** A directory whose hooks use another profile. The nearest enclosing override wins,
+ * including inside nested repositories, and applies to every binding that fires there. */
+export type WorkspaceProfileOverride = { root: string; profile: string };
+type HookPolicy = { version: 1; scope: HookScope; bindings: WorkspaceHookBinding[]; overrides?: WorkspaceProfileOverride[] };
 type Settings = Record<string, unknown>;
 type Edit = { file: string; root: string; before: string | null; after: string; executable?: boolean };
 const hosts: HookHost[] = ["codex", "claude-code"];
@@ -44,6 +47,9 @@ const isBinding = (value: unknown): value is WorkspaceHookBinding =>
   (value.legacyUnscoped === undefined || typeof value.legacyUnscoped === "boolean") &&
   (value.legacyBefore === undefined || (typeof value.legacyBefore === "string" && Number.isFinite(Date.parse(value.legacyBefore)))) &&
   (value.legacyNpub === undefined || typeof value.legacyNpub === "string");
+const isOverride = (value: unknown): value is WorkspaceProfileOverride =>
+  object(value) && Object.keys(value).length === 2 && typeof value.root === "string" && path.isAbsolute(value.root) &&
+  typeof value.profile === "string" && isRuntimeProfileName(value.profile);
 
 const readText = (file: string): string | null => {
   try { return readFileSync(file, "utf8"); }
@@ -63,10 +69,32 @@ export const readWorkspaceHookPolicy = (paths: RuntimePaths): HookPolicy | null 
   if (!object(data) || data.version !== 1 || !Array.isArray(data.bindings) || !data.bindings.every(isBinding) ||
       (data.scope !== "project" && data.scope !== "all" && data.scope !== "manual") ||
       (data.scope === "manual" && data.bindings.length > 0) ||
-      data.bindings.some((binding) => (binding.root === null) !== (data.scope === "all"))) {
+      data.bindings.some((binding) => (binding.root === null) !== (data.scope === "all")) ||
+      (data.overrides !== undefined && (!Array.isArray(data.overrides) || !data.overrides.every(isOverride) ||
+        new Set(data.overrides.map((entry) => entry.root)).size !== data.overrides.length))) {
     throw new Error(`Invalid Crosshead workspace hook settings in ${file}. Run crosshead workspace repair --home ${shellQuote(paths.home)} to preserve the damaged file and pause automatic hooks.`);
   }
-  return { version: 1, scope: data.scope, bindings: data.bindings };
+  const overrides = data.overrides as WorkspaceProfileOverride[] | undefined;
+  return { version: 1, scope: data.scope, bindings: data.bindings, ...(overrides?.length ? { overrides } : {}) };
+};
+
+const contains = (root: string, directory: string): boolean => {
+  const relative = path.relative(root, directory);
+  return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+};
+
+/** The nearest override enclosing a resolved directory, if any. */
+export const workspaceProfileOverrideFor = (
+  policy: Pick<HookPolicy, "overrides"> | null, directory: string
+): WorkspaceProfileOverride | null =>
+  (policy?.overrides ?? []).filter((entry) => contains(entry.root, directory))
+    .sort((a, b) => b.root.length - a.root.length)[0] ?? null;
+
+/** The override profile for a directory, for commands run without --profile. */
+export const workspaceProfileForDirectory = (home: string | undefined, directory: string): string | null => {
+  try {
+    return workspaceProfileOverrideFor(readWorkspaceHookPolicy(resolveRuntimePaths(home)), directoryPath(directory))?.profile ?? null;
+  } catch { return null; }
 };
 
 type InvocationLocation = { directory: string; repository: string | null };
@@ -92,7 +120,12 @@ export const workspaceHookForInvocation = (
   // Within plain directories, the closest explicit binding wins.
   if (binding.root && policy.bindings.some((other) =>
     other.host === host && other.root && other.root.length > binding.root!.length && appliesIn(other, resolved, repo))) return null;
-  return { binding, root: binding.root ?? repo ?? resolved };
+  const override = workspaceProfileOverrideFor(policy, resolved);
+  // Outside a repository, the override directory is the workspace, so its subdirectories share memory.
+  const root = binding.root ?? repo ?? override?.root ?? resolved;
+  if (!override || override.profile === binding.profile) return { binding, root };
+  const { legacyUnscoped: _unscoped, legacyBefore: _before, legacyNpub: _npub, ...rest } = binding;
+  return { binding: { ...rest, profile: override.profile }, root };
 };
 
 const hookFile = (binding: WorkspaceHookBinding): string =>
@@ -229,11 +262,16 @@ export const inspectWorkspaceHooks = (home?: string, directory?: string) => {
     if (resolved) location = { directory: resolved, repository: repositoryRoot(resolved) };
   }
   catch { workspaceError = `Workspace directory is unavailable: ${directory}`; }
-  const bindings = (workspaceError ? [] : policy?.bindings ?? []).filter((binding) => !resolved ||
-    workspaceHookForInvocation(policy, binding.host, binding.id, resolved, location) !== null);
+  const bindings = (workspaceError ? [] : policy?.bindings ?? []).flatMap((binding) => {
+    if (!resolved) return [binding];
+    const scoped = workspaceHookForInvocation(policy, binding.host, binding.id, resolved, location);
+    return scoped ? [scoped.binding] : [];
+  });
   return {
     scope: error ? "invalid" as const : policy?.scope ?? "legacy",
     error, workspaceError, workspace: resolved,
+    overrides: policy?.overrides ?? [],
+    override: resolved && !workspaceError ? workspaceProfileOverrideFor(policy, resolved) : null,
     bindings: bindings.map((binding) => {
       const file = hookFile(binding);
       let configured = false;
@@ -247,7 +285,7 @@ export const inspectWorkspaceHooks = (home?: string, directory?: string) => {
 	});
       } catch { /* Invalid or removed settings are reported as missing. */ }
       const observation = (source: "startup" | "resume") => {
-	const expectedRoot = binding.root ?? (resolved ? location!.repository ?? resolved : null);
+	const expectedRoot = binding.root ?? (resolved ? location!.repository ?? workspaceProfileOverrideFor(policy, resolved)?.root ?? resolved : null);
 	if (!expectedRoot) return null;
 	try {
 	  const receipt = JSON.parse(readText(receiptFile(paths, binding, expectedRoot, source)) ?? "null") as Settings | null;
@@ -285,6 +323,8 @@ type PlanOptions = {
   scope: HookScope;
   targets: WorkspaceHookTarget[];
   remove?: { directory: string; hosts: HookHost[] };
+  /** Set (profile) or clear (null) the override for one directory. */
+  override?: { directory: string; profile: string | null };
   removeHost?: HookHost;
   cleanup?: boolean;
   refresh?: boolean;
@@ -298,6 +338,20 @@ export const planWorkspaceHooks = (options: PlanOptions) => {
     version: 1, scope: options.scope,
     bindings: previous?.scope === options.scope ? [...previous.bindings] : [],
   };
+  const overrides = [...(previous?.overrides ?? [])];
+  if (options.override) {
+    const root = directoryPath(options.override.directory);
+    if (root === path.parse(root).root || root === realHome(homedir())) {
+      throw new Error("Choose a directory inside your home. To change the profile everywhere else, run crosshead quickstart --scope all --profile <name>.");
+    }
+    const profile = options.override.profile;
+    if (profile !== null && !isRuntimeProfileName(profile)) throw new Error(`Invalid profile name: ${profile}`);
+    const index = overrides.findIndex((entry) => entry.root === root);
+    if (index >= 0) overrides.splice(index, 1);
+    if (profile !== null) overrides.push({ root, profile });
+    overrides.sort((a, b) => a.root.localeCompare(b.root));
+  }
+  if (overrides.length) policy.overrides = overrides;
   if (options.removeHost) policy.bindings = policy.bindings.filter((binding) => binding.host !== options.removeHost);
   if (options.remove) {
     const root = existsSync(options.remove.directory) ? workspaceProjectRoot(options.remove.directory) : path.resolve(options.remove.directory);
@@ -469,6 +523,7 @@ export type WorkspaceHookPlan = ReturnType<typeof planWorkspaceHooks>;
 export const summarizeWorkspaceHookPlan = (plan: WorkspaceHookPlan) => ({
   scope: plan.policy.scope,
   bindings: plan.policy.bindings,
+  overrides: plan.policy.overrides ?? [],
   files: plan.edits.map((edit) => edit.file),
   replacesUserHooksIn: plan.retired,
 });
@@ -505,8 +560,8 @@ export const withWorkspaceSetupLock = async <T>(paths: RuntimePaths, operation: 
 };
 
 export const applyWorkspaceHookPlan = (plan: WorkspaceHookPlan): void => {
-  for (const binding of plan.policy.bindings) {
-    if (!loadProfile(plan.paths, binding.profile)) throw new Error(`Unknown profile: ${binding.profile}`);
+  for (const { profile } of [...plan.policy.bindings, ...(plan.policy.overrides ?? [])]) {
+    if (!loadProfile(plan.paths, profile)) throw new Error(`Unknown profile: ${profile}`);
   }
   assertWorkspacePlanCurrent(plan);
   const written: Edit[] = [];

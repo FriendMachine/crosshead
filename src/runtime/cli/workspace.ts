@@ -45,6 +45,7 @@ const profileSnapshot = (paths: ReturnType<typeof resolveRuntimePaths>, name: st
 const describePlan = (plan: ReturnType<typeof summarizeWorkspaceHookPlan>): string => [
   `Crosshead scope: ${plan.scope === "project" ? "selected projects" : plan.scope === "all" ? "all projects" : "manual commands only"}`,
   ...plan.bindings.map((binding) => `  ${binding.root ?? "Every directory"} · ${binding.host} · profile ${binding.profile} · source excerpts ${binding.sourceExcerpts ? "on" : "off"}`),
+  ...plan.overrides.map((entry) => `  ${entry.root} and below · profile ${entry.profile}`),
   ...plan.bindings.filter(binding => binding.legacyUnscoped).map(binding =>
     `  Retain earlier unscoped checkpoints for profile ${binding.profile} in ${binding.root ?? "the selected workspace"}`),
   ...(plan.replacesUserHooksIn.length ? ["Replaces earlier Crosshead hooks in", ...plan.replacesUserHooksIn.map((file) => `  ${file}`)] : []),
@@ -54,8 +55,11 @@ const describePlan = (plan: ReturnType<typeof summarizeWorkspaceHookPlan>): stri
 export const formatWorkspaceHookInspection = (inspection: ReturnType<typeof inspectWorkspaceHooks>): string => {
   if (inspection.error || inspection.workspaceError) return [inspection.error, inspection.workspaceError].filter(Boolean).join("\n");
   if (inspection.scope === "legacy") return "Crosshead uses the existing host setup. Run crosshead quickstart to choose a scope.";
-  if (inspection.bindings.length === 0) return "No automatic Crosshead hooks apply here.";
-  return inspection.bindings.map((binding) => {
+  const overrides = inspection.workspace
+    ? inspection.override ? [`Profile override: ${inspection.override.profile} from ${inspection.override.root}`] : []
+    : inspection.overrides.map((entry) => `Profile override: ${entry.root} and below · profile ${entry.profile}`);
+  if (inspection.bindings.length === 0) return [...overrides, "No automatic Crosshead hooks apply here."].join("\n");
+  return [...overrides, ...inspection.bindings.map((binding) => {
     const status = workspaceBindingStatus(binding, inspection.workspace);
     return [
       `${binding.host} · ${binding.root ?? "all projects"} · profile ${binding.profile} · ${status}`,
@@ -67,7 +71,30 @@ export const formatWorkspaceHookInspection = (inspection: ReturnType<typeof insp
 	  ? "  Open the project in Codex, review its hooks in /hooks, then open a fresh session."
 	  : "  Open a fresh Claude Code session in this project."] : []),
     ].join("\n");
-  }).join("\n");
+  })].join("\n");
+};
+
+const workspaceProfileFromCli = async (action: string | undefined, flags: Flags, directory: string): Promise<string> => {
+  if (action !== "set" && action !== "clear") throw new Error("Choose workspace profile set or clear");
+  const options = planOptions(flags);
+  const paths = resolveRuntimePaths(options.home);
+  const profile = action === "set" ? str(flags, "profile") ?? null : null;
+  if (action === "set" && (profile === null || !isRuntimeProfileName(profile) || !loadProfile(paths, profile))) {
+    throw new Error("Choose an existing --profile, or create one with crosshead keygen --setup --profile <name> --api-base <url> --no-default.");
+  }
+  const current = readWorkspaceHookPolicy(paths);
+  if (!current || current.scope === "manual") {
+    throw new Error("Profile overrides apply to automatic hooks. Run crosshead quickstart --scope all or --scope project first.");
+  }
+  const plan = () => planWorkspaceHooks({ ...options, scope: current.scope, targets: [], refresh: true, override: { directory, profile } });
+  const preview = summarizeWorkspaceHookPlan(plan());
+  if (enabled(flags, "dry-run")) return flags.json ? JSON.stringify({ applied: false, ...preview }, null, 2) : describePlan(preview);
+  await withWorkspaceSetupLock(paths, async () => {
+    if (readWorkspaceHookPolicy(paths)?.scope !== current.scope) throw new Error("Workspace scope changed. Run the command again.");
+    applyWorkspaceHookPlan(plan());
+  });
+  const inspection = inspectWorkspaceHooks(options.home, directory);
+  return flags.json ? JSON.stringify({ applied: true, ...inspection }, null, 2) : formatWorkspaceHookInspection(inspection);
 };
 
 export const workspaceHooksFromCli = async (argv: string[]): Promise<string> => {
@@ -83,7 +110,8 @@ export const workspaceHooksFromCli = async (argv: string[]): Promise<string> => 
     const inspection = inspectWorkspaceHooks(options.home, command === "check" ? directory : undefined);
     return flags.json ? JSON.stringify(inspection, null, 2) : formatWorkspaceHookInspection(inspection);
   }
-  if (command !== "add" && command !== "remove") throw new Error("Choose workspace add, remove, list, check, repair, or link");
+  if (command === "profile") return workspaceProfileFromCli(positionals[1], flags, directory);
+  if (command !== "add" && command !== "remove") throw new Error("Choose workspace add, remove, profile, list, check, repair, or link");
   const hosts = selectedHosts(str(flags, "adapter") ?? (command === "remove" ? "both" : ""));
   const paths = resolveRuntimePaths(options.home);
   const profile = str(flags, "profile") ?? loadRuntimeConfig(paths).defaultProfile;
