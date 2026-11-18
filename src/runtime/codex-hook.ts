@@ -19,6 +19,7 @@ import { compactContinuitySummary } from "./summary-compaction";
 import { captureHotFinding } from "./hot-continuity";
 import { claimSessionStartContext, releaseSessionStartContext } from "./hook-session-context";
 import { readLastAssistantMessage } from "./hook-transcript";
+import { recordTokenUsageHook, tokenUsagePhase } from "./token-usage";
 import { loadProfile, writeJsonFile } from "./runtime-persistence";
 import { recordWorkspaceHookStart, workspaceHookStateFile } from "./workspace-hooks";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -387,6 +388,9 @@ export const runOnlyBotsCodexHookCli = async (
     flags["allow-ephemeral-config"] === true ||
     flags["allow-ephemeral-config"] === "1" ||
     (process.env.CROSSHEAD_CODEX_ALLOW_EPHEMERAL_CONFIG ?? process.env.ONLYBOTS_CODEX_ALLOW_EPHEMERAL_CONFIG) === "1";
+  let profileName = scoped?.binding.profile;
+  let memoryOff = dispatch.memoryOff;
+  const usagePhase = tokenUsagePhase(normalizedEventName);
   if (!scoped && eventName !== "help") {
     let installedConfig: ReturnType<typeof loadCodexAdapterConfig> | null = null;
     try {
@@ -401,8 +405,10 @@ export const runOnlyBotsCodexHookCli = async (
       }
       return;
     }
-    if (loadProfile(paths, installedConfig.profileName)?.memoryMode === "off") return;
-    if (viaPlugin) {
+    profileName = installedConfig.profileName;
+    memoryOff = loadProfile(paths, profileName)?.memoryMode === "off";
+    if (memoryOff && !usagePhase) return;
+    if (viaPlugin && !memoryOff) {
       // Proof that Codex runs (so the user trusted) the plugin hooks; migration waits for it.
       try {
         recordPluginInvocation(runtimeHome, "codex", typeof flags["plugin-version"] === "string" ? flags["plugin-version"] : null, codexLoadedHome(resolveCodexHome(hostHome)));
@@ -425,6 +431,15 @@ export const runOnlyBotsCodexHookCli = async (
     });
     if (decision === "skip-duplicate") return;
   }
+  if (usagePhase && profileName) {
+    await recordTokenUsageHook({
+      phase: usagePhase,
+      paths, profileName, host: "codex", hostHome: resolveCodexHome(hostHome), workspace: workspaceId,
+      session: pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]),
+      file: pickString(payload, ["transcript_path", "transcriptPath", "conversation_path", "conversationPath"]),
+    });
+  }
+  if (memoryOff) return;
   const adapter = scoped
     ? CodexRuntimeAdapter.forWorkspace(runtimeHome, scoped.binding.hostHome, scoped.binding.profile, scoped.binding.sourceExcerpts, legacyUnscoped, scoped.binding.legacyBefore)
     : CodexRuntimeAdapter.fromInstalled({

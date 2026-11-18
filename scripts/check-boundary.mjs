@@ -6,7 +6,7 @@
 //   dependencies declared in package.json.
 // - No relative import leaves src/.
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { builtinModules, createRequire } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -14,7 +14,6 @@ const ts = require("typescript");
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 const declared = new Set(Object.keys(pkg.dependencies ?? {}));
-const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 
 const walk = (dir) =>
 	readdirSync(dir).flatMap((entry) => {
@@ -54,7 +53,7 @@ for (const file of walk(srcRoot)) {
 			}
 			continue;
 		}
-		if (builtins.has(specifier) || builtins.has(packageName(specifier))) continue;
+		if (isBuiltin(specifier)) continue;
 		if (area === "protocol") {
 			failures.push(`${rel}: protocol must not depend on package ${specifier}`);
 		} else if (!declared.has(packageName(specifier))) {
