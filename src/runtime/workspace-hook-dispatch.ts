@@ -1,6 +1,7 @@
 import { isRuntimeProfileForBinding } from "./runtime-profile-validation";
 import type { HookHost } from "./host-hook-spec";
 import { loadProfile, resolveRuntimePaths } from "./runtime-persistence";
+import { recordHostActivity } from "./runtime-idle-update";
 import { tokenUsagePhase } from "./token-usage";
 import { taskEvidenceCaptureEnabled } from "./task-evidence";
 import { readWorkspacePolicyForHook, workspaceHookForInvocation } from "./workspace-hooks";
@@ -15,6 +16,9 @@ export const resolveWorkspaceHookDispatch = (
   const normalized = event.toLowerCase();
   const isToolFailure = normalized === "posttoolusefailure" || normalized === "post_tool_use_failure";
   const isPostToolUse = isToolFailure || normalized === "posttooluse" || normalized === "post_tool_use";
+  // Every hook is evidence that a host is working, including the tool and
+  // subagent hooks skipped below. Automatic updates wait for quiet hosts.
+  recordHostActivity(resolveRuntimePaths(typeof flags.home === "string" ? flags.home : undefined));
   if (isPostToolUse && (flags["source-excerpts"] === "off" || (!flags.binding && !taskEvidenceCaptureEnabled()))) return null;
   const paths = resolveRuntimePaths(typeof flags.home === "string" ? flags.home : undefined);
   const policy = readWorkspacePolicyForHook(paths, normalized, flags.binding);

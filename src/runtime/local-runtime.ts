@@ -21,6 +21,7 @@ import os from "os";
 import path from "path";
 import { createHash, randomUUID } from "crypto";
 import { spawn } from "child_process";
+import { startIdleUpdateTimer } from "./runtime-idle-update";
 import { schnorr } from "@noble/curves/secp256k1";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import * as tar from "tar";
@@ -2281,6 +2282,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 	private startPromise: Promise<RuntimeDaemonState> | null = null;
 	private stopPromise: Promise<void> | null = null;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
+	private idleUpdateTimer: NodeJS.Timeout | null = null;
 	private readonly paths: RuntimePaths;
 	private readonly lifecycleManager: RuntimeLifecycleManager;
 	private readonly organizationalWorker: OrganizationalWorkerDaemonApi | null;
@@ -2401,11 +2403,14 @@ export class OnlyBotsLocalRuntimeDaemon {
 					void this.stop().catch(() => undefined);
 				}
 			}, 1_000);
+			this.idleUpdateTimer = startIdleUpdateTimer(this.paths, () => inspectInstalledRuntimeRelease(this.paths).cliScriptPath);
 			writeRuntimeLog(this.paths, "daemon.start", { port: boundPort, ownerId: ownership.ownerId });
 			return loadDaemonState(this.paths);
 		} catch (error) {
 			if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 			this.heartbeatTimer = null;
+			if (this.idleUpdateTimer) clearInterval(this.idleUpdateTimer);
+			this.idleUpdateTimer = null;
 			const failures = await this.quiesceRuntime(server);
 			this.server = null;
 			try {
@@ -2445,6 +2450,8 @@ export class OnlyBotsLocalRuntimeDaemon {
 		if (!ownership) return;
 		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 		this.heartbeatTimer = null;
+		if (this.idleUpdateTimer) clearInterval(this.idleUpdateTimer);
+		this.idleUpdateTimer = null;
 		const failures = await this.quiesceRuntime(this.server);
 		this.server = null;
 		try {

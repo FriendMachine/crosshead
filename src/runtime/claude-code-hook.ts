@@ -193,6 +193,27 @@ const selectHookTurnState = (state: HookState, sessionId: string | null, turnId:
   return state;
 };
 
+/** Claude Code payloads name the session but not the turn. Sessions share a
+ * state file, so the file's latest turn may belong to another session: resolve
+ * the turn inside the payload's own session, newest first. */
+export const ownSessionTurnId = (state: HookState, payloadSessionId: string | null): string | null => {
+  if (!payloadSessionId) return state.turnId ?? null;
+  const own = Object.values(state.activeTurns)
+    .filter((turn) => turn.sessionId === payloadSessionId && turn.turnId)
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+    .at(-1);
+  // SessionStart replaces the top-level session but keeps the previous turn,
+  // so the top-level turn is not proof that this session started it.
+  return own?.turnId ?? null;
+};
+
+/** Never finish, compact or clear a turn that another session started. */
+export const ownSessionTurnState = (state: HookState, payloadSessionId: string | null, selected: HookTurnState): HookTurnState =>
+  payloadSessionId && selected.sessionId && selected.sessionId !== payloadSessionId
+    ? { sessionId: payloadSessionId, turnId: null, prompt: null, packId: null, lastContextReadAt: null,
+        workspaceRoot: state.workspaceRoot, workspaceId: state.workspaceId, updatedAt: selected.updatedAt }
+    : selected;
+
 const saveHookTurnState = (stateFile: string, state: HookState, turn: HookTurnState): void => {
   const activeTurns = { ...state.activeTurns };
   const key = hookTurnKey(turn.sessionId, turn.turnId);
@@ -515,15 +536,11 @@ export const runOnlyBotsClaudeCodeHookCli = async (
 	}
 
 	if (normalizedEventName === "precompact" || normalizedEventName === "pre_compact") {
-		const requestedSessionId =
-			pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
-			state.sessionId ??
-			null;
+		const payloadSessionId = pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]);
+		const requestedSessionId = payloadSessionId ?? state.sessionId ?? null;
 		const requestedTurnId =
-			pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ??
-			state.turnId ??
-			null;
-		const turnState = selectHookTurnState(state, requestedSessionId, requestedTurnId);
+		  pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ?? ownSessionTurnId(state, payloadSessionId);
+		const turnState = ownSessionTurnState(state, payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
 		const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
 		const turnId = turnState.turnId ?? requestedTurnId ?? null;
     const turnWorkspaceRoot = turnState.workspaceRoot;
@@ -558,15 +575,11 @@ export const runOnlyBotsClaudeCodeHookCli = async (
 
 	if (normalizedEventName === "postcompact" || normalizedEventName === "post_compact") {
 		releaseSessionStartContext(runtimeHome, "claude-code", workspaceId);
-		const requestedSessionId =
-			pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
-			state.sessionId ??
-			null;
+		const payloadSessionId = pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]);
+		const requestedSessionId = payloadSessionId ?? state.sessionId ?? null;
 		const requestedTurnId =
-			pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ??
-			state.turnId ??
-			null;
-		const turnState = selectHookTurnState(state, requestedSessionId, requestedTurnId);
+		  pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ?? ownSessionTurnId(state, payloadSessionId);
+		const turnState = ownSessionTurnState(state, payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
 		const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
 		const turnId = turnState.turnId ?? requestedTurnId ?? null;
     const turnWorkspaceRoot = turnState.workspaceRoot;
@@ -659,15 +672,11 @@ export const runOnlyBotsClaudeCodeHookCli = async (
   }
 
   if (normalizedEventName === "stop") {
-    const requestedSessionId =
-      pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
-      state.sessionId ??
-      null;
+    const payloadSessionId = pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]);
+    const requestedSessionId = payloadSessionId ?? state.sessionId ?? null;
     const requestedTurnId =
-      pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ??
-      state.turnId ??
-      null;
-    const turnState = selectHookTurnState(state, requestedSessionId, requestedTurnId);
+      pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ?? ownSessionTurnId(state, payloadSessionId);
+    const turnState = ownSessionTurnState(state, payloadSessionId, selectHookTurnState(state, requestedSessionId, requestedTurnId));
     const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
     const turnId = turnState.turnId ?? requestedTurnId ?? buildSyntheticTurnId();
     const turnWorkspaceRoot = turnState.workspaceRoot;

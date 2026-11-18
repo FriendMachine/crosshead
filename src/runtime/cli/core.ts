@@ -2,7 +2,7 @@ import { OnlyBotsLocalRuntimeDaemon, RuntimeAdapterName, RuntimeChannel, Runtime
 import path from "path";
 import { RUNTIME_ADAPTER_NAMES, ensureRuntimeHomeLayout, loadAdapterRecord, loadRuntimeConfig, resolveRuntimeHome } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
-import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, withRuntimeUpdateLock } from "../runtime-auto-update";
+import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, maintainRuntimeWhenIdle, runtimeUpdatePolicy, withRuntimeUpdateLock } from "../runtime-auto-update";
 import { DEFAULT_CHECKOUT_CREDIT_UNITS } from "../billing-remediation";
 import { inspectHostHookRegistrations } from "../host-hook-doctor";
 import { inspectWorkspaceHooks, workspaceBindingStatus } from "../workspace-hooks";
@@ -53,6 +53,7 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
 	const home = typeof flags.home === "string" ? flags.home : undefined;
 	if (flags["check-on-launch"]) return maintainRuntimeBeforeLaunch(home, Number(flags["host-pid"]));
+	if (flags["check-idle"]) return maintainRuntimeWhenIdle(home);
 	if (flags.manual || flags.pin || flags.auto || flags.policy) {
 		if (flags.auto && (flags.manual || flags.pin)) throw new Error("Choose --auto or --manual");
 		const mode = flags.manual || flags.pin ? "manual" : flags.auto ? "auto" : undefined;

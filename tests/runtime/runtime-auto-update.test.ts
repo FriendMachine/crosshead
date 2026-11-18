@@ -1,8 +1,9 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
-import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
+import { assertNoLiveRuntimeHosts, maintainRuntimeBeforeLaunch, maintainRuntimeWhenIdle, runtimeUpdatePolicy, nativeHostProcessesRunning } from "../../src/runtime/runtime-auto-update";
+import { AUTO_UPDATE_IDLE_MS, AUTO_UPDATE_TURN_MAX_MS, hostHooksRunning, hostTurnInProgress, idleUpdateCheckDue, lastHostActivityMs, recordHostActivity, startIdleUpdateTimer } from "../../src/runtime/runtime-idle-update";
 import { rollbackFromCli, updateFromCli } from "../../src/runtime/cli/core";
 import { fetchRuntimeReleaseArtifact, inspectInstalledRuntimeRelease, isAllowedRuntimeReleaseUrl, parseWrapperScriptTarget, resolveReleaseUpdateBaseUrl, updateManagedRuntimeRelease, runRuntimeInstallCommand } from "../../src/runtime/local-runtime";
 import { shellQuote } from "../../src/runtime/adapter-utils";
@@ -22,7 +23,7 @@ const setup = () => {
 		update: vi.fn(async () => ({ releaseId: "new" }) as any),
 		verify: vi.fn(async () => {}),
 		alive: (pid: number) => pid === 2001,
-		nativeHostsRunning: vi.fn(() => true),
+		hooksRunning: vi.fn(() => true),
 		now: () => Date.now(),
 	};
 	return { home, p, deps };
@@ -41,7 +42,7 @@ const autoSetup = () => {
 	writeFileSync(path.join(fixture.p.bin, "onlybotsd"), `#!/bin/sh\nnode '${path.join(runtime, "daemon.js")}' "$@"\n`);
 	fixture.deps.inspect.mockResolvedValue({ installed: oldRelease, available: newRelease, sha256: newDigest });
 	fixture.deps.update.mockResolvedValue({ releaseId: newRelease } as any);
-	fixture.deps.nativeHostsRunning.mockReturnValue(false);
+	fixture.deps.hooksRunning.mockReturnValue(false);
 	return fixture;
 };
 
@@ -196,7 +197,7 @@ describe("published runtime automatic updates", () => {
 		expect(deps.update).toHaveBeenCalledExactlyOnceWith(home, expect.objectContaining({
 			trustedSha256: newDigest, timeoutMs: 45_000, expectedReleaseId: newRelease, beforeApply: expect.any(Function),
 		}));
-		deps.nativeHostsRunning.mockReturnValue(true);
+		deps.hooksRunning.mockReturnValue(true);
 		expect(deps.update.mock.calls[0]![1].beforeApply).toThrow("A host became active");
 	});
 	it("blocks release, catalog and rollback changes while a managed host is live", async () => {
@@ -234,44 +235,173 @@ describe("published runtime automatic updates", () => {
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.update).toHaveBeenCalledOnce();
 	});
-	it.each(["codex", "claude-code"])("defers while %s has an active hooked turn", async host => {
+	it.each(["codex", "claude-code"])("defers while %s hook state changed in the last ten minutes, even from a release without the activity marker", async host => {
 		const { home, p, deps } = autoSetup();
 		writeJsonFile(path.join(p.state, `${host}-hook.json`), { activeTurns: { active: { turnId: "t" } } });
-		deps.nativeHostsRunning.mockReturnValue(true);
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).not.toHaveBeenCalled();
+		deps.now = () => Date.now() + AUTO_UPDATE_IDLE_MS + 1000;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
 	});
-	it("defers for a live idle host, but removes dead process leases", async () => {
+	it("updates while another host is open but idle, keeping its lease and removing dead ones", async () => {
 		const { home, p, deps } = autoSetup();
 		const leases = path.join(p.state, "host-processes"); mkdirSync(leases);
 		writeJsonFile(path.join(leases, "2001.json"), { pid: 2001 });
-		await maintainRuntimeBeforeLaunch(home, 2000, deps);
-		expect(deps.inspect).not.toHaveBeenCalled();
-		deps.alive = () => false;
-		await maintainRuntimeBeforeLaunch(home, 2000, deps);
-		expect(deps.inspect).toHaveBeenCalledOnce();
-		expect(deps.update).toHaveBeenCalledOnce();
+		writeJsonFile(path.join(leases, "2002.json"), { pid: 2002 });
+		recordHostActivity(p, Date.now() - AUTO_UPDATE_IDLE_MS - 1000);
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+		expect(existsSync(path.join(leases, "2001.json"))).toBe(true);
+		expect(existsSync(path.join(leases, "2002.json"))).toBe(false);
 	});
-	it("reports an update after an interrupted host exits without deleting its saved hook state", async () => {
+	it("waits until ten minutes after the last hook activity", async () => {
+		const { home, p, deps } = autoSetup();
+		const base = Date.now();
+		recordHostActivity(p, base);
+		deps.now = () => base + AUTO_UPDATE_IDLE_MS - 1;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toBe("");
+		expect(deps.inspect).not.toHaveBeenCalled();
+		expect(existsSync(path.join(p.state, "release-update.json"))).toBe(false);
+		deps.now = () => base + AUTO_UPDATE_IDLE_MS;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+	});
+	it("records a deferral without throttling the retry when a turn starts during the check", async () => {
+		const { home, p, deps } = autoSetup();
+		deps.inspect.mockImplementation(async () => { recordHostActivity(p); return { installed: oldRelease, available: newRelease, sha256: newDigest }; });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred until hosts have been idle for 10 minutes");
+		const state = JSON.parse(readFileSync(path.join(p.state, "release-update.json"), "utf8"));
+		expect(state).toMatchObject({ status: "deferred", available: newRelease });
+		expect(state.checkedAtMs).toBeUndefined();
+		deps.now = () => Date.now() + AUTO_UPDATE_IDLE_MS + 1000;
+		deps.inspect.mockResolvedValue({ installed: oldRelease, available: newRelease, sha256: newDigest });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+	});
+	it("runs the same idle install for the daemon's detached updater and logs the outcome", async () => {
+		const { home, p, deps } = autoSetup();
+		expect(await maintainRuntimeWhenIdle(home, deps)).toContain("automatically updated");
+		expect(deps.hooksRunning).toHaveBeenCalledWith(process.pid);
+		expect(JSON.parse(readFileSync(path.join(p.state, "release-update.json"), "utf8"))).toMatchObject({ status: "updated", installed: newRelease, previous: oldRelease });
+		expect(readFileSync(path.join(p.logs, "crossheadd.log"), "utf8")).toContain("update.auto");
+	});
+	it("lets the daemon spawn one updater only when a check is due and hosts are idle", async () => {
+		const { home, p } = autoSetup();
+		const now = Date.now();
+		expect(idleUpdateCheckDue(p, now)).toBe(true);
+		recordHostActivity(p, now);
+		expect(idleUpdateCheckDue(p, now + AUTO_UPDATE_IDLE_MS - 1)).toBe(false);
+		expect(idleUpdateCheckDue(p, now + AUTO_UPDATE_IDLE_MS)).toBe(true);
+		expect(lastHostActivityMs(p)).toBe(now);
+		writeJsonFile(path.join(p.state, "release-update.json"), { checkedAtMs: now + AUTO_UPDATE_IDLE_MS, status: "current" });
+		expect(idleUpdateCheckDue(p, now + AUTO_UPDATE_IDLE_MS + 1)).toBe(false);
+		rmSync(path.join(p.state, "release-update.json"));
+		runtimeUpdatePolicy(home, "manual");
+		expect(idleUpdateCheckDue(p, now + AUTO_UPDATE_IDLE_MS)).toBe(false);
+		runtimeUpdatePolicy(home, "auto");
+		recordHostActivity(p, 1);
+		const launch = vi.fn(() => process.pid);
+		const timer = startIdleUpdateTimer(p, () => "/runtime/cli.js", 5, 60_000, launch);
+		try {
+			await vi.waitFor(() => expect(launch).toHaveBeenCalledWith("/runtime/cli.js"));
+			await new Promise(resolve => setTimeout(resolve, 40));
+			expect(launch).toHaveBeenCalledOnce(); // The first updater is still alive.
+		} finally { clearInterval(timer); }
+		// An updater that exits without recording a check is not restarted on every poll.
+		const dead = vi.fn(() => 2 ** 30);
+		const bounded = startIdleUpdateTimer(p, () => "/runtime/cli.js", 5, 60_000, dead);
+		try {
+			await vi.waitFor(() => expect(dead).toHaveBeenCalled());
+			await new Promise(resolve => setTimeout(resolve, 40));
+			expect(dead).toHaveBeenCalledOnce();
+		} finally { clearInterval(bounded); }
+	});
+	it("treats a prompt without a Stop as a turn in progress until it ages out", async () => {
+		const { home, p, deps } = autoSetup();
+		const started = Date.now();
+		writeJsonFile(path.join(p.state, "claude-code-hook.json"), { activeTurns: { t: { turnId: "t", updatedAt: new Date(started).toISOString() } } });
+		// Quiet for well over ten minutes, but the turn never stopped.
+		deps.now = () => started + AUTO_UPDATE_TURN_MAX_MS - 1000;
+		expect(hostTurnInProgress(p, deps.now())).toBe(true);
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toBe("");
+		expect(deps.inspect).not.toHaveBeenCalled();
+		expect(idleUpdateCheckDue(p, deps.now())).toBe(false);
+		// A cancelled turn never gets Stop; its marker must not block forever.
+		deps.now = () => started + AUTO_UPDATE_TURN_MAX_MS;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+	});
+	it("sees turns saved under workspace bindings, counts only a session's newest marker, and ignores compaction markers", () => {
+		const { p } = autoSetup();
+		const now = Date.now();
+		const iso = (ago: number) => new Date(now - ago).toISOString();
+		const scoped = path.join(p.state, "workspace-hooks", "binding-1");
+		mkdirSync(scoped, { recursive: true });
+		const state = path.join(scoped, `${"a".repeat(64)}.json`);
+		writeJsonFile(state, { activeTurns: { "s:t": { sessionId: "s", turnId: "t", updatedAt: iso(60_000) } } });
+		expect(hostTurnInProgress(p, now)).toBe(true);
+		expect(idleUpdateCheckDue(p, now + AUTO_UPDATE_IDLE_MS)).toBe(false);
+		// Receipts beside the state file are not turn state.
+		writeJsonFile(state, { activeTurns: {} });
+		writeJsonFile(path.join(scoped, `${"a".repeat(64)}-startup.json`), { activeTurns: { x: { sessionId: "x", turnId: "x", updatedAt: iso(0) } } });
+		expect(hostTurnInProgress(p, now)).toBe(false);
+		// A compaction between turns writes a marker with no turn ID that Stop never clears.
+		writeJsonFile(state, { activeTurns: { "s:-": { sessionId: "s", turnId: null, updatedAt: iso(0) } } });
+		expect(hostTurnInProgress(p, now)).toBe(false);
+		// Cancelled turns leave old markers; only the session's newest one is judged.
+		writeJsonFile(state, { activeTurns: {
+			"s:old": { sessionId: "s", turnId: "old", updatedAt: iso(AUTO_UPDATE_TURN_MAX_MS + 1000) },
+			"s:older": { sessionId: "s", turnId: "older", updatedAt: iso(AUTO_UPDATE_TURN_MAX_MS * 2) },
+		} });
+		expect(hostTurnInProgress(p, now)).toBe(false);
+	});
+	it("updates ten minutes after Stop clears the turn", async () => {
+		const { home, p, deps } = autoSetup();
+		const file = path.join(p.state, "codex-hook.json");
+		writeJsonFile(file, { activeTurns: { t: { turnId: "t", updatedAt: new Date().toISOString() } } });
+		writeJsonFile(file, { activeTurns: {} });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toBe("");
+		deps.now = () => Date.now() + AUTO_UPDATE_IDLE_MS + 1000;
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
+	});
+	it("never restarts a daemon that runs the organizational worker", async () => {
+		const { home, p, deps } = autoSetup();
+		writeJsonFile(path.join(p.state, "daemon.json"), { status: "running", organizationalWorkerConfigPath: "/etc/worker.json" });
+		expect(idleUpdateCheckDue(p, Date.now())).toBe(false);
+		expect(await maintainRuntimeWhenIdle(home, deps)).toBe("");
+		expect(deps.inspect).not.toHaveBeenCalled();
+	});
+	it("records a deferral, not a failure, when a host becomes active as files are about to change", async () => {
+		const { home, p, deps } = autoSetup();
+		deps.update.mockImplementation(async (_home: string, options: any) => { recordHostActivity(p); options.beforeApply(); return { releaseId: newRelease } as any; });
+		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred because a host became active");
+		const state = JSON.parse(readFileSync(path.join(p.state, "release-update.json"), "utf8"));
+		expect(state.status).toBe("deferred");
+		expect(state.checkedAtMs).toBeUndefined();
+	});
+	it("treats only running Crosshead hook processes as activity, and fails closed", () => {
+		const prefix = `2000 node /home/u/.crosshead/lib/runtime/r/dist/runtime/cli.js host-hook codex Stop\n`;
+		expect(hostHooksRunning(2000, () => prefix + "2002 claude\n2003 codex app-server\n2004 node /r/dist/runtime/cli.js update --check-idle")).toBe(false);
+		expect(hostHooksRunning(1, () => prefix)).toBe(true);
+		expect(hostHooksRunning(1, () => "2002 node /r/dist/runtime/claude-code-hook.js Stop")).toBe(true);
+		expect(hostHooksRunning(1, () => "2002 node /r/dist/runtime/native-host-hook.js --host hermes")).toBe(true);
+		expect(hostHooksRunning(1, () => { throw new Error("ps unavailable"); })).toBe(true);
+	});
+	it("updates despite a stale active-turn marker without deleting saved hook state", async () => {
 		const { home, p, deps } = autoSetup();
 		const file = path.join(p.state, "codex-hook.json");
 		writeJsonFile(file, { activeTurns: { interrupted: { turnId: "old" } } });
 		const before = readFileSync(file, "utf8");
-		deps.nativeHostsRunning.mockReturnValue(false);
+		deps.now = () => Date.now() + AUTO_UPDATE_IDLE_MS + 1000;
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("automatically updated");
 		expect(readFileSync(file, "utf8")).toBe(before);
 	});
 	it("waits for queued writes even when the interrupted host has exited", async () => {
 		const { home, p, deps } = autoSetup();
 		writeJsonFile(path.join(p.state, "queue.json"), { items: [{}] });
-		deps.nativeHostsRunning.mockReturnValue(false);
+		deps.hooksRunning.mockReturnValue(false);
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.update).not.toHaveBeenCalled();
 	});
-	it("rechecks legacy host liveness after inspecting the release", async () => {
-		const { home, p, deps } = autoSetup();
-		writeJsonFile(path.join(p.state, "codex-hook.json"), { activeTurns: { old: {} } });
-		deps.nativeHostsRunning.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
+	it("rechecks running hooks after inspecting the release", async () => {
+		const { home, deps } = autoSetup();
+		deps.hooksRunning.mockReturnValueOnce(false).mockReturnValue(true);
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
 		expect(deps.update).not.toHaveBeenCalled();
 	});
@@ -319,9 +449,9 @@ describe("published runtime automatic updates", () => {
 		expect(deps.verify).not.toHaveBeenCalled();
 		expect(deps.update).not.toHaveBeenCalled();
 	});
-	it("defers when a native host starts during signature verification without hook state", async () => {
+	it("defers when a hook starts during signature verification", async () => {
 		const { home, deps } = autoSetup();
-		deps.nativeHostsRunning.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
+		deps.hooksRunning.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
 		expect(deps.verify).toHaveBeenCalledOnce();
 		expect(deps.update).not.toHaveBeenCalled();
@@ -332,9 +462,9 @@ describe("published runtime automatic updates", () => {
 		expect(await maintainRuntimeBeforeLaunch(home, 2000, deps)).toContain("deferred");
 		expect(deps.update).not.toHaveBeenCalled();
 	});
-	it("defers automatic installs while a different native host is running even without a lease", async () => {
+	it("defers automatic installs while a hook process is running", async () => {
 		const { home, deps } = autoSetup();
-		deps.nativeHostsRunning.mockReturnValue(true);
+		deps.hooksRunning.mockReturnValue(true);
 		await maintainRuntimeBeforeLaunch(home, 2000, deps);
 		expect(deps.inspect).not.toHaveBeenCalled();
 	});

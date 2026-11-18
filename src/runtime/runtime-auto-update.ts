@@ -1,7 +1,8 @@
 import { existsSync, openSync, closeSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
-import { ensureRuntimeHomeLayout, writeJsonFile, sanitizeLogValue } from "./runtime-persistence";
+import { ensureRuntimeHomeLayout, writeJsonFile, sanitizeLogValue, writeRuntimeLog } from "./runtime-persistence";
+import { AUTO_UPDATE_CHECK_INTERVAL_MS, AUTO_UPDATE_FAILED_RETRY_MS, AUTO_UPDATE_IDLE_MS, daemonRunsOrganizationalWorker, hostHooksRunning, hostsIdle } from "./runtime-idle-update";
 import { inspectInstalledRuntimeRelease, inspectPublishedRuntimeRelease, updateManagedRuntimeRelease } from "./local-runtime";
 import { verifyGitHubReleaseAttestation } from "./release-attestation";
 import semver from "semver";
@@ -47,19 +48,6 @@ export const nativeHostProcessesRunning = (launcherPid: number, processTable = (
 			return /(^|[\s/])(?:codex|claude)(?:[\s./]|$)|\/@(?:openai\/codex|anthropic-ai\/claude-code)\/|\/dist\/runtime\/(?:codex|claude-code)-hook\.js(?:\s|$)/i.test(fields[2]);
 		});
 	} catch { return true; } // Unknown liveness must defer, never force an update.
-};
-
-export const runtimeHasActiveWork = (home: string, hostRunning = () => true): boolean => {
-	const paths = ensureRuntimeHomeLayout(home);
-	const queueFile = path.join(paths.state, "queue.json");
-	if (existsSync(queueFile) && (read(queueFile).items ?? []).length > 0) return true;
-	for (const host of ["codex", "claude-code"]) {
-		const file = path.join(paths.state, `${host}-hook.json`);
-		if (!existsSync(file)) continue;
-		const state = read(file);
-		if (Object.keys(state.activeTurns ?? {}).length || state.turnId) return hostRunning();
-	}
-	return false;
 };
 
 /** Call while holding the update lock, before changing files used by a host. */
@@ -113,72 +101,112 @@ export const withRuntimeUpdateLock = async <T>(home: string | undefined, action:
 	finally { closeSync(fd); rmSync(lock, { force: true }); }
 };
 
-/** A launcher holds its PID for its entire host lifetime (the shell uses exec).
- * Concurrent launchers serialize maintenance, and an existing live host prevents
- * automatic replacement even while it is idle between prompts. */
-export const maintainRuntimeBeforeLaunch = async (home: string | undefined, hostPid: number, deps = {
+type IdleUpdateDeps = {
+	inspect: typeof inspectPublishedRuntimeRelease;
+	update: typeof updateManagedRuntimeRelease;
+	verify: typeof verifyGitHubReleaseAttestation;
+	alive: (pid: number) => boolean;
+	hooksRunning: (excludePid: number) => boolean;
+	now: () => number;
+};
+const idleUpdateDeps = (): IdleUpdateDeps => ({
 	inspect: inspectPublishedRuntimeRelease,
 	update: updateManagedRuntimeRelease,
 	verify: verifyGitHubReleaseAttestation,
 	alive,
-	nativeHostsRunning: nativeHostProcessesRunning,
+	hooksRunning: hostHooksRunning,
 	now: () => Date.now(),
-}): Promise<string> => {
+});
+
+class HostBecameActive extends Error {}
+
+/** Installs a newer attested release once every host has been quiet for
+ * AUTO_UPDATE_IDLE_MS and no turn is in progress. Sessions that are open but
+ * idle do not block it. Every
+ * outcome that reached the network is recorded in release-update.json. Call
+ * while holding the update lock. */
+const installWhenIdle = async (paths: ReturnType<typeof ensureRuntimeHomeLayout>, excludePid: number, deps: IdleUpdateDeps): Promise<string> => {
+	const policy = runtimeUpdatePolicy(paths.home);
+	const installed = inspectInstalledRuntimeRelease(paths).releaseId;
+	if (policy.mode === "manual" || (process.env.CROSSHEAD_AUTO_UPDATE ?? process.env.ONLYBOTS_AUTO_UPDATE) === "0") return "";
+	if (daemonRunsOrganizationalWorker(paths)) return "";
+	if (!installed) return "Crosshead automatic update skipped: this install does not identify a managed release. Repair it with crosshead update --sha256 <trusted-digest>.";
+	const queued = (): boolean => {
+		const queueFile = path.join(paths.state, "queue.json");
+		return existsSync(queueFile) && (read(queueFile).items ?? []).length > 0;
+	};
+	const busy = (): boolean => queued() || !hostsIdle(paths, deps.now()) || deps.hooksRunning(excludePid);
+	if (busy()) return "";
+	const stateFile = path.join(paths.state, "release-update.json");
+	const state = existsSync(stateFile) ? read(stateFile) : {};
+	if (deps.now() - (state.checkedAtMs ?? 0) < (state.status === "failed" ? AUTO_UPDATE_FAILED_RETRY_MS : AUTO_UPDATE_CHECK_INTERVAL_MS)) return "";
+	try {
+		const release = await deps.inspect(paths.home);
+		if (release.available === installed) {
+			writeJsonFile(stateFile, { checkedAtMs: deps.now(), ...release, status: "current" });
+			return "";
+		}
+		const candidate = release.available.match(RELEASE_ID);
+		const current = installed.match(RELEASE_ID);
+		if (!candidate || !current || !semver.valid(candidate[1]) || !semver.valid(current[1]) ||
+			!semver.gt(candidate[1], current[1]) || !/^[a-f0-9]{64}$/.test(release.sha256) ||
+			candidate[2] !== release.sha256.slice(0, 12)) {
+			throw new Error("Published release metadata is invalid or is not newer than the installed release");
+		}
+		// Deferrals are not throttled: the next idle window retries the install.
+		const deferred = (stage: string): string => {
+			writeJsonFile(stateFile, { ...state, installed, available: release.available, status: "deferred", deferredAtMs: deps.now() });
+			return `Crosshead ${stage} available; deferred until hosts have been idle for ${AUTO_UPDATE_IDLE_MS / 60_000} minutes.`;
+		};
+		// Check again after network I/O for turns that started meanwhile.
+		if (busy()) return deferred("update");
+		await deps.verify(candidate[1], release.sha256);
+		if (busy()) return deferred("verified update");
+		const updated = await deps.update(paths.home, {
+			trustedSha256: release.sha256, timeoutMs: 45_000, expectedReleaseId: release.available,
+			beforeApply: () => {
+				if (busy()) throw new HostBecameActive("A host became active during the update");
+			},
+		});
+		if (updated.releaseId !== release.available) throw new Error("Installed release did not match the verified release");
+		writeJsonFile(stateFile, { checkedAtMs: deps.now(), installed: release.available, available: release.available, previous: installed, status: "updated" });
+		return `Crosshead automatically updated to ${candidate[1]} (signed release verified).`;
+	} catch (error) {
+		if (error instanceof HostBecameActive) {
+			writeJsonFile(stateFile, { ...state, installed, status: "deferred", deferredAtMs: deps.now() });
+			return "Crosshead verified update available; deferred because a host became active during the install.";
+		}
+		const message = sanitizeLogValue(error instanceof Error ? error.message : String(error));
+		writeJsonFile(stateFile, { checkedAtMs: deps.now(), status: "failed", error: message });
+		return `Crosshead automatic update failed: ${message}. Check with crosshead doctor; retry with crosshead update --sha256 <trusted-digest>.`;
+	}
+};
+
+/** A launcher holds its PID for its entire host lifetime (the shell uses exec).
+ * Concurrent launchers serialize maintenance. The lease only guards manual
+ * updates; an automatic update needs quiet hosts, not closed ones. */
+export const maintainRuntimeBeforeLaunch = async (home: string | undefined, hostPid: number, deps: IdleUpdateDeps = idleUpdateDeps()): Promise<string> => {
 	if (!Number.isInteger(hostPid) || hostPid <= 1) throw new Error("A valid launcher PID is required");
 	const paths = ensureRuntimeHomeLayout(home);
 	const leases = path.join(paths.state, "host-processes");
 	mkdirSync(leases, { recursive: true, mode: 0o700 });
 	return withRuntimeUpdateLock(paths.home, async () => {
-	try {
-		let activeHost = false;
-		for (const file of readdirSync(leases)) {
-			if (!/^\d+\.json$/.test(file)) continue;
-			const pid = Number(file.slice(0, -5));
-			if (!deps.alive(pid)) rmSync(path.join(leases, file));
-			else if (pid !== hostPid) activeHost = true;
-		}
-		const policy = runtimeUpdatePolicy(paths.home);
-		const installed = inspectInstalledRuntimeRelease(paths).releaseId;
-		if (policy.mode === "manual" || (process.env.CROSSHEAD_AUTO_UPDATE ?? process.env.ONLYBOTS_AUTO_UPDATE) === "0") return "";
-		if (!installed) return "Crosshead automatic update skipped: this install does not identify a managed release. Repair it with crosshead update --sha256 <trusted-digest>.";
-		const hasActiveWork = () => runtimeHasActiveWork(paths.home, () => deps.nativeHostsRunning(hostPid));
-		if (activeHost || deps.nativeHostsRunning(hostPid) || hasActiveWork()) return "";
-		const stateFile = path.join(paths.state, "release-update.json");
-		const state = existsSync(stateFile) ? read(stateFile) : {};
-		if (deps.now() - (state.checkedAtMs ?? 0) < (state.status === "failed" ? 30 * 60 * 1000 : 60 * 60 * 1000)) return "";
 		try {
-			const release = await deps.inspect(paths.home);
-			if (release.available === installed) {
-				writeJsonFile(stateFile, { checkedAtMs: deps.now(), ...release, status: "current" });
-				return "";
+			for (const file of readdirSync(leases)) {
+				if (!/^\d+\.json$/.test(file)) continue;
+				if (!deps.alive(Number(file.slice(0, -5)))) rmSync(path.join(leases, file));
 			}
-			const candidate = release.available.match(RELEASE_ID);
-			const current = installed.match(RELEASE_ID);
-			if (!candidate || !current || !semver.valid(candidate[1]) || !semver.valid(current[1]) ||
-				!semver.gt(candidate[1], current[1]) || !/^[a-f0-9]{64}$/.test(release.sha256) ||
-				candidate[2] !== release.sha256.slice(0, 12)) {
-				throw new Error("Published release metadata is invalid or is not newer than the installed release");
-			}
-			// Check again after network I/O for hooks started outside the launcher.
-			if (deps.nativeHostsRunning(hostPid) || hasActiveWork()) return "Crosshead update available; deferred while another host is active.";
-			await deps.verify(candidate[1], release.sha256);
-			if (deps.nativeHostsRunning(hostPid) || hasActiveWork()) return "Crosshead verified update available; deferred while another host is active.";
-			const updated = await deps.update(paths.home, {
-				trustedSha256: release.sha256, timeoutMs: 45_000, expectedReleaseId: release.available,
-				beforeApply: () => {
-					if (deps.nativeHostsRunning(hostPid) || hasActiveWork()) throw new Error("A host became active during the update; retry after it exits");
-				},
-			});
-			if (updated.releaseId !== release.available) throw new Error("Installed release did not match the verified release");
-			writeJsonFile(stateFile, { checkedAtMs: deps.now(), installed: release.available, available: release.available, status: "updated" });
-			return `Crosshead automatically updated to ${candidate[1]} (signed release verified).`;
-		} catch (error) {
-			const message = sanitizeLogValue(error instanceof Error ? error.message : String(error));
-			writeJsonFile(stateFile, { checkedAtMs: deps.now(), status: "failed", error: message });
-			return `Crosshead automatic update failed: ${message}. Check with crosshead doctor; retry with crosshead update --sha256 <trusted-digest>.`;
+			return await installWhenIdle(paths, hostPid, deps);
+		} finally {
+			writeJsonFile(path.join(leases, `${hostPid}.json`), { pid: hostPid, startedAt: new Date().toISOString() });
 		}
-	} finally {
-		writeJsonFile(path.join(leases, `${hostPid}.json`), { pid: hostPid, startedAt: new Date().toISOString() });
-	}
 	}, deps.alive);
+};
+
+/** Entry point for the daemon's detached updater (`update --check-idle`). */
+export const maintainRuntimeWhenIdle = async (home: string | undefined, deps: IdleUpdateDeps = idleUpdateDeps()): Promise<string> => {
+	const paths = ensureRuntimeHomeLayout(home);
+	const result = await withRuntimeUpdateLock(paths.home, () => installWhenIdle(paths, process.pid, deps), deps.alive);
+	if (result) writeRuntimeLog(paths, "update.auto", { result });
+	return result;
 };

@@ -3,6 +3,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -209,6 +210,11 @@ export const writeManagedFile = (
   const target = path.resolve(filePath);
 
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  let replacedMode: number | null = null;
+  try {
+    const existing = lstatSync(target);
+    if (existing.isFile()) replacedMode = existing.mode & 0o777;
+  } catch { /* New file. */ }
   const staged = `${target}.${process.pid}.${randomUUID()}.tmp`;
   let descriptor: number | null = null;
   try {
@@ -218,10 +224,14 @@ export const writeManagedFile = (
       0o600
     );
     writeFileSync(descriptor, content, "utf8");
+    // Replacing an executable wrapper must not leave it briefly unrunnable:
+    // a host hook may exec it while an automatic update rewrites it.
+    const executable = replacedMode !== null && (replacedMode & 0o111) !== 0;
+    if (executable) fchmodSync(descriptor, replacedMode!);
     closeSync(descriptor);
     descriptor = null;
     renameSync(staged, target);
-    chmodSync(target, 0o600);
+    if (!executable) chmodSync(target, 0o600);
   } finally {
     if (descriptor !== null) closeSync(descriptor);
     rmSync(staged, { force: true });

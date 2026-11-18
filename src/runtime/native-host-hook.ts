@@ -1,6 +1,8 @@
 import path from "path";
 import { parseArgs } from "./adapter-utils";
 import { ensureHookRuntime } from "./hook-runtime";
+import { recordHostActivity } from "./runtime-idle-update";
+import { resolveRuntimePaths } from "./runtime-persistence";
 import { LocalRuntimeClient } from "./local-client";
 import { loadNativeHostConfig, NativeHostRuntimeAdapter, type NativeHost, type NativeHostConfig } from "./native-host-adapter";
 
@@ -11,6 +13,7 @@ export const dispatchNativeHostEvent = async (config: NativeHostConfig, event: N
   if (!input || typeof input.workspaceRoot !== "string" || !path.isAbsolute(input.workspaceRoot) ||
     !input.sessionId || typeof input.sessionId !== "string" || input.sessionId.length > 512 ||
     !input.turnId || typeof input.turnId !== "string" || input.turnId.length > 512 || typeof input.prompt !== "string") throw new Error("Invalid host event");
+  recordHostActivity(resolveRuntimePaths(config.runtimeHome));
   await ensureHookRuntime(config.runtimeHome);
   const status = await new LocalRuntimeClient({ home: config.runtimeHome, timeoutMs: 5_000 }).status(config.profileName);
   if (event === "prepare" && status.profile?.memoryMode === "off") return { ok: true, contextText: "", packId: null };
