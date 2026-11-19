@@ -2012,10 +2012,15 @@ export class RuntimeLifecycleManager {
 						// runtime and workspace), so repeats and new capsules never pile up large records.
 						const lastTurnId=last && typeof last.turnId === "string" ? last.turnId : null;
 						const sameImport=lastTurnId?.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) ? (Array.isArray(current.continuityCheckpoints)?current.continuityCheckpoints:[]).map(asRecord).filter(c=>c && typeof c.turnId === "string" && c.turnId.startsWith(IMPORTED_HANDOFF_TURN_PREFIX) && typeof c.id === "string" && c.id !== event.eventId).map(c=>String(c!.id)) : [];
-						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn,...sameImport])];
-						if(last && repeatsPrior) {
+						// Copies that older clients saved for the same turn are hidden when reading;
+						// retire them with this capture so they stop holding retention slots.
+						const supersededIds=[...new Set([...(Array.isArray(event.payload.supersedes) ? event.payload.supersedes.filter((v):v is string=>typeof v === "string") : []),...sameTurn,...sameImport,...manager.hiddenDuplicateIds(event.runtime,event.workspaceId ?? "")])];
+						// Events that add no checkpoint leave the list unchanged and record nothing.
+						const changed=Boolean(last) && hot.continuityCheckpoints !== current.continuityCheckpoints;
+						const carriesLinks=Array.isArray(event.payload.supersedes) || Array.isArray(event.payload.conflictsWith);
+						if(changed && repeatsPrior && !carriesLinks) {
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"skipped",mode:profile.memoryMode,reason:"This turn's checkpoint is already saved",queueItemId:null,details:{type:event.type,storage:"local",duplicateOf:sameTurn}}));
-						} else if(last && hot.continuityCheckpoints !== current.continuityCheckpoints) {
+						} else if(last && changed) {
 						manager.capture(scope,{id:event.eventId,runtime:event.runtime,workspaceId:event.workspaceId ?? "",occurredAt:event.occurredAt,goal:String(last.goal ?? ""),summary:String(last.summary ?? ""),sessionId:event.sessionId,turnId:typeof last.turnId === "string" ? last.turnId : event.turnId,...(last.origin === "remember" ? {origin:"remember" as const} : {}),...(supersededIds.length ? {supersedes:supersededIds} : {}),...(Array.isArray(event.payload.conflictsWith) ? {conflictsWith:event.payload.conflictsWith.filter((v):v is string=>typeof v === "string")} : {}),...(last.evidence ? {evidence:last.evidence} : {})});
 							actions.push(this.recordAction({eventId:event.eventId,profileName,type:"hot_write",status:"completed",mode:profile.memoryMode,reason:"Saved hot memory on this machine; cloud sync pending",queueItemId:null,details:{type:event.type,storage:"local"}}));
 						}

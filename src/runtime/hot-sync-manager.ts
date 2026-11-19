@@ -139,6 +139,16 @@ export class HotSyncManager {
 		for (const source of new Set([runtime, "codex", "claude-code", "pi", "omp", "hermes", "opencode"]))
 			this.active.add(workspaceHotScope(source, workspace)!);
 	}
+	/** Ids of visible-candidate records that the per-turn collapse hides in this workspace scope. */
+	hiddenDuplicateIds(runtime: string, raw: string): string[] {
+		const scope = workspaceHotScope(runtime, this.workspace(raw))!;
+		if (!this.replicas.has(scope)) return [];
+		const document = this.replica(scope).inspect().local.document;
+		const superseded = hotSyncSupersededIds(document), disputed = hotSyncConflictIds(document);
+		const candidates = document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id));
+		const kept = new Set(latestPerTurn(candidates).map(c => c.id));
+		return candidates.filter(c => !kept.has(c.id)).map(c => c.id);
+	}
 	readWorkspace(runtime: string, raw: string): Record<string, unknown> { this.activate(runtime, raw); return this.read(workspaceHotScope(runtime, this.workspace(raw))!); }
 	read(scope = "all", inspect = false): Record<string, unknown> {
 		const entries = (scope === "all" ? [...this.replicas.entries()] : [[scope, this.replica(scope)] as const]).flatMap(([name, replica]) => {

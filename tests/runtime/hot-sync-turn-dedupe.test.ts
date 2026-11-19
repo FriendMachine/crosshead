@@ -103,6 +103,45 @@ describe("one synced checkpoint per turn", () => {
 		expect(shown.filter(c => c.origin !== "remember")).toHaveLength(1);
 	});
 
+	it("records nothing for events that add no checkpoint", async () => {
+		const h = harness("claude-code");
+		await h.adapter.prepareTurn(input);
+		await h.adapter.completeTurn({ ...input, packId: null, goal: input.prompt, summary: finding });
+		const response = await h.lifecycle.handleEvent({ eventId: "tool-1", runtime: "claude-code", type: "tool.completed", workspaceId: "repo:/fixture-project", sessionId: "session", turnId: "turn-1",
+			payload: { toolName: "Bash", summary: "ran ls" } });
+		expect((response.actions ?? []).filter(a => a.type === "hot_write")).toEqual([]);
+		expect(h.sync.status().pendingCount).toBe(1);
+	});
+
+	it("keeps the completed finding when session end reports only a stop reason", async () => {
+		const h = harness("claude-code");
+		await h.adapter.prepareTurn(input);
+		await h.adapter.completeTurn({ ...input, packId: null, goal: input.prompt, summary: finding });
+		await h.adapter.sessionEnded({ ...input, packId: null, goal: input.prompt, summary: "end_turn", taskSucceeded: true });
+		expect(visible(h.sync).filter(c => c.turnId === "turn-1").map(c => c.summary)).toEqual([expect.stringContaining(finding)]);
+	});
+
+	it("still saves a repeat that carries conflict links", async () => {
+		const h = harness("codex");
+		await h.adapter.prepareTurn(input);
+		await h.adapter.completeTurn({ ...input, packId: null, goal: input.prompt, summary: finding });
+		await h.lifecycle.handleEvent({ eventId: "linked", runtime: "codex", type: "session.ended", workspaceId: "repo:/fixture-project", sessionId: "session", turnId: "turn-1",
+			payload: { goal: input.prompt, summary: finding, conflictsWith: ["other-record"] } });
+		expect(h.sync.status().pendingCount).toBe(2);
+	});
+
+	it("retires copies saved by older clients at the next capture", async () => {
+		const h = harness("claude-code");
+		const base = { runtime: "claude-code", workspaceId: "repo:/fixture-project", goal: input.prompt, sessionId: "old-session", turnId: "old-turn", summary: "old finding" };
+		h.sync.capture("", { ...base, id: "old-1", occurredAt: "2026-11-18T10:00:00.000Z" });
+		h.sync.capture("", { ...base, id: "old-2", occurredAt: "2026-11-18T10:00:00.020Z" });
+		expect(h.sync.hiddenDuplicateIds("claude-code", "repo:/fixture-project")).toEqual(["old-1"]);
+		await h.adapter.prepareTurn(input);
+		await h.adapter.completeTurn({ ...input, packId: null, goal: input.prompt, summary: finding });
+		expect(h.sync.hiddenDuplicateIds("claude-code", "repo:/fixture-project")).toEqual([]);
+		expect(visible(h.sync).map(c => c.turnId).sort()).toEqual(["old-turn", "turn-1"]);
+	});
+
 	it("collapses duplicates already saved by older clients when reading, but keeps them for inspection", () => {
 		const h = harness("claude-code");
 		const base = { runtime: "claude-code", workspaceId: "repo:/fixture-project", goal: input.prompt, sessionId: "session", turnId: "old-turn" };
