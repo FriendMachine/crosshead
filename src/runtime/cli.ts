@@ -110,7 +110,8 @@ export const runOnlyBotsCtlCli = async (
 	const setupCommands = new Set(["setup", "keygen", "workspace", "quickstart", "onboard"]);
 	const memoryArgs = command === "memory" ? parseArgs(rest) : null;
 	const delegatedSearch = memoryArgs?.positionals[0] === "search-workspace";
-	const profile = delegatedSearch ? undefined : resolveCrossheadProfile() ?? (command && !setupCommands.has(command)
+	const allUsageProfiles = command === "usage" && parseArgs(rest).flags["all-profiles"] === true;
+	const profile = delegatedSearch || allUsageProfiles ? undefined : resolveCrossheadProfile() ?? (command && !setupCommands.has(command)
 		? workspaceProfileForDirectory(homeFlag(rest), process.cwd()) ?? undefined : undefined);
 	if (profile && command && profileCommands.has(command) &&
 		!rest.some((arg) => arg === "--profile" || arg.startsWith("--profile="))) {
