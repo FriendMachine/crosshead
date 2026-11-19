@@ -342,15 +342,37 @@ total.
 
 The counter stores token counts and attribution metadata in the runtime's
 private `state/usage/` directory. Workspace, session, and response identifiers
-are hashed. The counter keeps no transcript text and sends nothing over the
-network. It works with Crosshead memory mode off, provided the host's hooks
+are hashed. The local counter keeps no transcript text. Uploading totals requires the separate
+console sync opt-in below. It works with Crosshead memory mode off, provided the host's hooks
 are still installed. Turning counting off preserves the usage already recorded.
 Re-enabling starts counting with a new connected turn.
 
 Totals cover token records available to the installed Claude Code and Codex
 hooks. Runs without hooks, interrupted turns without a completion callback, and
-usage the host omits can be missing. Reports measure tokens and do not estimate
+usage the host omits can be missing. Local reports measure tokens and do not estimate
 your bill.
+
+### See usage in the console
+
+Link the profile to your Crosshead account, enable local counting, then opt in to console sync.
+
+```sh
+crosshead account link --profile work
+crosshead usage on --profile work
+crosshead usage sync on --profile work
+crosshead usage sync now --profile work
+```
+
+Open **Usage** from the account menu to see token totals and estimated API cost over time. The
+runtime syncs changes every five minutes while the daemon is running. Sync shares up to 30 UTC
+days of counts by harness and model, including any counts already collected locally in that period.
+Prompt text, file paths, and session identifiers stay on your machine. Pricing is based on standard
+published API rates for the reported models and can differ from what you pay through a subscription
+or a provider account.
+
+Use `crosshead usage sync status` to check the selected profile or add `--all-profiles` to check
+every profile. Use `crosshead usage sync off --profile work` to stop future uploads. Previously
+synced days remain visible until they fall outside the 30-day report.
 
 ## Repository layout
 

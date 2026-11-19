@@ -4,22 +4,31 @@ import { isRuntimeProfileName } from "../runtime-env";
 import { inspectWorkspaceHooks } from "../workspace-hooks";
 import { isRuntimeProfileForBinding } from "../runtime-profile-validation";
 import { loadProfile, loadRuntimeConfig, resolveRuntimePaths } from "../runtime-persistence";
-import { readUsage, setUsageEnabled, type UsageTotals } from "../token-usage";
+import { readUsage, setUsageEnabled, setUsageSync, usageSyncStatus, type UsageTotals } from "../token-usage";
+
+import { canSyncTokenUsage, syncTokenUsage } from "../token-usage-sync";
 
 const usageHelp = "crosshead usage [on|off] [--profile <name>] [--home <path>] [--json]\n" +
-	"crosshead usage --all-profiles [--home <path>] [--json]";
+	"crosshead usage --all-profiles [--home <path>] [--json]\n" +
+	"crosshead usage sync <on|off|status|now> [--profile <name> | --all-profiles] [--home <path>] [--json]\n" +
+	"Sync on shares up to 30 days of recorded usage totals with the linked console account.";
 
 const formatTotals = (totals: UsageTotals): string =>
 	`${totals.totalTokens.toLocaleString("en-US")} tokens (${totals.inputTokens.toLocaleString("en-US")} input, ${totals.outputTokens.toLocaleString("en-US")} output)`;
 
 export const usageFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
-	const [action] = positionals;
-	if (action === "help" || flags.help === true) return usageHelp;
-	if (positionals.length > 1 || (action && action !== "on" && action !== "off")) throw new Error(usageHelp);
+	const [action, syncAction = "status"] = positionals;
+	if (action === "help" || flags.help === true || (action === "sync" && syncAction === "help")) return usageHelp;
+	if (action === "sync") {
+		if (positionals.length > 2 || !["on", "off", "status", "now"].includes(syncAction)) throw new Error(usageHelp);
+	} else if (positionals.length > 1 || (action && action !== "on" && action !== "off")) {
+		throw new Error(usageHelp);
+	}
 	if (flags.profile === true || flags.home === true) throw new Error(usageHelp);
 	const allProfiles = flags["all-profiles"] === true;
-	if (allProfiles && action) throw new Error("Choose one profile when changing token counting.");
+	if (allProfiles && flags.profile) throw new Error("Choose --profile or --all-profiles.");
+	if (allProfiles && action && action !== "sync") throw new Error("Choose one profile when changing token counting.");
 
 	const paths = resolveRuntimePaths(typeof flags.home === "string" ? flags.home : undefined);
 	const explicit = typeof flags.profile === "string" ? flags.profile : null;
@@ -45,6 +54,37 @@ export const usageFromCli = async (argv: string[]): Promise<string> => {
 		if (!allProfiles) throw new Error(`Unknown or invalid Crosshead profile: ${name}`);
 		return [];
 	});
+
+	if (action === "sync") {
+		const results = [];
+		const errors: string[] = [];
+		for (const profile of profiles) {
+			try {
+				const available = canSyncTokenUsage(profile);
+				if (syncAction === "on" && available) await setUsageSync(paths, profile, true);
+				if (syncAction === "off") await setUsageSync(paths, profile, false);
+				const status = await usageSyncStatus(paths, profile);
+				if (syncAction === "now" && status.enabled && available) await syncTokenUsage(paths, profile, true);
+				const current = syncAction === "now" ? await usageSyncStatus(paths, profile) : status;
+				results.push({ profile: profile.name, available, ...current });
+			} catch (error) {
+				errors.push(profile.name + ": " + (error instanceof Error ? error.message : String(error)));
+			}
+		}
+		if (errors.length) throw new Error(errors.join("\n"));
+		if (flags.json) return JSON.stringify({ profiles: results }, null, 2);
+		if (!results.length) return "No Crosshead profiles configured.";
+		const lines = results.map(result => {
+			const status = !result.available ? "unavailable for a local-only profile" : result.enabled ? "on" : "off";
+			const last = result.lastSyncedAt ? " · last synced " + result.lastSyncedAt : "";
+			return result.profile + " · console usage sync " + status + last;
+		});
+		if (syncAction === "on" && results.some(result => result.enabled)) {
+			lines.push("Sync shares up to 30 days of daily totals. Open Usage in the linked console account.");
+			lines.push("Use crosshead usage sync now with the same profile selection to upload immediately.");
+		}
+		return lines.join("\n");
+	}
 
 	if (action) {
 		const profile = profiles[0]!;

@@ -1,3 +1,4 @@
+import type { UsageSnapshot } from "../protocol/token-usage";
 import type { HotSyncSnapshot, HotSyncEnvelope } from "../protocol/hot-sync";
 import { hotSyncEtag, HOT_SYNC_PROTOCOL_VERSION } from "../protocol/hot-sync";
 import { RECALL_TIMEOUT_MS } from "./continuity-recall";
@@ -496,6 +497,7 @@ export class HostedOnlyBotsClient {
       useServiceBase?: boolean;
       headers?: Record<string, string>;
       timeoutMs?: number;
+      signal?: AbortSignal;
     } = {}
   ): Promise<{ status: number; data: T }> {
     const url = `${options.useServiceBase ? this.serviceBaseUrl : this.apiBaseUrl}${path}`;
@@ -514,12 +516,13 @@ export class HostedOnlyBotsClient {
     }
     Object.assign(headers, options.headers ?? {});
 
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
     const response = await fetch(url, {
       method: options.method ?? "GET",
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       redirect: "error",
-      signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
+      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
     });
     const data = response.status === 304 ? undefined as T : await readBoundedJson<T>(response);
     const expected = options.expectedStatuses ?? [200];
@@ -536,6 +539,12 @@ export class HostedOnlyBotsClient {
     return { status: response.status, data };
   }
 
+  async putTokenUsage(snapshot: UsageSnapshot, signal?: AbortSignal): Promise<{ stored: boolean }> {
+    return (await this.request<{ stored: boolean }>("/usage/snapshot", {
+      method: "PUT", auth: true, timeoutMs: 5000, body: snapshot, signal,
+    })).data;
+  }
+
   async ping(): Promise<boolean> {
     try {
       const response = await fetch(`${this.serviceBaseUrl}/health`, {
@@ -549,10 +558,11 @@ export class HostedOnlyBotsClient {
     }
   }
 
-  async authenticate(): Promise<HostedSession> {
+  async authenticate(signal?: AbortSignal): Promise<HostedSession> {
     const challenge = await this.request<{ challenge: string; expires_at: string }>("/auth/challenge", {
       method: "POST",
       body: { npub: this.config.npub },
+      signal,
     });
     const challengeBytes = decodeAuthChallenge({
       challenge: challenge.data.challenge,
@@ -565,6 +575,7 @@ export class HostedOnlyBotsClient {
     );
     const verify = await this.request<{ session_token: string; expires_at: string; scopes: string[] }>("/auth/verify", {
       method: "POST",
+      signal,
       body: {
         npub: this.config.npub,
         challenge: challenge.data.challenge,
@@ -580,7 +591,7 @@ export class HostedOnlyBotsClient {
     return session;
   }
 
-  async ensureSession(): Promise<HostedSession> {
+  async ensureSession(signal?: AbortSignal): Promise<HostedSession> {
     const current = this.config.session;
     if (current) {
       const expiry = new Date(current.expiresAt);
@@ -588,7 +599,7 @@ export class HostedOnlyBotsClient {
         return current;
       }
     }
-    return this.authenticate();
+    return this.authenticate(signal);
   }
 
   async prepareContextPack(body: HostedContextPackRequest, idempotencyKey?: string): Promise<Record<string, unknown>> {

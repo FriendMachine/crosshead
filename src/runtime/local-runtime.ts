@@ -1,3 +1,4 @@
+import { startTokenUsageSync } from "./token-usage-sync";
 import { parsePrivateMemoryErasureChallenge, signPrivateMemoryErasureChallenge } from "./erasure-proof";
 import { getHotSyncManager, hotSyncEnabled, stopHotSyncManagers } from "./hot-sync-manager";
 import { shellQuote, writeManagedFile } from "./adapter-utils";
@@ -2324,6 +2325,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 	private stopPromise: Promise<void> | null = null;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private idleUpdateTimer: NodeJS.Timeout | null = null;
+	private stopUsageSync: (() => Promise<void>) | null = null;
 	private readonly paths: RuntimePaths;
 	private readonly lifecycleManager: RuntimeLifecycleManager;
 	private readonly organizationalWorker: OrganizationalWorkerDaemonApi | null;
@@ -2435,6 +2437,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 				if (profile && secret && !isLocalOnlyRuntimeProfile(profile)) getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:name});
 			}
 			this.lifecycleManager.start();
+			this.stopUsageSync = startTokenUsageSync(this.paths);
 			this.heartbeatTimer = setInterval(() => {
 				try {
 					const current = readDaemonOwnershipState(this.paths);
@@ -2515,8 +2518,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 		// Observe close rejection immediately, but quiesce requests before the
 		// final lifecycle flush so an in-flight handler cannot enqueue afterward.
 		const closed = closeServer.catch(error => { failures.push(error); });
+		const usageStopped = this.stopUsageSync?.().catch(error => { failures.push(error); });
+		this.stopUsageSync = null;
 		try { await this.organizationalWorker?.shutdown?.(); } catch (error) { failures.push(error); }
 		await closed;
+		await usageStopped;
 		try { await this.lifecycleManager.stop(); } catch (error) { failures.push(error); }
 		try { await stopHotSyncManagers(this.paths.state); } catch (error) { failures.push(error); }
 		try { await this.runtimeCleanup(); } catch (error) { failures.push(error); }

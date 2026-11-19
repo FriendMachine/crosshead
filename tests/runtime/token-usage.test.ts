@@ -2,17 +2,19 @@ import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
-import { loadProfile, resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
-import { readUsage } from "../../src/runtime/token-usage";
+import { loadProfile, loadSecret, resolveRuntimePaths, saveProfile, saveSecret } from "../../src/runtime/runtime-persistence";
+import { prepareUsageSync, readUsage, usageSyncIsCurrent } from "../../src/runtime/token-usage";
 
 const cliScript = path.resolve(__dirname, "../../dist/runtime/cli.js");
 const day = 86_400_000;
 const privateText = "synthetic prompt content that should never be stored in the usage ledger";
 const jsonl = (...rows: unknown[]) => rows.map(row => JSON.stringify(row) + "\n").join("");
 
-it("accounts for both hosts locally through installed hooks and isolates opt-in, repeated events and subagents", async () => {
+it("counts both hosts through installed hooks and sends only aggregate rows after console sync opt-in", async () => {
 	const root = mkdtempSync(path.join(tmpdir(), "crosshead-token-usage-"));
 	const home = path.join(root, "runtime");
 	const project = path.join(root, "project");
@@ -165,6 +167,62 @@ it("accounts for both hosts locally through installed hooks and isolates opt-in,
 		expect((await readUsage(paths, identity, clock + 6 * day)).periods.map(period => period.totals.totalTokens)).toEqual([0, 182, 182]);
 		expect((await readUsage(paths, identity, clock + 29 * day)).periods.map(period => period.totals.totalTokens)).toEqual([0, 0, 182]);
 		expect((await readUsage(paths, identity, clock + 30 * day)).periods.map(period => period.totals.totalTokens)).toEqual([0, 0, 0]);
+		const uploaded: unknown[] = [];
+		const server = createServer(async (request, response) => {
+			const chunks: Uint8Array[] = [];
+			for await (const chunk of request) chunks.push(chunk);
+			uploaded.push({ method: request.method, url: request.url, authorization: request.headers.authorization,
+				body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end('{"stored":true}');
+		});
+		server.listen(0, "127.0.0.1");
+		await once(server, "listening");
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("Fixture server has no TCP port");
+			const hosted = { ...identity, apiBase: "http://127.0.0.1:" + address.port };
+			saveProfile(paths, hosted);
+			saveSecret(paths, hosted.name, { ...loadSecret(paths, hosted.name)!,
+				session: { sessionToken: "synthetic-session", expiresAt: new Date(Date.now() + day).toISOString(), scopes: ["memory:*"] } });
+			const command = async (...args: string[]) => JSON.parse((await promisify(execFile)(process.execPath,
+				[cliScript, "usage", "sync", ...args, "--home", home, "--json"], { cwd: project, env, timeout: 10000 })).stdout).profiles;
+			expect(await command("now", "--all-profiles")).toEqual([
+				{ profile: "default", available: true, enabled: false, lastSyncedAt: null },
+				{ profile: "separate", available: false, enabled: false, lastSyncedAt: null },
+			]);
+			expect(uploaded).toHaveLength(0);
+			expect((await command("on", "--all-profiles"))[0]).toMatchObject({ enabled: true, lastSyncedAt: null });
+			expect(uploaded).toHaveLength(0);
+			expect((await command("now"))[0].lastSyncedAt).toEqual(expect.any(String));
+			expect(uploaded).toEqual([{
+				method: "PUT", url: "/v1/usage/snapshot", authorization: "Bearer synthetic-session",
+				body: {
+					deviceId: expect.any(String), revision: 1, rows: [
+						{ day: now.slice(0, 10), harness: "claude-code", model: "claude-demo",
+							inputTokens: 51, cachedInputTokens: 30, cacheWriteInputTokens: 6, outputTokens: 11, reasoningOutputTokens: 3 },
+						{ day: now.slice(0, 10), harness: "codex", model: "gpt-child",
+							inputTokens: 15, cachedInputTokens: 4, cacheWriteInputTokens: 0, outputTokens: 3, reasoningOutputTokens: 2 },
+						{ day: now.slice(0, 10), harness: "codex", model: "gpt-demo",
+							inputTokens: 60, cachedInputTokens: 4, cacheWriteInputTokens: 0, outputTokens: 7, reasoningOutputTokens: 2 },
+						{ day: now.slice(0, 10), harness: "codex", model: "gpt-next",
+							inputTokens: 30, cachedInputTokens: 4, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 2 },
+					],
+				},
+			}]);
+			expect(await prepareUsageSync(paths, hosted, Date.now(), false)).toBeUndefined();
+			expect(await prepareUsageSync(paths, { ...hosted, apiBase: "https://another.example" }, Date.now(), true)).toBeUndefined();
+			const pending = await prepareUsageSync(paths, hosted, Date.now() + 30 * day, false);
+			expect(pending?.snapshot.rows).toEqual([]);
+			expect((await command("off"))[0]).toMatchObject({ enabled: false, lastSyncedAt: null });
+			expect(await usageSyncIsCurrent(paths, hosted, pending!.snapshot)).toBe(false);
+			await command("now");
+			expect(uploaded).toHaveLength(1);
+			expect(report("default").periods[0].totals.totalTokens).toBe(182);
+		} finally {
+			await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+		}
+
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

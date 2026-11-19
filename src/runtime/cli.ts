@@ -348,6 +348,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead events [--home <path>] [--lines 50] [--json]",
 				"crosshead workspace link --name <shared-label> --workspace-root <path> [--home <path>] [--profile <name>]",
 				"crosshead usage [on|off] [--profile <name>] [--home <path>] [--json]",
+				"crosshead usage sync <on|off|status|now> [--profile <name> | --all-profiles]",
 				"crosshead usage --all-profiles [--home <path>] [--json]",
 				"crosshead memory sync [--home <path>] [--profile <name>]",
 				"crosshead memory hot reset --scope <scope> [--home <path>] [--profile <name>]",
