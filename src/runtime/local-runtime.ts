@@ -1,3 +1,4 @@
+import { startTokenUsageSync } from "./token-usage-sync";
 import { parsePrivateMemoryErasureChallenge, signPrivateMemoryErasureChallenge } from "./erasure-proof";
 import { getHotSyncManager, hotSyncEnabled, stopHotSyncManagers } from "./hot-sync-manager";
 import { shellQuote, writeManagedFile } from "./adapter-utils";
@@ -30,7 +31,7 @@ import semver from "semver";
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
-import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession, type AccountLinkRequest, type AccountLinkStatus } from "./hosted-client";
+import { describeFetchFailure, fetchCauses, hostedSessionMatches, normalizeApiBase, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession, type AccountLinkRequest, type AccountLinkStatus } from "./hosted-client";
 export { describeFetchFailure } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { readHotCheckpoints, searchHotCheckpoints } from "./hot-continuity";
@@ -1365,7 +1366,8 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	}
 	const paths = ensureRuntimeHomeLayout(options.home);
 	writeRuntimeInstallMarker(paths);
-	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} already exists`);
+	const previousProfile = loadProfile(paths, options.profileName);
+	if (options.createOnly && previousProfile) throw new Error(`Profile ${options.profileName} already exists`);
 	const secret = loadSecret(paths, options.profileName);
 	const localOnlyProfile = isLocalOnlyRuntimeProfile({ apiBase: options.apiBase });
 	// Capture and recall are local-first, so a machine with no route to the service (a sandbox, a
@@ -1378,7 +1380,9 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				apiBase: options.apiBase,
 				npub: options.npub,
 				nsec: options.nsec,
-				session: secret?.session ?? null,
+				session: previousProfile?.npub === options.npub && previousProfile.apiBase === options.apiBase &&
+					(!secret?.session?.audience || hostedSessionMatches(secret.session, options.npub, normalizeApiBase(options.apiBase).serviceBaseUrl))
+					? secret?.session : null,
 			}).ensureSession().catch((error: unknown) => {
 				const reason = hostedServiceUnreachableReason(error, options.apiBase);
 				if (reason === null) {
@@ -2324,6 +2328,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 	private stopPromise: Promise<void> | null = null;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private idleUpdateTimer: NodeJS.Timeout | null = null;
+	private stopUsageSync: (() => Promise<void>) | null = null;
 	private readonly paths: RuntimePaths;
 	private readonly lifecycleManager: RuntimeLifecycleManager;
 	private readonly organizationalWorker: OrganizationalWorkerDaemonApi | null;
@@ -2435,6 +2440,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 				if (profile && secret && !isLocalOnlyRuntimeProfile(profile)) getHotSyncManager({stateDir:this.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName:name});
 			}
 			this.lifecycleManager.start();
+			this.stopUsageSync = startTokenUsageSync(this.paths);
 			this.heartbeatTimer = setInterval(() => {
 				try {
 					const current = readDaemonOwnershipState(this.paths);
@@ -2515,8 +2521,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 		// Observe close rejection immediately, but quiesce requests before the
 		// final lifecycle flush so an in-flight handler cannot enqueue afterward.
 		const closed = closeServer.catch(error => { failures.push(error); });
+		const usageStopped = this.stopUsageSync?.().catch(error => { failures.push(error); });
+		this.stopUsageSync = null;
 		try { await this.organizationalWorker?.shutdown?.(); } catch (error) { failures.push(error); }
 		await closed;
+		await usageStopped;
 		try { await this.lifecycleManager.stop(); } catch (error) { failures.push(error); }
 		try { await stopHotSyncManagers(this.paths.state); } catch (error) { failures.push(error); }
 		try { await this.runtimeCleanup(); } catch (error) { failures.push(error); }
