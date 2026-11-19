@@ -1899,6 +1899,18 @@ export const updateManagedRuntimeRelease = async (
 	const previousRelease = inspectInstalledRuntimeRelease(paths);
 	const specs = await collectManagedAdapterReinstallSpecs(paths);
 	const release = await downloadRuntimeRelease(paths, options.baseUrl, options.trustedSha256, options.timeoutMs, options.expectedReleaseId, options.beforeApply);
+	return applyRuntimeRelease(paths, previousRelease, specs, release, options);
+};
+
+/** Makes an unpacked release the installed one: launchers, adapters, the
+ * install record and the daemon. Rolls the managed files back on failure. */
+const applyRuntimeRelease = async (
+	paths: RuntimePaths,
+	previousRelease: InstalledRuntimeRelease,
+	specs: ManagedAdapterReinstallSpec[],
+	release: DownloadedRuntimeRelease,
+	options: { restart?: boolean; beforeApply?: () => void }
+): Promise<RuntimeReleaseUpdateResult> => {
 	// A release must not leave launchers pointing at a half-applied installation.
 	// Keep credentials, memory and queued writes outside this file-level rollback.
 	const protectedFiles = new Set([
@@ -1953,6 +1965,35 @@ export const updateManagedRuntimeRelease = async (
 		}
 		throw error;
 	}
+};
+
+/** Used by the install script when it is run over an existing installation.
+ * The script has already verified and unpacked the release under lib/runtime;
+ * this applies it the way `crosshead update` would, without a second download. */
+export const adoptUnpackedRuntimeRelease = async (
+	home: string | undefined,
+	releaseId: string,
+	options: { restart?: boolean; baseUrl?: string } = {}
+): Promise<RuntimeReleaseUpdateResult> => {
+	readWorkspaceHookPolicy(resolveRuntimePaths(home));
+	const paths = ensureRuntimeHomeLayout(home);
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(releaseId)) throw new Error("Invalid runtime release ID");
+	const releaseRoot = path.join(paths.libRuntime, releaseId);
+	const script = (name: string): string => path.join(releaseRoot, "dist", "runtime", name);
+	const cli = validateInstalledReleaseScript(paths, script("cli.js"), "cli.js");
+	const daemon = validateInstalledReleaseScript(paths, script("daemon.js"), "daemon.js");
+	if (!cli || !daemon || !existsSync(script("local-runtime.js"))) {
+		throw new Error(`Runtime release ${releaseId} is not unpacked under ${paths.libRuntime}`);
+	}
+	const baseUrl = options.baseUrl ?? "install script";
+	return applyRuntimeRelease(paths, inspectInstalledRuntimeRelease(paths), await collectManagedAdapterReinstallSpecs(paths), {
+		baseUrl, releaseId, releaseUrl: `unpacked at ${releaseRoot}`, releaseSha256: "", releaseRoot,
+		cliScriptPath: cli.scriptPath, daemonScriptPath: daemon.scriptPath,
+		localRuntimeModulePath: script("local-runtime.js"),
+		codexAdapterModulePath: script("codex-adapter.js"),
+		claudeCodeAdapterModulePath: script("claude-code-adapter.js"),
+		piAdapterModulePath: script("pi-adapter.js"),
+	}, options);
 };
 
 export const updateRuntimeCatalogInstall = async (
@@ -3957,6 +3998,13 @@ export class OnlyBotsLocalRuntimeDaemon {
 			throw new Error("Hosted controller process replay conflicts with its connection");
 		}
 
+		// Install and update decide which files Crosshead manages for a host. A
+		// session only knows its own workspace, so attaching must not replace
+		// that list: doctor compares it with the install snapshot.
+		const installedFiles = !exactController && existing && existing.managedFiles.length > 0 &&
+			existing.version === request.adapterVersion && existing.hostHome === (request.hostHome ?? null)
+			? existing.managedFiles : null;
+
 		if (request.manifest) {
 			const exactLifecycleMetadata =
 				isExactGovernedSyntheticLifecycleAttach(request) || exactController;
@@ -3996,7 +4044,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 					status: "failed",
 					profileName: request.profileName,
 					hostHome: request.hostHome ?? null,
-					managedFiles: request.managedFiles ?? [],
+					managedFiles: installedFiles ?? request.managedFiles ?? [],
 					lastError: policyDecision.reason,
 					installedAt: existing?.installedAt ?? nowIso(),
 					updatedAt: nowIso(),
@@ -4021,7 +4069,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			status: compatibility ? "failed" : "attached",
 			profileName: request.profileName,
 			hostHome: request.hostHome ?? null,
-			managedFiles: request.managedFiles ?? [],
+			managedFiles: installedFiles ?? request.managedFiles ?? [],
 			lastError: compatibility,
 			installedAt: existing?.installedAt ?? nowIso(),
 			// A controlled process restart resumes the same host lifetime. Status

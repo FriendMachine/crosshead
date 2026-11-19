@@ -144,6 +144,11 @@ finishes. `crosshead update --manual` disables automatic
 updates. `crosshead update --policy` shows the current setting. The older
 `--pin` option remains an alias for `--manual`.
 
+Running the install script again also updates an existing installation: it
+verifies and unpacks the release it serves, then rewrites the launchers,
+reinstalls the configured host adapters and restarts the daemon. Profiles,
+hooks and memory are kept. It does this with host sessions open.
+
 For a manual install, obtain the digest from an independent release channel
 and run `crosshead update --sha256 <digest>`. Operator updates and rollbacks
 refuse to change runtime files while a host is running. Close host sessions
