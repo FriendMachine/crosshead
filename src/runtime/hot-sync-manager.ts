@@ -8,6 +8,21 @@ import { hotSyncName, HOT_SYNC_PROTOCOL_VERSION, HOT_SYNC_MAX_SCOPES, type HotSy
 import { workspaceHotScope } from "./workspace-hot-memory";
 import { hotSyncConflictIds, hotSyncSupersededIds } from "./hot-sync-signing";
 import { normalizeTaskEvidence } from "./task-evidence";
+/** Clients up to 0.5.4 saved each turn twice (turn end, then session end), as
+ * separate records. Show only the newest record per session and turn; an
+ * explicit remember is counted apart from the turn. Records without both ids
+ * (legacy imports) are left alone. Inspection still shows every record. */
+const latestPerTurn = (checkpoints: HotSyncCheckpoint[]): HotSyncCheckpoint[] => {
+	const key = (c: HotSyncCheckpoint) => c.sessionId && c.turnId ? JSON.stringify([c.sessionId, c.turnId, c.origin === "remember"]) : null;
+	const newer = (a: HotSyncCheckpoint, b: HotSyncCheckpoint) =>
+		(Date.parse(a.occurredAt) - Date.parse(b.occurredAt) || (a.sequence ?? 0) - (b.sequence ?? 0) || a.id.localeCompare(b.id)) > 0;
+	const latest = new Map<string, HotSyncCheckpoint>();
+	for (const c of checkpoints) {
+		const k = key(c);
+		if (k && (!latest.has(k) || newer(c, latest.get(k)!))) latest.set(k, c);
+	}
+	return checkpoints.filter(c => { const k = key(c); return !k || latest.get(k) === c; });
+};
 export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === undefined || process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
 type Config = {
 	stateDir: string;
@@ -124,6 +139,16 @@ export class HotSyncManager {
 		for (const source of new Set([runtime, "codex", "claude-code", "pi", "omp", "hermes", "opencode"]))
 			this.active.add(workspaceHotScope(source, workspace)!);
 	}
+	/** Ids of visible-candidate records that the per-turn collapse hides in this workspace scope. */
+	hiddenDuplicateIds(runtime: string, raw: string): string[] {
+		const scope = workspaceHotScope(runtime, this.workspace(raw))!;
+		if (!this.replicas.has(scope)) return [];
+		const document = this.replica(scope).inspect().local.document;
+		const superseded = hotSyncSupersededIds(document), disputed = hotSyncConflictIds(document);
+		const candidates = document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id));
+		const kept = new Set(latestPerTurn(candidates).map(c => c.id));
+		return candidates.filter(c => !kept.has(c.id)).map(c => c.id);
+	}
 	readWorkspace(runtime: string, raw: string): Record<string, unknown> { this.activate(runtime, raw); return this.read(workspaceHotScope(runtime, this.workspace(raw))!); }
 	read(scope = "all", inspect = false): Record<string, unknown> {
 		const entries = (scope === "all" ? [...this.replicas.entries()] : [[scope, this.replica(scope)] as const]).flatMap(([name, replica]) => {
@@ -131,7 +156,7 @@ export class HotSyncManager {
 			if(r.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==name))throw new Error("Hot-sync checkpoint belongs to another workspace scope");
 			const superseded = hotSyncSupersededIds(r.local.document);
 			const disputed = hotSyncConflictIds(r.local.document);
-			const candidates = inspect ? r.local.document.checkpoints : r.local.document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id));
+			const candidates = inspect ? r.local.document.checkpoints : latestPerTurn(r.local.document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id)));
 			const portable = candidates[0]?.workspaceId;
 			const aliases = Object.entries(this.metadata.workspaces).filter(([, id]) => id === portable).map(([raw]) => raw);
 			// Unmapped remote projects are inspectable but cannot cross into another workspace.
