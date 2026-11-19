@@ -1,0 +1,11 @@
+{
+  "deviceId": "c775277c-527c-4b15-a571-046310150eed",
+  "consentRevision": 1,
+  "revision": 1,
+  "rows": [
+    { "day": "2026-02-01", "harness": "claude-code", "model": "claude-demo", "inputTokens": 51, "cachedInputTokens": 30, "cacheWriteInputTokens": 6, "outputTokens": 11, "reasoningOutputTokens": 3 },
+    { "day": "2026-02-01", "harness": "codex", "model": "gpt-6.2-sol", "inputTokens": 30, "cachedInputTokens": 28, "cacheWriteInputTokens": 4, "outputTokens": 5, "reasoningOutputTokens": 2 },
+    { "day": "2026-02-01", "harness": "codex", "model": "gpt-child", "inputTokens": 15, "cachedInputTokens": 4, "cacheWriteInputTokens": 0, "outputTokens": 3, "reasoningOutputTokens": 2 },
+    { "day": "2026-02-01", "harness": "codex", "model": "gpt-demo", "inputTokens": 60, "cachedInputTokens": 4, "cacheWriteInputTokens": 0, "outputTokens": 7, "reasoningOutputTokens": 2 }
+  ]
+}

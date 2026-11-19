@@ -372,7 +372,9 @@ or a provider account.
 
 Use `crosshead usage sync status` to check the selected profile or add `--all-profiles` to check
 every profile. Use `crosshead usage sync off --profile work` to stop future uploads. Previously
-synced days remain visible until they fall outside the 30-day report.
+synced days remain visible to the same verified account links until they fall outside the 30-day
+report. If you change the linked account, run sync off and on to explicitly share local history
+with the new link.
 
 ## Repository layout
 

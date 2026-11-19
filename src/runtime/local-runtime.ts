@@ -31,7 +31,7 @@ import semver from "semver";
 import { OperatorRuntimePolicyBroker, type OperatorWorkspaceManifest } from "./operator-policy";
 import { HOSTED_PI_CONTROLLER_ADAPTER, HOSTED_PI_CONTROLLER_MANIFEST, hostedControllerProcessIsLive, type HostedControllerProcess } from "./hosted-pi-controller-manifest";
 import { acquireRuntimeDaemonOwnership, daemonOwnerIsLive, probeRuntimeDaemonHealth, readDaemonOwnershipState, type RuntimeDaemonOwnership } from "./daemon-ownership";
-import { describeFetchFailure, fetchCauses, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession, type AccountLinkRequest, type AccountLinkStatus } from "./hosted-client";
+import { describeFetchFailure, fetchCauses, hostedSessionMatches, normalizeApiBase, HostedOnlyBotsClient, HostedOnlyBotsRequestError, PROXY_REFUSAL, type HostedSession, type AccountLinkRequest, type AccountLinkStatus } from "./hosted-client";
 export { describeFetchFailure } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile, preserveLegacyLocalHotOwner, readLocalHotMemory } from "./local-hot-memory";
 import { readHotCheckpoints, searchHotCheckpoints } from "./hot-continuity";
@@ -1366,7 +1366,8 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 	}
 	const paths = ensureRuntimeHomeLayout(options.home);
 	writeRuntimeInstallMarker(paths);
-	if (options.createOnly && loadProfile(paths, options.profileName)) throw new Error(`Profile ${options.profileName} already exists`);
+	const previousProfile = loadProfile(paths, options.profileName);
+	if (options.createOnly && previousProfile) throw new Error(`Profile ${options.profileName} already exists`);
 	const secret = loadSecret(paths, options.profileName);
 	const localOnlyProfile = isLocalOnlyRuntimeProfile({ apiBase: options.apiBase });
 	// Capture and recall are local-first, so a machine with no route to the service (a sandbox, a
@@ -1379,7 +1380,9 @@ export const setupRuntimeProfile = async (options: SetupRuntimeProfileOptions): 
 				apiBase: options.apiBase,
 				npub: options.npub,
 				nsec: options.nsec,
-				session: secret?.session ?? null,
+				session: previousProfile?.npub === options.npub && previousProfile.apiBase === options.apiBase &&
+					(!secret?.session?.audience || hostedSessionMatches(secret.session, options.npub, normalizeApiBase(options.apiBase).serviceBaseUrl))
+					? secret?.session : null,
 			}).ensureSession().catch((error: unknown) => {
 				const reason = hostedServiceUnreachableReason(error, options.apiBase);
 				if (reason === null) {

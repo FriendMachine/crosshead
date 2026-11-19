@@ -1,5 +1,6 @@
 export type UsageSnapshot = {
 	deviceId: string;
+	consentRevision: number;
 	revision: number;
 	rows: {
 		day: string;

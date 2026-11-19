@@ -228,16 +228,19 @@ const UTC_DAY_MS = 86_400_000;
 type SyncProfile = ProfileIdentity & Pick<RuntimeProfile, "apiBase">;
 type SyncPolicy = {
 	deviceId: string;
+	consentRevision: number;
 	destination: string | null;
 	revision: number;
 	lastDigest: string | null;
 	lastSyncedAt: number | null;
+	lastError: string | null;
 };
 
 const syncPolicy = (db: DatabaseSync): SyncPolicy | undefined => {
 	if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_sync'").get()) return undefined;
 	return db.prepare(`
-		SELECT device_id AS deviceId, destination, revision, last_digest AS lastDigest, last_synced_at AS lastSyncedAt
+		SELECT device_id AS deviceId, consent_revision AS consentRevision, destination, revision,
+			last_digest AS lastDigest, last_synced_at AS lastSyncedAt, last_error AS lastError
 		FROM usage_sync WHERE id = 1
 	`).get() as SyncPolicy | undefined;
 };
@@ -247,7 +250,11 @@ export const usageSyncStatus = async (paths: RuntimePaths, profile: SyncProfile)
 	try {
 		const policy = db ? syncPolicy(db) : undefined;
 		const enabled = policy?.destination === profile.apiBase;
-		return { enabled, lastSyncedAt: enabled && policy?.lastSyncedAt ? new Date(policy.lastSyncedAt).toISOString() : null };
+		return {
+			enabled,
+			lastSyncedAt: enabled && policy?.lastSyncedAt ? new Date(policy.lastSyncedAt).toISOString() : null,
+			lastError: enabled ? policy?.lastError ?? null : null,
+		};
 	} finally {
 		db?.close();
 	}
@@ -264,20 +271,22 @@ export const setUsageSync = async (paths: RuntimePaths, profile: SyncProfile, en
 					CREATE TABLE IF NOT EXISTS usage_sync (
 						id INTEGER PRIMARY KEY CHECK (id = 1),
 						device_id TEXT NOT NULL,
+						consent_revision INTEGER NOT NULL DEFAULT 1,
 						destination TEXT,
 						revision INTEGER NOT NULL DEFAULT 0,
 						last_digest TEXT,
-						last_synced_at INTEGER
+						last_synced_at INTEGER,
+						last_error TEXT
 					) STRICT
 				`);
 				db.prepare(`
 					INSERT INTO usage_sync (id, device_id, destination) VALUES (1, ?, ?)
-					ON CONFLICT (id) DO UPDATE SET destination = excluded.destination,
-						revision = revision + 1, last_digest = NULL, last_synced_at = NULL
+					ON CONFLICT (id) DO UPDATE SET destination = excluded.destination, consent_revision = consent_revision + 1,
+						revision = revision + 1, last_digest = NULL, last_synced_at = NULL, last_error = NULL
 					WHERE destination IS NOT excluded.destination
 				`).run(randomUUID(), profile.apiBase);
 			} else if (syncPolicy(db)?.destination) {
-				db.exec("UPDATE usage_sync SET destination = NULL, revision = revision + 1, last_digest = NULL, last_synced_at = NULL WHERE id = 1");
+				db.exec("UPDATE usage_sync SET destination = NULL, revision = revision + 1, last_digest = NULL, last_synced_at = NULL, last_error = NULL WHERE id = 1");
 			}
 		});
 	} finally {
@@ -289,7 +298,8 @@ export const prepareUsageSync = async (paths: RuntimePaths, profile: SyncProfile
 	const db = await openUsage(paths, profile, "write");
 	if (!db) return undefined;
 	try {
-		if (syncPolicy(db)?.destination !== profile.apiBase) return undefined;
+		const previous = syncPolicy(db);
+		if (previous?.destination !== profile.apiBase) return undefined;
 		return transaction(db, "BEGIN IMMEDIATE", () => {
 			const policy = syncPolicy(db);
 			if (policy?.destination !== profile.apiBase) return undefined;
@@ -306,13 +316,19 @@ export const prepareUsageSync = async (paths: RuntimePaths, profile: SyncProfile
 			const digest = usageKey(JSON.stringify(rows));
 			if (!force && (policy.lastDigest === digest || (!policy.lastDigest && rows.length === 0))) return undefined;
 			const revision = policy.revision + 1;
-			const snapshot: UsageSnapshot = { deviceId: policy.deviceId, revision, rows };
+			const snapshot: UsageSnapshot = { deviceId: policy.deviceId, consentRevision: policy.consentRevision, revision, rows };
 			if (rows.length > 1800 || Buffer.byteLength(JSON.stringify(snapshot)) > 512 * 1024) {
 				throw new Error("The usage report exceeds the hosted snapshot limit.");
 			}
 			db.prepare("UPDATE usage_sync SET revision = ? WHERE id = 1").run(revision);
 			return { snapshot, digest };
 		});
+	} catch (error) {
+		if (syncPolicy(db)?.destination === profile.apiBase) {
+			db.prepare("UPDATE usage_sync SET last_error = ? WHERE id = 1 AND destination = ?")
+				.run("Could not prepare local usage totals for upload.", profile.apiBase);
+		}
+		throw error;
 	} finally {
 		db.close();
 	}
@@ -328,15 +344,18 @@ export const usageSyncIsCurrent = async (paths: RuntimePaths, profile: SyncProfi
 	}
 };
 
-export const confirmUsageSync = async (paths: RuntimePaths, profile: SyncProfile, snapshot: UsageSnapshot, digest: string): Promise<void> => {
+export const confirmUsageSync = async (paths: RuntimePaths, profile: SyncProfile, snapshot: UsageSnapshot, result: { digest: string } | { error: string }): Promise<void> => {
 	const db = await openUsage(paths, profile, "write");
 	if (!db) return;
 	try {
 		if (!syncPolicy(db)) return;
 		db.prepare(`
-			UPDATE usage_sync SET last_digest = ?, last_synced_at = ?
+			UPDATE usage_sync SET last_digest = COALESCE(?, last_digest), last_synced_at = COALESCE(?, last_synced_at), last_error = ?
 			WHERE id = 1 AND device_id = ? AND destination = ? AND revision = ?
-		`).run(digest, Date.now(), snapshot.deviceId, profile.apiBase, snapshot.revision);
+		`).run(
+			"digest" in result ? result.digest : null, "digest" in result ? Date.now() : null,
+			"error" in result ? result.error : null, snapshot.deviceId, profile.apiBase, snapshot.revision,
+		);
 	} finally {
 		db.close();
 	}

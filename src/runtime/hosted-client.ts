@@ -16,6 +16,8 @@ import { L402_IDEMPOTENCY_HEADER } from "../protocol/hosted-api";
 import { SHARED_HOT_SCOPE } from "../protocol/memory";
 
 export type HostedSession = {
+  npub?: string;
+  audience?: string;
   sessionToken: string;
   expiresAt: string;
   scopes: string[];
@@ -138,6 +140,9 @@ const decodeNpub = (npub: string): Uint8Array => {
   }
   return new Uint8Array(Buffer.from(decoded.data, "hex"));
 };
+
+export const hostedSessionMatches = (session: HostedSession | null | undefined, npub: string, audience: string): boolean =>
+  session?.npub === npub && session.audience === audience;
 
 export const normalizeApiBase = (apiBase: string): { serviceBaseUrl: string; apiBaseUrl: string } => {
   const parsed = new URL(apiBase);
@@ -583,6 +588,8 @@ export class HostedOnlyBotsClient {
       },
     });
     const session = {
+      npub: this.config.npub,
+      audience: this.serviceBaseUrl,
       sessionToken: verify.data.session_token,
       expiresAt: verify.data.expires_at,
       scopes: verify.data.scopes,

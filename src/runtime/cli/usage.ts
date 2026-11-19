@@ -27,7 +27,7 @@ export const usageFromCli = async (argv: string[]): Promise<string> => {
 	}
 	if (flags.profile === true || flags.home === true) throw new Error(usageHelp);
 	const allProfiles = flags["all-profiles"] === true;
-	if (allProfiles && flags.profile) throw new Error("Choose --profile or --all-profiles.");
+	if (allProfiles && flags.profile && action === "sync") throw new Error("Choose --profile or --all-profiles.");
 	if (allProfiles && action && action !== "sync") throw new Error("Choose one profile when changing token counting.");
 
 	const paths = resolveRuntimePaths(typeof flags.home === "string" ? flags.home : undefined);
@@ -77,7 +77,8 @@ export const usageFromCli = async (argv: string[]): Promise<string> => {
 		const lines = results.map(result => {
 			const status = !result.available ? "unavailable for a local-only profile" : result.enabled ? "on" : "off";
 			const last = result.lastSyncedAt ? " · last synced " + result.lastSyncedAt : "";
-			return result.profile + " · console usage sync " + status + last;
+			const error = result.lastError ? " · " + result.lastError : "";
+			return result.profile + " · console usage sync " + status + last + error;
 		});
 		if (syncAction === "on" && results.some(result => result.enabled)) {
 			lines.push("Sync shares up to 30 days of daily totals. Open Usage in the linked console account.");

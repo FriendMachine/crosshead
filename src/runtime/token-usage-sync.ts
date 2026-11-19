@@ -1,5 +1,5 @@
 import { readdirSync } from "node:fs";
-import { HostedOnlyBotsClient, HostedOnlyBotsRequestError } from "./hosted-client";
+import { hostedSessionMatches, normalizeApiBase, HostedOnlyBotsClient, HostedOnlyBotsRequestError, type HostedSession } from "./hosted-client";
 import { isLocalOnlyRuntimeProfile } from "./local-hot-memory";
 import type { RuntimeProfile } from "./local-runtime";
 import { isRuntimeProfileName } from "./runtime-env";
@@ -14,24 +14,28 @@ export const syncTokenUsage = async (paths: RuntimePaths, profile: RuntimeProfil
 	const pending = await prepareUsageSync(paths, profile, Date.now(), force);
 	if (!pending || signal?.aborted) return false;
 	const { snapshot, digest } = pending;
-	const secret = loadSecret(paths, profile.name);
-	if (!secret) throw new Error("The agent key is missing. Run Crosshead setup for this profile.");
-	const client = new HostedOnlyBotsClient({ apiBase: profile.apiBase, npub: profile.npub, nsec: secret.nsec, session: secret.session });
-	const upload = async () => {
-		await client.ensureSession(signal);
-		if (!await usageSyncIsCurrent(paths, profile, snapshot) || signal?.aborted) return;
-		const updated = loadProfile(paths, profile.name);
-		if (updated?.npub !== profile.npub || updated.apiBase !== profile.apiBase) return;
-		const saved = loadSecret(paths, profile.name);
-		if (saved?.nsec === secret.nsec && saved.session?.sessionToken !== client.session()?.sessionToken &&
-			!isSessionWriteStale(saved.session, client.session())) {
-			saveSecret(paths, profile.name, { ...saved, session: client.session() });
-		}
-		return client.putTokenUsage(snapshot, signal);
-	};
-
-	let result: { stored: boolean } | undefined;
 	try {
+		const secret = loadSecret(paths, profile.name);
+		if (!secret) throw new Error("The agent key is missing. Run Crosshead setup for this profile.");
+		const { serviceBaseUrl } = normalizeApiBase(profile.apiBase);
+		const bound = (session: HostedSession | null): boolean => hostedSessionMatches(session, profile.npub, serviceBaseUrl);
+		const client = new HostedOnlyBotsClient({
+			apiBase: profile.apiBase, npub: profile.npub, nsec: secret.nsec, session: bound(secret.session) ? secret.session : null,
+		});
+		const upload = async () => {
+			const session = await client.ensureSession(signal);
+			if (!await usageSyncIsCurrent(paths, profile, snapshot) || signal?.aborted) return;
+			const updated = loadProfile(paths, profile.name);
+			const saved = loadSecret(paths, profile.name);
+			if (updated?.npub !== profile.npub || updated.apiBase !== profile.apiBase || saved?.nsec !== secret.nsec) return;
+			if (saved.session?.sessionToken !== session.sessionToken &&
+				(!bound(saved.session) || !isSessionWriteStale(saved.session, session))) {
+				saveSecret(paths, profile.name, { ...saved, session });
+			}
+			return client.putTokenUsage(snapshot, signal);
+		};
+
+		let result;
 		try {
 			result = await upload();
 		} catch (error) {
@@ -39,18 +43,32 @@ export const syncTokenUsage = async (paths: RuntimePaths, profile: RuntimeProfil
 			client.setSession(null);
 			result = await upload();
 		}
+		if (!result) return false;
+		if (!result.stored) {
+			throw new HostedOnlyBotsRequestError({
+				status: 409, code: "usage_revision_stale", message: "The server already has a newer usage snapshot.",
+			});
+		}
+		await confirmUsageSync(paths, profile, snapshot, { digest });
+		return true;
 	} catch (error) {
-		if (error instanceof HostedOnlyBotsRequestError && error.status === 404) {
-			throw new Error("This Crosshead server does not support usage sync yet.");
+		if (signal?.aborted) return false;
+		let message = "Usage upload failed. Check the Crosshead connection and try again.";
+		if (error instanceof HostedOnlyBotsRequestError) {
+			if (error.status === 404) message = "This Crosshead server does not support usage sync yet.";
+			if (error.status === 409 && error.code === "usage_audience_changed") {
+				message = "The account link changed. Run crosshead usage sync off and then on to share with the new link.";
+			} else if (error.status === 409 && error.code === "usage_revision_stale") {
+				message = "The server already has a newer usage snapshot for this installation.";
+			} else if (error.status === 409) {
+				message = "Link this agent to a console account with crosshead account link, then retry.";
+			}
+			if (error.status === 400) message = "The server rejected the usage snapshot. Check the device date and time.";
+			if (error.status === 401 || error.status === 403) message = "The server did not authorize this agent to sync usage.";
 		}
-		if (error instanceof HostedOnlyBotsRequestError && error.status === 409) {
-			throw new Error("Link this agent to a console account with crosshead account link, then retry.");
-		}
-		throw error;
+		await confirmUsageSync(paths, profile, snapshot, { error: message });
+		throw new Error(message, { cause: error });
 	}
-	if (result?.stored !== true) return false;
-	await confirmUsageSync(paths, profile, snapshot, digest);
-	return true;
 };
 
 export const startTokenUsageSync = (paths: RuntimePaths): (() => Promise<void>) => {
