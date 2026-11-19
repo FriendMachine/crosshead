@@ -1,4 +1,4 @@
-import { OnlyBotsLocalRuntimeDaemon, RuntimeAdapterName, RuntimeChannel, RuntimeMemoryMode, SetupRuntimeProfileOptions, applyRuntimeManifest, buildRuntimeDoctorDirect, buildRuntimeStatusDirect, checkForRuntimeUpdates, describeVersionDelta, formatRuntimeActivity, formatRuntimeDoctor, formatRuntimeReleaseUpdate, formatRuntimeStatus, formatRuntimeUpdateCheck, generateRuntimeIdentity, installRuntimeCore, parseArgs, readRuntimeLogs, resolveAdapterTargetVersion, rollbackRuntimeAdapterVersion, rollbackRuntimeCoreVersion, setupRuntimeProfile, startDetachedRuntimeDaemon, stopDetachedRuntimeDaemon, uninstallRuntimeCore, updateManagedRuntimeRelease, updateRuntimeAdapterVersion, updateRuntimeCatalogInstall } from "../local-runtime";
+import { OnlyBotsLocalRuntimeDaemon, RuntimeAdapterName, RuntimeChannel, RuntimeMemoryMode, SetupRuntimeProfileOptions, applyRuntimeManifest, buildRuntimeDoctorDirect, buildRuntimeStatusDirect, checkForRuntimeUpdates, describeVersionDelta, formatRuntimeActivity, formatRuntimeDoctor, formatRuntimeReleaseUpdate, formatRuntimeStatus, formatRuntimeUpdateCheck, generateRuntimeIdentity, installRuntimeCore, parseArgs, readRuntimeLogs, resolveAdapterTargetVersion, rollbackRuntimeAdapterVersion, rollbackRuntimeCoreVersion, setupRuntimeProfile, startDetachedRuntimeDaemon, stopDetachedRuntimeDaemon, uninstallRuntimeCore, adoptUnpackedRuntimeRelease, updateManagedRuntimeRelease, updateRuntimeAdapterVersion, updateRuntimeCatalogInstall } from "../local-runtime";
 import path from "path";
 import { RUNTIME_ADAPTER_NAMES, ensureRuntimeHomeLayout, loadAdapterRecord, loadRuntimeConfig, resolveRuntimeHome } from "../runtime-persistence";
 import { billingFromCli } from "./billing";
@@ -54,6 +54,20 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 	const home = typeof flags.home === "string" ? flags.home : undefined;
 	if (flags["check-on-launch"]) return maintainRuntimeBeforeLaunch(home, Number(flags["host-pid"]));
 	if (flags["check-idle"]) return maintainRuntimeWhenIdle(home);
+	if (flags["adopt-unpacked"] !== undefined) {
+		// The install script runs this over an existing installation. Running the
+		// script is an explicit request, so open host sessions do not block it.
+		const releaseId = flags["adopt-unpacked"];
+		if (typeof releaseId !== "string") throw new Error("--adopt-unpacked requires a release ID");
+		return formatRuntimeReleaseUpdate(await withRuntimeUpdateLock(home, async () => {
+			const adopted = await adoptUnpackedRuntimeRelease(home, releaseId, {
+				restart: !flags["no-restart"],
+				baseUrl: typeof flags["base-url"] === "string" ? flags["base-url"] : undefined,
+			});
+			if (runtimeUpdatePolicy(home).mode === "manual") runtimeUpdatePolicy(home, "manual");
+			return adopted;
+		}));
+	}
 	if (flags.manual || flags.pin || flags.auto || flags.policy) {
 		if (flags.auto && (flags.manual || flags.pin)) throw new Error("Choose --auto or --manual");
 		const mode = flags.manual || flags.pin ? "manual" : flags.auto ? "auto" : undefined;
