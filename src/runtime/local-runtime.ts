@@ -1985,9 +1985,9 @@ export const adoptUnpackedRuntimeRelease = async (
 	if (!cli || !daemon || !existsSync(script("local-runtime.js"))) {
 		throw new Error(`Runtime release ${releaseId} is not unpacked under ${paths.libRuntime}`);
 	}
-	const baseUrl = options.baseUrl ?? "local";
+	const baseUrl = options.baseUrl ?? "install script";
 	return applyRuntimeRelease(paths, inspectInstalledRuntimeRelease(paths), await collectManagedAdapterReinstallSpecs(paths), {
-		baseUrl, releaseId, releaseUrl: baseUrl, releaseSha256: "", releaseRoot,
+		baseUrl, releaseId, releaseUrl: `unpacked at ${releaseRoot}`, releaseSha256: "", releaseRoot,
 		cliScriptPath: cli.scriptPath, daemonScriptPath: daemon.scriptPath,
 		localRuntimeModulePath: script("local-runtime.js"),
 		codexAdapterModulePath: script("codex-adapter.js"),
@@ -3998,6 +3998,13 @@ export class OnlyBotsLocalRuntimeDaemon {
 			throw new Error("Hosted controller process replay conflicts with its connection");
 		}
 
+		// Install and update decide which files Crosshead manages for a host. A
+		// session only knows its own workspace, so attaching must not replace
+		// that list: doctor compares it with the install snapshot.
+		const installedFiles = !exactController && existing && existing.managedFiles.length > 0 &&
+			existing.version === request.adapterVersion && existing.hostHome === (request.hostHome ?? null)
+			? existing.managedFiles : null;
+
 		if (request.manifest) {
 			const exactLifecycleMetadata =
 				isExactGovernedSyntheticLifecycleAttach(request) || exactController;
@@ -4037,7 +4044,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 					status: "failed",
 					profileName: request.profileName,
 					hostHome: request.hostHome ?? null,
-					managedFiles: request.managedFiles ?? [],
+					managedFiles: installedFiles ?? request.managedFiles ?? [],
 					lastError: policyDecision.reason,
 					installedAt: existing?.installedAt ?? nowIso(),
 					updatedAt: nowIso(),
@@ -4055,12 +4062,6 @@ export class OnlyBotsLocalRuntimeDaemon {
 			}
 		}
 
-		// Install and update decide which files Crosshead manages for a host. A
-		// session only knows its own workspace, so attaching must not replace
-		// that list: doctor compares it with the install snapshot.
-		const installedFiles = !exactController && existing && existing.managedFiles.length > 0 &&
-			existing.version === request.adapterVersion && existing.hostHome === (request.hostHome ?? null)
-			? existing.managedFiles : null;
 		const record: RuntimeAdapterRecord = {
 			name: request.adapterName,
 			version: request.adapterVersion,

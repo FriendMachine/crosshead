@@ -60,11 +60,13 @@ export const updateFromCli = async (argv: string[]): Promise<string> => {
 		const releaseId = flags["adopt-unpacked"];
 		if (typeof releaseId !== "string") throw new Error("--adopt-unpacked requires a release ID");
 		return formatRuntimeReleaseUpdate(await withRuntimeUpdateLock(home, async () => {
+			// Read the policy first: an unreadable one must fail before anything changes.
+			const manual = runtimeUpdatePolicy(home).mode === "manual";
 			const adopted = await adoptUnpackedRuntimeRelease(home, releaseId, {
 				restart: !flags["no-restart"],
 				baseUrl: typeof flags["base-url"] === "string" ? flags["base-url"] : undefined,
 			});
-			if (runtimeUpdatePolicy(home).mode === "manual") runtimeUpdatePolicy(home, "manual");
+			if (manual) runtimeUpdatePolicy(home, "manual");
 			return adopted;
 		}));
 	}
