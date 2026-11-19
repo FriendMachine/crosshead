@@ -8,7 +8,7 @@ import { hotSyncName, HOT_SYNC_PROTOCOL_VERSION, HOT_SYNC_MAX_SCOPES, type HotSy
 import { workspaceHotScope } from "./workspace-hot-memory";
 import { hotSyncConflictIds, hotSyncSupersededIds } from "./hot-sync-signing";
 import { normalizeTaskEvidence } from "./task-evidence";
-/** Clients up to 0.5.3 saved each turn twice (turn end, then session end), as
+/** Clients up to 0.5.4 saved each turn twice (turn end, then session end), as
  * separate records. Show only the newest record per session and turn; an
  * explicit remember is counted apart from the turn. Records without both ids
  * (legacy imports) are left alone. Inspection still shows every record. */
