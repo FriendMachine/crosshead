@@ -8,6 +8,21 @@ import { hotSyncName, HOT_SYNC_PROTOCOL_VERSION, HOT_SYNC_MAX_SCOPES, type HotSy
 import { workspaceHotScope } from "./workspace-hot-memory";
 import { hotSyncConflictIds, hotSyncSupersededIds } from "./hot-sync-signing";
 import { normalizeTaskEvidence } from "./task-evidence";
+/** Clients up to 0.5.3 saved each turn twice (turn end, then session end), as
+ * separate records. Show only the newest record per session and turn; an
+ * explicit remember is counted apart from the turn. Records without both ids
+ * (legacy imports) are left alone. Inspection still shows every record. */
+const latestPerTurn = (checkpoints: HotSyncCheckpoint[]): HotSyncCheckpoint[] => {
+	const key = (c: HotSyncCheckpoint) => c.sessionId && c.turnId ? JSON.stringify([c.sessionId, c.turnId, c.origin === "remember"]) : null;
+	const newer = (a: HotSyncCheckpoint, b: HotSyncCheckpoint) =>
+		(Date.parse(a.occurredAt) - Date.parse(b.occurredAt) || (a.sequence ?? 0) - (b.sequence ?? 0) || a.id.localeCompare(b.id)) > 0;
+	const latest = new Map<string, HotSyncCheckpoint>();
+	for (const c of checkpoints) {
+		const k = key(c);
+		if (k && (!latest.has(k) || newer(c, latest.get(k)!))) latest.set(k, c);
+	}
+	return checkpoints.filter(c => { const k = key(c); return !k || latest.get(k) === c; });
+};
 export const hotSyncEnabled = () => process.env.CROSSHEAD_HOT_SYNC_ENABLED === undefined || process.env.CROSSHEAD_HOT_SYNC_ENABLED === "true";
 type Config = {
 	stateDir: string;
@@ -131,7 +146,7 @@ export class HotSyncManager {
 			if(r.local.document.checkpoints.some(c=>workspaceHotScope(c.runtime,c.workspaceId)!==name))throw new Error("Hot-sync checkpoint belongs to another workspace scope");
 			const superseded = hotSyncSupersededIds(r.local.document);
 			const disputed = hotSyncConflictIds(r.local.document);
-			const candidates = inspect ? r.local.document.checkpoints : r.local.document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id));
+			const candidates = inspect ? r.local.document.checkpoints : latestPerTurn(r.local.document.checkpoints.filter(c => !c.conflictOf && !superseded.has(c.id) && !disputed.has(c.id)));
 			const portable = candidates[0]?.workspaceId;
 			const aliases = Object.entries(this.metadata.workspaces).filter(([, id]) => id === portable).map(([raw]) => raw);
 			// Unmapped remote projects are inspectable but cannot cross into another workspace.
