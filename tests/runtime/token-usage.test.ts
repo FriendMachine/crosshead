@@ -222,6 +222,18 @@ it("counts both hosts through installed hooks and sends only aggregate rows afte
 				{ profile: "default", available: true, enabled: false, lastSyncedAt: null, lastError: null },
 				{ profile: "separate", available: false, enabled: false, lastSyncedAt: null, lastError: null },
 			]);
+			const bulkArgs = [cliScript, "usage", "sync", "status", "--all-profiles", "--home", home, "--json"];
+			for (const execution of [
+				{ cwd: project, env: { ...env, CROSSHEAD_PROFILE: "separate" } },
+				{ cwd: other, env },
+			]) {
+				const result = await promisify(execFile)(process.execPath, bulkArgs,
+					{ ...execution, timeout: 10000 });
+				expect(JSON.parse(result.stdout).profiles.map((profile: { profile: string }) => profile.profile))
+					.toEqual(["default", "separate"]);
+			}
+			await expect(command("status", "--all-profiles", "--profile", "default")).rejects
+				.toMatchObject({ stdout: expect.stringContaining("Choose --profile or --all-profiles.") });
 			expect(uploaded).toHaveLength(0);
 			expect((await command("on", "--all-profiles"))[0]).toMatchObject({ enabled: true, lastSyncedAt: null });
 			expect(uploaded).toHaveLength(0);
