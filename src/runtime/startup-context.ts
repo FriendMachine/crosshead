@@ -17,7 +17,7 @@ const capabilityLine = (profileName: string): string => {
   return `Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: crosshead memory hot${profile} | crosshead memory warm${profile} | crosshead memory search "<query>"${profile})`;
 };
 
-export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi" | "hermes" | "opencode";
+export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi" | "hermes" | "opencode" | "gemini";
 
 type RuntimeStartupContextInput = {
   runtime: RuntimeStartupRuntime;

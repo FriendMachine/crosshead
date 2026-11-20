@@ -16,7 +16,7 @@ export const dispatchNativeHostEvent = async (config: NativeHostConfig, event: N
   recordHostActivity(resolveRuntimePaths(config.runtimeHome));
   await ensureHookRuntime(config.runtimeHome);
   const status = await new LocalRuntimeClient({ home: config.runtimeHome, timeoutMs: 5_000 }).status(config.profileName);
-  if (event === "prepare" && status.profile?.memoryMode === "off") return { ok: true, contextText: "", packId: null };
+  if ((event === "prepare" || config.name === "gemini") && status.profile?.memoryMode === "off") return { ok: true, contextText: "", packId: null };
   const adapter = new NativeHostRuntimeAdapter(config);
   const base = { workspaceRoot: path.resolve(input.workspaceRoot), sessionId: input.sessionId, turnId: input.turnId };
   if (event === "prepare") return { ok: true, ...await adapter.prepareTurn({ ...base, prompt: input.prompt.slice(0, 8192) }) };
@@ -27,7 +27,10 @@ export const dispatchNativeHostEvent = async (config: NativeHostConfig, event: N
     const request = { ...base, packId: input.packId, goal: input.prompt.slice(0, 8192), summary,
       transcript: [{ role: "user" as const, content: input.prompt.slice(0, 8192) }, { role: "assistant" as const, content: summary }] };
     if (event === "complete") {
-      if (summary.trim()) await adapter.completeTurn(request);
+      if (summary.trim()) await adapter.completeTurn({
+	...request,
+	eventId: config.name === "gemini" ? `gemini:${input.turnId}:completed` : undefined,
+      });
     } else if (event === "failed") await adapter.failTurn(request);
     else throw new Error("Unknown host event");
   }
