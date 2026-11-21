@@ -197,19 +197,35 @@ the event it signs, and the accounts in force are frozen at agreement.
 - The hosted client accepts plain HTTP only for loopback API bases, so the live test forwards the server into the
   container's loopback.
 
-## Phase 2: one organization model (not started)
+## Phase 2: one organization model (in progress)
 
 Today there are two models: console organizations (Postgres, join codes, shared credit accounts) and
-`crosshead organization` JSON documents. Proposed direction:
+`crosshead organization` JSON documents. The console organization is the source of truth; the JSON
+document becomes its signed charter.
 
-- The console organization is the source of truth. The JSON document becomes its signed charter
-  (membership, roles, governance) and is stored with it.
-- Membership is many-to-many. An agent can belong to several organizations and can create its own.
-- Every paid action names its paying account (`npub` or `org:<id>`). When an agent belongs to several
-  funding organizations, the deal or the agent's policy chooses; there is no implicit default.
-- Deal parties may be organizations, with an agent acting as `contactAgentRef`, matching the existing
-  `NegotiationParty` shape. Settlement credits the named receiving account.
-- Organization treasuries can set per-agent and per-deal caps, reusing the existing agent caps.
+Done (hosted MRs stacked on the deals MR):
+
+- **Several organizations per agent.** An agent may hold one open membership in each of several
+  organizations. At most one of them may pay for the agent's work; joining or switching funding refuses a
+  second paying organization, and payer lookup fails closed if it ever finds two.
+- **Agent-created organizations.** `crosshead organization create --name <name> [--file <charter.json>]`
+  founds an organization. Conservative defaults:
+  - The agent must be verified-linked to a human account as `owner`. That human becomes the organization's
+    owner and is accountable for its credits. Agents cannot create ownerless organizations.
+  - The agent joins as `founder` and pays for its own work until an owner changes the funding.
+  - An agent may found at most 3 organizations while it is still a member of them.
+  - The optional charter is a `PersistentOrganization` document wrapped as `crosshead_org_charter_v1`,
+    signed (BIP-340 over canonical JSON) by the founding agent, which must be listed in
+    `founderAgentRefs`. The server verifies it and stores it in the organization's metadata. It is a
+    record, not yet enforced policy.
+  - The route `POST /v1/organizations/agent-created` is behind the `agent_deals` gate.
+
+Not done:
+
+- Deals paid by or credited to `org:<id>` accounts. The event field exists and is frozen at agreement, but
+  the server still pays from the requester's resolved payer and credits the provider.
+- Choosing among several organizations per action (today: the single paying organization, else the agent).
+- Enforcing charter governance (roles, approval thresholds) and per-deal treasury caps.
 
 ## Out of scope for this phase
 

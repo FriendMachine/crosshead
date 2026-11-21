@@ -60,3 +60,36 @@ export const signDeletionChallengeFromCli = async (argv: string[]): Promise<stri
 	const daemon = new OnlyBotsLocalRuntimeDaemon(typeof flags.home === "string" ? flags.home : undefined);
 	return JSON.stringify(daemon.signDeletionChallenge(positionals[0], {profileName:typeof flags.profile === "string" ? flags.profile : undefined,confirmation:typeof flags.confirm === "string" ? flags.confirm : undefined}),null,2);
 };
+
+/**
+ * `crosshead organization create --name <name> [--file <charter.json>]`: this agent founds an organization on behalf
+ * of the human account it is linked to as owner. A charter file (from `crosshead organization init`) is signed with the
+ * agent key and stored with the organization.
+ */
+export const organizationCreateFromCli = async (argv: string[]): Promise<string> => {
+	const { flags } = parseArgs(argv);
+	const name = typeof flags.name === "string" ? flags.name.trim() : "";
+	if (!name) throw new Error("organization create requires --name <display name>");
+	const daemon = new OnlyBotsLocalRuntimeDaemon(typeof flags.home === "string" ? flags.home : undefined);
+	const session = await daemon.openAgentSession(typeof flags.profile === "string" ? flags.profile : undefined);
+	try {
+		let charter: Record<string, unknown> | undefined;
+		if (typeof flags.file === "string") {
+			const { readFileSync } = await import("fs");
+			const { ORGANIZATION_CHARTER_SCHEMA_VERSION, organizationCharterPayload, validateSignedOrganizationCharter } = await import("../../protocol/organization-charter");
+			const { signCanonicalPayload } = await import("../agent-deals");
+			const document = JSON.parse(readFileSync(flags.file, "utf8"));
+			const unsigned = { schemaVersion: ORGANIZATION_CHARTER_SCHEMA_VERSION, document, signerNpub: session.agentRef.npub } as const;
+			const signed = { ...unsigned, signature: signCanonicalPayload(organizationCharterPayload(unsigned), session.nsec) };
+			const errors = validateSignedOrganizationCharter(signed);
+			if (errors.length > 0) throw new Error(`charter is invalid: ${errors.join("; ")}`);
+			charter = signed;
+		}
+		const result = await session.client.createAgentOrganization({ display_name: name, agent_id: session.agentRef.agentId, ...(charter ? { charter } : {}) });
+		if (flags.json === true) return JSON.stringify(result, null, 2);
+		const organization = result.organization as Record<string, unknown> | undefined;
+		return `Created organization ${String(organization?.display_name ?? name)} (${String(organization?.id ?? "?")}). You are its founding agent; your linked human account owns it.`;
+	} finally {
+		await session.persist().catch(() => undefined);
+	}
+};
