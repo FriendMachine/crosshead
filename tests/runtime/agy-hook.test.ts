@@ -17,6 +17,8 @@ const exec = promisify(execFile);
 const otherHooks = { lint: { Stop: [{ type: "command", command: "echo '{}'" }] } };
 const managedGroup = (hooks: Record<string, any>) => hooks[Object.keys(hooks).find(name => name.startsWith("crosshead-agy-"))!];
 const userStep = (index: number, content: string) => ({ step_index: index, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", content });
+const fullUserStep = (index: number, content: string) => userStep(index,
+	`<USER_REQUEST>\n${content}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-21T13:43:22-05:00.\n</ADDITIONAL_METADATA>`);
 const modelStep = (index: number, content: string) => ({ step_index: index, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content });
 
 it("recalls and saves Antigravity turns by transcript user row across repeated prompts and background work", async () => {
@@ -41,7 +43,8 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 	const nextPrompt = "Find the ledger rollback flag.";
 	const nextAnswer = "Use marigold-1881 to roll the migration back.";
 	const session = "first-conversation";
-	const transcriptFor = (id: string) => path.join(realAgyHome, "antigravity-cli", "brain", id, ".system_generated", "logs", "transcript.jsonl");
+	const transcriptFor = (id: string) => path.join(realAgyHome, "antigravity-cli", "brain", id, ".system_generated", "logs",
+		id === session ? "transcript_full.jsonl" : "transcript.jsonl");
 	const addSteps = (id: string, ...steps: object[]) => {
 		const file = transcriptFor(id);
 		mkdirSync(path.dirname(file), { recursive: true });
@@ -86,7 +89,7 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 
 		await daemon.start();
 		await cliRun("memory", "mode", "off", "--profile", "studio");
-		addSteps(session, userStep(1, "Earlier request."), modelStep(2, "An earlier unrelated answer."), userStep(3, prompt));
+		addSteps(session, userStep(1, "Earlier request."), modelStep(2, "An earlier unrelated answer."), fullUserStep(3, prompt));
 		const first = await hook("PreInvocation", session, { workspacePaths: [subdir] });
 		expect(JSON.stringify(first.injectSteps)).toContain("profile=repository");
 		expect(busy()).toBe(true);
@@ -98,7 +101,7 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		expect(busy()).toBe(true);
 		addSteps(session, { ...modelStep(6, answer), thinking: "Private model reasoning.", tool_calls: [{}] });
 		// A model can finish its reply while a background command still runs.
-		await hook("Stop", session, { fullyIdle: false });
+		await hook("Stop", session, { fullyIdle: false, terminationReason: "NO_TOOL_CALL" });
 		expect(busy()).toBe(false);
 		await expect.poll(() => hot("repository"), { timeout: 6_000 }).toContain(answer);
 		await hook("Stop", session);
@@ -109,7 +112,7 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		// The next user turn has a cumulative counter and its response flushes
 		// after the old 600 ms deadline. A resolved user row must win over indexes.
 		const secondInput = { lastUserInput: nextPrompt, invocationNum: 41, initialNumSteps: 900 };
-		addSteps(session, userStep(7, nextPrompt));
+		addSteps(session, fullUserStep(7, nextPrompt));
 		const second = await hook("PreInvocation", session, secondInput);
 		expect(JSON.stringify(second.injectSteps)).toContain(answer);
 		await Promise.all([
@@ -125,7 +128,7 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		expect(busy()).toBe(false);
 
 		// Repeating the exact prompt with a fresh USER_INPUT does start a turn.
-		addSteps(session, userStep(9, nextPrompt));
+		addSteps(session, fullUserStep(9, nextPrompt));
 		const repeated = await hook("PreInvocation", session, secondInput);
 		expect(JSON.stringify(repeated.injectSteps)).toContain(nextAnswer);
 		addSteps(session, modelStep(10, "A newly confirmed rollback flag is iris-7241."));
@@ -149,6 +152,7 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		expect(await events("turn.completed")).toHaveLength(3);
 		expect(await hook("PreInvocation", "other-conversation", { workspacePaths: [separate] })).toEqual({});
 		expect(await hook("PreInvocation", "mixed", { workspacePaths: [project, separate] })).toEqual({});
+		expect(await hook("PreInvocation", "wrong-log", { transcriptPath: path.join(path.dirname(transcriptFor("wrong-log")), "other.jsonl") })).toEqual({});
 		expect(await hook("PreInvocation", "app", { transcriptPath: path.join(agyHome, "antigravity", "brain", "app", ".system_generated", "logs", "transcript.jsonl") })).toEqual({});
 		await cliRun("memory", "mode", "manual", "--profile", "repository");
 		expect(await hook("PreInvocation", "manual")).toEqual({});

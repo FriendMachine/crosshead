@@ -55,9 +55,23 @@ const transcriptForConversation = (geminiHome: string, conversationId: string, p
 	if (typeof provided !== "string") return null;
 	const supplied = provided.startsWith("~/") ? path.join(os.homedir(), provided.slice(2)) : provided;
 	if (!path.isAbsolute(supplied)) return null;
-	const suffix = path.join("antigravity-cli", "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
+	const name = path.basename(supplied);
+	if (name !== "transcript.jsonl" && name !== "transcript_full.jsonl") return null;
+	const suffix = path.join("antigravity-cli", "brain", conversationId, ".system_generated", "logs", name);
 	const expected = path.join(geminiHome, suffix);
 	return [expected, path.join(realpathSync(geminiHome), suffix)].includes(path.resolve(supplied)) ? expected : null;
+};
+
+// The full CLI transcript wraps the user text and appends local metadata.
+// The hook's lastUserInput is the original text without that envelope.
+const transcriptPrompt = (content: string, truncated: boolean): string => {
+	const opening = "<USER_REQUEST>\n";
+	const closing = "\n</USER_REQUEST>";
+	if (!content.startsWith(opening)) return content;
+	const metadata = content.lastIndexOf(closing + "\n<ADDITIONAL_METADATA>");
+	if (metadata >= opening.length) return content.slice(opening.length, metadata);
+	if (content.endsWith(closing)) return content.slice(opening.length, -closing.length);
+	return truncated ? content.slice(opening.length) : content;
 };
 
 const readLatestTurn = (geminiHome: string, transcript: string): TranscriptTurn | null => {
@@ -82,10 +96,12 @@ const readLatestTurn = (geminiHome: string, transcript: string): TranscriptTurn 
 			if (!step || !Number.isSafeInteger(step.step_index)) continue;
 			if (step.source === "USER_EXPLICIT" && step.type === "USER_INPUT") {
 				if (typeof step.content !== "string") return null;
+				const truncated = Array.isArray(step.truncated_fields) && step.truncated_fields.includes("content");
+				const prompt = transcriptPrompt(step.content, truncated);
 				return {
-					user: digest(JSON.stringify([step.step_index, step.created_at, step.content])),
-					prompt: step.content,
-					truncated: Array.isArray(step.truncated_fields) && step.truncated_fields.includes("content"),
+					user: digest(JSON.stringify([step.step_index, step.created_at, prompt])),
+					prompt,
+					truncated,
 					reply,
 				};
 			}
@@ -126,6 +142,10 @@ const prepareTurn = async (config: NativeHostConfig, active: ActiveTurn, prompt:
 	active.packId = result.packId ?? null;
 	return result.contextText ? { injectSteps: [{ ephemeralMessage: result.contextText }] } : {};
 };
+
+// Some agy versions emit the model run's internal stop reason rather than
+// the public hook example's model_stop value.
+const isCompletedResponse = (reason: unknown) => reason === "model_stop" || reason === "NO_TOOL_CALL";
 
 const handleHook = async (event: "prepare" | "complete", input: AgyHookInput, home?: string) => {
 	const { conversationId: sessionId, lastUserInput: prompt, workspacePaths } = input;
@@ -188,7 +208,7 @@ const handleHook = async (event: "prepare" | "complete", input: AgyHookInput, ho
 	if (!active || !sameRequest) return {};
 	let finishedUser: TranscriptTurn | null = null;
 	try {
-		if (!matches || !canCapture || input.terminationReason !== "model_stop" || input.error) return {};
+		if (!matches || !canCapture || !isCompletedResponse(input.terminationReason) || input.error) return {};
 		recordHostActivity(paths);
 		const deadline = Date.now() + TRANSCRIPT_WAIT_MS;
 		for (;;) {
