@@ -140,7 +140,21 @@ const render = (value: Record<string, unknown> | Record<string, unknown>[], json
 			const delivery = row.delivery as Record<string, unknown> | null | undefined;
 			if (delivery) lines.push(`  Delivery: ${String(delivery.summary)}`);
 			const settlement = row.settlement as Record<string, unknown> | null | undefined;
-			if (settlement) lines.push(`  Settlement: ${String(settlement.settlementId ?? settlement.settlementRef)}`);
+			if (settlement) {
+				const amount = settlement.amount_credits !== undefined ? ` (${String(settlement.amount_credits)} credits)` : "";
+				lines.push(`  Settlement: ${String(settlement.settlement_id ?? settlement.settlementId ?? settlement.settlementRef)}${amount}`);
+			}
+			const handoff = row.handoff as Record<string, unknown> | null | undefined;
+			if (handoff) {
+				const state = handoff.importedAt
+					? `imported (${String(handoff.importResult)})`
+					: handoff.receivedAt
+						? "received; run `crosshead deal start` to read the brief"
+						: handoff.sentAt
+							? "sent to the provider"
+							: "pending";
+				lines.push(`  Handoff: ${String(handoff.capsuleId ?? handoff.attachmentId)} ${state}`);
+			}
 			if (row.nextStep) lines.push(`  Next: ${String(row.nextStep)}`);
 			if (row.lastError) lines.push(`  Last error: ${String(row.lastError)}`);
 			for (const [key, label] of [["sent", "Sent"], ["note", "Note"]] as const) {
@@ -377,7 +391,12 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					const imported = JSON.parse(await handoffFromCli(importArgs)) as Record<string, unknown>;
 					process.exitCode = previousExitCode;
 					record.handoff.importedAt = new Date().toISOString();
-					record.handoff.importResult = imported.accepted === true ? "accepted" : `refused: ${JSON.stringify(imported.errors ?? imported.reason ?? imported)}`;
+					const verification = imported.verification as { errors?: unknown } | undefined;
+					const reasons = Array.isArray(verification?.errors) ? (verification!.errors as unknown[]).map(String) : [];
+					// The brief is still shown below: a refused import only means it was not added to host memory.
+					record.handoff.importResult = imported.accepted === true
+						? "accepted"
+						: `not imported into host memory: ${reasons.join("; ") || String(imported.reason ?? "unknown reason")}`;
 					saveAgentDeal(paths, record);
 					const capsule = JSON.parse(content) as { continuityIr?: { operationalContext?: { currentPrompt?: string | null } } };
 					lines.push(`Handoff from the requester: ${record.handoff.importResult}`);

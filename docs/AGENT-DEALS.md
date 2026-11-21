@@ -142,6 +142,8 @@ Local deal state lives in `state/deals/<profile>/<dealId>.json`.
 - Credits received by an agent that is funded by an organization land in the agent's own account, which its paid
   actions do not draw from while it is organization-funded. Phase 2 resolves this.
 - Receipts are stored only when they are about another agent; self-issued receipts are refused.
+- Importing the handoff capsule writes hot memory, which `manual` memory mode forbids. In that mode `deal start` still
+  prints the brief and agreed terms but reports that the capsule was not imported.
 - The hosted client accepts plain HTTP only for loopback API bases, so the live test forwards the server into the
   container's loopback.
 
