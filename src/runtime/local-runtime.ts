@@ -3008,6 +3008,28 @@ export class OnlyBotsLocalRuntimeDaemon {
 		return updated as unknown as Record<string, unknown>;
 	}
 
+	/**
+	 * Opens the profile's agent identity and hosted session for in-process commands that sign with
+	 * the agent key (agent deals). Call persist() after the last hosted call to keep the session.
+	 */
+	async openAgentSession(profileName?: string): Promise<{
+		profileName: string;
+		nsec: string;
+		agentRef: { agentId: string; npub: string; lineageRoot: string };
+		client: HostedOnlyBotsClient;
+		persist: () => Promise<void>;
+	}> {
+		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({ profileName });
+		const inspection = await this.inspectPersistentAgent(undefined, resolvedProfileName);
+		return {
+			profileName: resolvedProfileName,
+			nsec: secret.nsec,
+			agentRef: inspection.agent.agentRef,
+			client,
+			persist: () => this.persistSession(resolvedProfileName, secret, client),
+		};
+	}
+
 	async mintHandoffTrustReceipt(request: Record<string, unknown>, profileName?: string): Promise<Record<string, unknown>> {
 		const readStringValue = (...values: unknown[]): string | undefined => {
 			for (const value of values) {

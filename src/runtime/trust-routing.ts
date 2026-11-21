@@ -74,7 +74,7 @@ const decodeNpubPublicKey = (npub: string): Uint8Array => {
 const buildReceiptPayload = (receipt: Omit<TrustReceipt, "payloadHash" | "signature">): string =>
 	stableStringify(receipt);
 
-const signTrustReceiptPayload = async (
+export const signTrustReceiptPayload = async (
 	receipt: Omit<TrustReceipt, "payloadHash" | "signature">,
 	nsec: string
 ): Promise<{ payloadHash: string; signature: string }> => {
