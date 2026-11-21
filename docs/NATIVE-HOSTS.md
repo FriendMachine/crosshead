@@ -1,4 +1,4 @@
-# Hermes and OpenCode plugins
+# Hermes, OpenCode, and Antigravity CLI
 
 These native plugins use the same Crosshead profile, authenticated local daemon,
 workspace scoping, memory modes, and durable hot memory as the other adapters.
@@ -118,3 +118,34 @@ containers and volumes; before/after inventories and logs remain in the ignored
 This verifies host lifecycle integration, not inference quality or hosted
 billing/sync availability. No production service changes are required for local
 capture and injection.
+
+
+## Antigravity CLI
+
+For a personal Gemini account, sign in to [Antigravity CLI](https://antigravity.google/docs/getting-started?tab=cli) as usual, then connect it to Crosshead:
+
+```sh
+crosshead quickstart --adapter agy --profile work
+```
+
+For an existing Crosshead profile, use `crosshead install agy --profile work`.
+Restart `agy` in a trusted project and type `/hooks` to find the Crosshead hook
+with `PreInvocation` and `Stop` handlers. The installation adds its own group
+in `~/.gemini/config/hooks.json` and preserves other groups. `--agy-home` sets
+an alternate root for the `.gemini` directory layout.
+
+In `assist` or `auto` mode, Crosshead loads the repository’s working memory
+before model generation. It captures the final assistant text from the local
+transcript when the model finishes its reply, even if a background command is
+still running. To verify it, finish a turn that records a
+specific project finding, then open a fresh session in the same repository and
+ask the agent to pick up the work. You can inspect the checkpoint with
+`crosshead memory hot --profile work`.
+
+The setup profile is the default for `agy`. An existing Crosshead workspace
+profile override takes precedence. Memory stays scoped to a single repository
+per session. `agy` sessions spanning different projects skip automatic memory
+so updates stay with the right workspace. The adapter is for `agy` sessions
+with a local Antigravity CLI transcript. See [Antigravity’s hook reference](https://antigravity.google/docs/hooks).
+
+Run `crosshead uninstall agy` to remove the Crosshead hooks, then restart `agy`.

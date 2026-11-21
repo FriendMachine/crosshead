@@ -286,7 +286,7 @@ export type RuntimeConfig = {
 	updatedAt: string;
 };
 
-export type RuntimeAdapterName = "codex" | "claude-code" | "pi" | "hermes" | "opencode";
+export type RuntimeAdapterName = "codex" | "claude-code" | "pi" | "hermes" | "opencode" | "agy";
 
 export type OnlyBotsRuntimeManifest = {
 	channel?: RuntimeChannel;
@@ -472,7 +472,7 @@ type GeneratedRuntimeIdentity = {
 };
 
 type ManagedAdapterReinstallSpec =
-	| { name: "hermes" | "opencode"; profileName: string; hostHome: string | null; hostBinary: string }
+	| { name: "hermes" | "opencode" | "agy"; profileName: string; hostHome: string | null; hostBinary: string }
 	| {
 			name: "codex";
 			profileName: string;
@@ -740,6 +740,7 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 			pi: "0.3.0",
 			hermes: "0.1.0",
 			opencode: "0.1.0",
+			agy: "0.1.0",
 		},
 		migrationNotes: ["Stable channel prioritizes reproducibility over the newest host shims."],
 	},
@@ -751,6 +752,7 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 			pi: "0.3.1-beta.1",
 			hermes: "0.1.0",
 			opencode: "0.1.0",
+			agy: "0.1.0",
 		},
 		migrationNotes: ["Beta channel includes newer adapter shims and manifest handling improvements."],
 	},
@@ -762,6 +764,7 @@ const RUNTIME_RELEASE_CATALOG: Record<RuntimeChannel, RuntimeReleaseChannelEntry
 			pi: "0.3.2-canary.1",
 			hermes: "0.1.0",
 			opencode: "0.1.0",
+			agy: "0.1.0",
 		},
 		migrationNotes: ["Canary channel is intended for early validation before promoting a release downstream."],
 	},
@@ -1290,15 +1293,19 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 	}
 	const policy = readWorkspaceHookPolicy(paths);
 	const daemon = readDaemonOwnershipState(paths);
+	const removeInstalledRuntime = async () => {
+		if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
+		const { uninstallNativeHostAdapter } = await import("./native-host-adapter");
+		await uninstallNativeHostAdapter("agy", paths.home);
+		rmSync(canonicalHome, { recursive: true, force: true });
+	};
 	if (policy) {
 		await withWorkspaceSetupLock(paths, async () => {
 			applyWorkspaceHookPlan(planWorkspaceHooks({ home: paths.home, scope: "manual", targets: [], cleanup: true }));
-			if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-			rmSync(canonicalHome, { recursive: true, force: true });
+			await removeInstalledRuntime();
 		});
 	} else {
-		if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-		rmSync(canonicalHome, { recursive: true, force: true });
+		await removeInstalledRuntime();
 	}
 	if (resolvedHome !== canonicalHome) {
 		try { if (lstatSync(resolvedHome).isSymbolicLink()) rmSync(resolvedHome, { force: true }); }
@@ -1458,7 +1465,7 @@ const installManagedAdapter = async (
 		hostHome?: string | null;
 	}
 ): Promise<string> => {
-	if (adapterName === "hermes" || adapterName === "opencode") {
+	if (adapterName === "hermes" || adapterName === "opencode" || adapterName === "agy") {
 		const { installNativeHostAdapter, loadNativeHostConfig } = await import("./native-host-adapter");
 		const config = loadNativeHostConfig(adapterName, options.home);
 		const result = await installNativeHostAdapter(adapterName, { home: options.home, hostHome: options.hostHome ?? config.hostHome,
@@ -1570,7 +1577,7 @@ const collectManagedAdapterReinstallSpecs = async (paths: RuntimePaths): Promise
 	const records = listAdapterRecords(paths).filter((adapter) => RUNTIME_ADAPTER_NAMES.includes(adapter.name as RuntimeAdapterName));
 	for (const adapter of records) {
 		const profileName = adapter.profileName ?? loadRuntimeConfig(paths).defaultProfile ?? "default";
-		if (adapter.name === "hermes" || adapter.name === "opencode") {
+		if (adapter.name === "hermes" || adapter.name === "opencode" || adapter.name === "agy") {
 			const { loadNativeHostConfig } = await import("./native-host-adapter");
 			const config = loadNativeHostConfig(adapter.name, paths.home);
 			specs.push({ name: adapter.name, profileName, hostHome: config.hostHome, hostBinary: config.hostBinary });
@@ -1749,6 +1756,9 @@ export const reapplyManagedRuntimeRelease = async (
 	if (specs.some(spec => spec.name === "hermes" || spec.name === "opencode") && !existsSync(path.join(release.releaseRoot, "dist", "runtime", "native-host-adapter.js"))) {
 		throw new Error("Target release does not support installed Hermes/OpenCode plugins; uninstall those adapters before downgrading");
 	}
+	if (specs.some(spec => spec.name === "agy") && !existsSync(path.join(release.releaseRoot, "dist", "runtime", "agy-hook.js"))) {
+		throw new Error("Target release does not support installed Antigravity CLI hooks. Uninstall the adapter before downgrading.");
+	}
 	const workspacePolicy = readWorkspaceHookPolicy(paths);
 	const workspaceModule = path.join(release.releaseRoot, "dist", "runtime", "workspace-hooks.js");
 	if (workspacePolicy && !existsSync(workspaceModule)) throw new Error("This release does not support the configured workspace hooks.");
@@ -1767,7 +1777,7 @@ export const reapplyManagedRuntimeRelease = async (
 
 	const adapters: Array<{ name: RuntimeAdapterName; version: string }> = [];
 	for (const spec of specs) {
-		if (spec.name === "hermes" || spec.name === "opencode") {
+		if (spec.name === "hermes" || spec.name === "opencode" || spec.name === "agy") {
 			const nextNative = require(path.join(release.releaseRoot, "dist", "runtime", "native-host-adapter.js")) as typeof import("./native-host-adapter");
 			const result = await nextNative.installNativeHostAdapter(spec.name, { home: paths.home, hostHome: spec.hostHome ?? undefined,
 				profileName: spec.profileName, hostBinary: spec.hostBinary });
