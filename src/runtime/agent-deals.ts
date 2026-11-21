@@ -473,3 +473,7 @@ export const unsentOwnEvents = (record: LocalAgentDealRecord): SignedAgentDealEv
 /** The text a deal handoff capsule carries in `delegation.whyTransfer`, binding it to one agreement. */
 export const dealHandoffBinding = (state: AgentDealChainState): string =>
 	`crosshead deal ${state.dealId} agreement ${state.agreement?.acceptanceEventHash ?? "none"}`;
+
+/** Signs an arbitrary canonical payload with the agent key (BIP-340 Schnorr over the payload bytes). */
+export const signCanonicalPayload = (canonicalPayload: string, nsec: string): string =>
+	Buffer.from(schnorr.sign(textEncoder.encode(canonicalPayload), nsecToPrivateKey(nsec))).toString("hex");
