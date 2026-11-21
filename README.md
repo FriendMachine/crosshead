@@ -121,7 +121,7 @@ registrations after scoped setup. Review and restart host sessions after a
 scope change. Source excerpts are off for new bindings unless you choose
 `--source-excerpts on`. Checkpoints can still contain prompts and summaries.
 
-Other hosts use `crosshead quickstart --adapter pi|omp|hermes|opencode`.
+Other hosts use `crosshead quickstart --adapter pi|omp|hermes|opencode|gemini`.
 
 The installer downloads one release tarball, checks its SHA-256 against the
 installer script, installs the runtime npm dependencies with install scripts
@@ -161,6 +161,24 @@ install tarball, verify it with
 `gh attestation verify <tarball> --repo FriendMachine/crosshead`. Releases are
 reproducible: `npm ci && npm run release:build` at the tagged commit yields the
 same bytes (see [Releases](#releases)).
+
+### Gemini CLI
+
+Run `crosshead quickstart --adapter gemini --profile work` from the project, or
+`crosshead install gemini --profile work` if the Crosshead profile is already set
+up. Restart Gemini CLI after setup, open a project you trust, and run
+`/hooks panel` to see the Crosshead hooks. Crosshead adds user-level hooks to
+`~/.gemini/settings.json`. The hooks use the selected profile across Gemini CLI
+sessions and keep each repository’s working memory separate. With automatic
+memory enabled, Crosshead loads that project’s working memory before each turn
+and saves a bounded prompt and final response afterward. Use
+`--gemini-home` to point at a different `.gemini` settings directory. To remove the
+hooks, run `crosshead uninstall gemini`.
+
+This adapter uses the [Gemini CLI hook contract](https://geminicli.com/docs/hooks/reference/).
+Google moved individual Gemini Code Assist users to Antigravity CLI. The Gemini
+CLI adapter is for installations authenticated through an eligible API key or
+enterprise license. [Google’s transition details](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)
 
 ## Choose what memory can retain
 

@@ -27,7 +27,8 @@ const REQUIRED = [
 	"LICENSE", "TRADEMARKS.md", "package.json", "package-lock.json",
 	...["cli", "daemon", "local-runtime", "codex-adapter", "claude-code-adapter", "pi-adapter",
 		"codex-bridge", "codex-hook", "claude-code-bridge", "claude-code-hook",
-		"native-host-adapter", "native-host-hook", "hermes-plugin", "opencode-plugin"].map((name) => `dist/runtime/${name}.js`),
+		"native-host-adapter", "native-host-hook", "hermes-plugin", "opencode-plugin",
+		"gemini-cli-hook", "gemini-cli-settings"].map((name) => `dist/runtime/${name}.js`),
 ];
 const ALLOWED = /^(LICENSE|TRADEMARKS\.md|package\.json|package-lock\.json|dist\/(runtime|protocol)\/[A-Za-z0-9/_.-]+\.js)$/;
 // Hosted-service code and credentials must never appear in a client release.

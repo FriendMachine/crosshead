@@ -96,6 +96,7 @@ export type HostAdapterTurnPrepareResult = {
 };
 
 export type HostAdapterTurnCompleteRequest = {
+  eventId?: string;
   taskEvidence?: TaskEvidence;
   profileName?: string;
   workspaceRoot: string;
@@ -424,6 +425,7 @@ export abstract class HostRuntimeAdapterBase {
       sessionId: input.sessionId,
       turnId: input.turnId,
       type: "turn.completed",
+      eventId: input.eventId,
       payload: {
         packId: input.packId ?? null,
         goal: input.goal ?? null,
