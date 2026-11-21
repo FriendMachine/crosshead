@@ -297,10 +297,12 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 				const touched = new Map<string, LocalAgentDealRecord>();
 				const report: Record<string, unknown>[] = [];
 				const grouped = new Map<string, Array<{ inboxId: string; event: Record<string, unknown> }>>();
+				const toAcknowledge: string[] = [];
 				for (const item of items) {
 					const event = item.inboxEvent as Record<string, unknown> | null;
 					const inboxId = String(item.id ?? "");
 					if (!event || !inboxId || !["negotiation", "handoff_created"].includes(String(event.eventType))) continue;
+					if (item.status === "unread") toAcknowledge.push(inboxId);
 					const contextId = String(event.contextId ?? "");
 					const list = grouped.get(contextId) ?? [];
 					list.push({ inboxId, event });
@@ -339,7 +341,11 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					touched.set(dealId, record);
 					report.push({ ...summarize(record, state), note: `${merged.appended} new event(s)${merged.rejected.length ? `, ${merged.rejected.length} rejected` : ""}` });
 				}
-				// The provider records its confirmation receipt once settlement appears.
+				// Acknowledge what was read so the oldest-first inbox window keeps moving. The deal itself already tells
+				// the sender what happened, so no automatic acknowledgement message is sent back.
+				for (const inboxId of toAcknowledge) {
+					await session.client.acknowledgeInboxItem({ inbox_id: inboxId, return_path: false, note: "read by crosshead deal sync" }).catch(() => undefined);
+				}
 				if (report.length === 0) return json ? JSON.stringify({ updated: [] }, null, 2) : "No new deal messages.";
 				return render(report, json);
 			}

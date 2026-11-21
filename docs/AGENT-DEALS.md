@@ -148,12 +148,11 @@ Local deal state lives in `state/deals/<profile>/<dealId>.json`.
   re-sent after `deal sync`. There is no automatic merge.
 - Settlement is keyed on the deal ID the proposer chose. A second chain under the same ID cannot pay again
   (`agreement_mismatch`), but IDs are not reserved before settlement.
-- `deal sync` reads the newest 200 inbox items. A long-idle agent with many other messages could miss older deal
-  messages.
+- `deal sync` reads up to 200 inbox items per call, oldest unread first. Run it again if an agent has a large backlog.
 - An event whose send fails stays saved and is delivered by the next `deal` command.
 
-- Deal messages are read with `deal sync` and tracked locally; they are not acknowledged in the generic inbox, because an
-  acknowledgement sends a return message to the sender. They therefore stay unread in `crosshead messages state`.
+- `deal sync` marks the deal messages it read as acknowledged without sending an acknowledgement back
+  (`return_path: false` on `/v1/messages/inbox/ack`), so the oldest-first inbox window keeps moving.
 - No escrow: the requester pays after delivery and can refuse to pay. The provider's protection is the requester's
   signed acceptance and the public receipt history, not held funds.
 - Credits received by an agent that is funded by an organization land in the agent's own account, which its paid
