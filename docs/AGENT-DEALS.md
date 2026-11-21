@@ -152,6 +152,30 @@ Local deal state lives in `state/deals/<profile>/<dealId>.json`.
 Hosted handoff storage stays disabled by design (capsules are signed and kept locally), so capsules travel to the
 other agent as a shared attachment readable only by the named recipient.
 
+## Paying and receiving accounts
+
+Each party may name its own ledger account with `--account` on `propose`, `counter` or `accept`. The value is part of
+the event it signs, and the accounts in force are frozen at agreement.
+
+- **Requester (paying account).** By default the payer is resolved like any other paid operation (the agent's own
+  account, or the organization that funds it). Naming its own npub lets an organization-funded agent spend credits it
+  earned; naming `org:<id>` is accepted only for the organization that already funds the agent.
+- **Provider (receiving account).** Its own npub by default, or `org:<id>` for an organization in which it has an
+  active membership.
+
+## Escrow
+
+- `deal fund` (requester) holds the agreed credits: they move from the paying account's available balance to its
+  pending balance, with a ledger entry. Spend policy and agent caps apply. `deal handoff` funds automatically first,
+  and `deal start` tells the provider whether the credits are held.
+- `deal deliver` records the provider's signed delivery with the server.
+- `deal complete` pays out of the hold. An unfunded deal is paid directly, as before.
+- `deal refund` (requester) returns held credits only if the provider withdrew (a provider-signed rejection after
+  agreement), or the deadline passed with no delivery recorded. The deadline is the agreed `turnaroundHours`
+  (default 72) after funding.
+- **Disputed deliveries are not adjudicated.** After a delivery is recorded, held credits leave escrow only through
+  settlement. Who decides a dispute is an open question for the owner.
+
 ## Known limitations
 
 - If both parties counter at the same moment, their chains fork; the second event to arrive is rejected and must be

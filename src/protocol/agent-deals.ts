@@ -18,6 +18,7 @@ const DEAL_ID_PATTERN = /^ctx_[a-z0-9][a-z0-9_-]{2,127}$/;
 const NPUB_PATTERN = /^npub1[023456789acdefghjklmnpqrstuvwxyz]+$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SIGNATURE_PATTERN = /^[0-9a-f]{128}$/;
+const ACCOUNT_PATTERN = /^(npub1[023456789acdefghjklmnpqrstuvwxyz]{58}|org:[a-z0-9][a-z0-9_-]{1,127})$/;
 
 export type AgentDealParties = {
   requesterNpub: Npub;
@@ -36,6 +37,12 @@ export type SignedAgentDealEvent = {
   offerRef: string | null;
   /** Present on sequence 0 only. */
   workSummary: string | null;
+  /**
+   * The signer's own ledger account for this deal: the requester's paying account or the provider's receiving
+   * account (`npub1…` or `org:<id>`). Omitted or null keeps the default. The value in force is the latest one each
+   * party signed on or before the agreement.
+   */
+  account?: string | null;
   event: NegotiationEvent;
   signerNpub: Npub;
   eventHash: string;
@@ -51,6 +58,9 @@ export type AgentDealAgreement = {
   terms: NegotiationTerms;
   /** Agreed price in ledger credit units (the historical `priceSats` field). */
   priceCredits: number;
+  /** Accounts each party named on or before the agreement; null means the default. */
+  requesterAccount: string | null;
+  providerAccount: string | null;
 };
 
 export type AgentDealChainState = {
@@ -149,6 +159,9 @@ export const validateSignedAgentDealEvent = (value: unknown, fieldName = "dealEv
     if (value.offerRef !== null) errors.push(`${fieldName}.offerRef must be null after sequence 0`);
     if (value.workSummary !== null) errors.push(`${fieldName}.workSummary must be null after sequence 0`);
   }
+  if (value.account !== undefined && value.account !== null && (typeof value.account !== "string" || !ACCOUNT_PATTERN.test(value.account))) {
+    errors.push(`${fieldName}.account must be an npub or org:<id>`);
+  }
   errors.push(...validateNegotiationEvent(value.event, `${fieldName}.event`));
   if (typeof value.signerNpub !== "string" || !NPUB_PATTERN.test(value.signerNpub)) {
     errors.push(`${fieldName}.signerNpub must be an npub`);
@@ -186,6 +199,7 @@ export const verifyAgentDealChain = async (
   }
   let state: AgentDealChainState | null = null;
   let lastOffer: { signerNpub: Npub; eventHash: string; terms: NegotiationTerms } | null = null;
+  const namedAccounts: { requester: string | null; provider: string | null } = { requester: null, provider: null };
   const seenEventIds = new Set<string>();
 
   for (const [index, raw] of events.entries()) {
@@ -254,6 +268,15 @@ export const verifyAgentDealChain = async (
       throw new AgentDealChainError(`events[${index}] changes the signer's agent reference`);
     }
     current.agentRefs[signed.signerNpub] = (signed.event.createdBy as { agentRef: PersistentAgentReference }).agentRef;
+    if (signed.account !== undefined && signed.account !== null) {
+      if (current.agreement) {
+        throw new AgentDealChainError(`events[${index}]: accounts are fixed at agreement and cannot change afterwards`);
+      }
+      if (signed.account.startsWith("npub1") && signed.account !== signed.signerNpub) {
+        throw new AgentDealChainError(`events[${index}]: an agent can only name its own npub as an account`);
+      }
+      namedAccounts[signed.signerNpub === current.parties.requesterNpub ? "requester" : "provider"] = signed.account;
+    }
 
     if (["settled", "rejected", "expired", "cancelled"].includes(current.status)) {
       throw new AgentDealChainError(`events[${index}] follows terminal status ${current.status}`);
@@ -293,6 +316,8 @@ export const verifyAgentDealChain = async (
           acceptanceEventHash: signed.eventHash,
           terms: lastOffer.terms,
           priceCredits: lastOffer.terms.priceSats as number,
+          requesterAccount: namedAccounts.requester,
+          providerAccount: namedAccounts.provider,
         };
         break;
       }

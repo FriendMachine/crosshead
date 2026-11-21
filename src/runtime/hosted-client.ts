@@ -1090,6 +1090,33 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
+  /** Holds the agreed credits in escrow on the requester's paying account. */
+  async holdAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/hold", { method: "POST", body, auth: true });
+    return response.data;
+  }
+
+  /** Records the provider's signed delivery with the server, so a hold cannot be refunded as undelivered. */
+  async recordAgentDealDelivery(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/delivery", { method: "POST", body, auth: true });
+    return response.data;
+  }
+
+  /** Returns held credits to the requester when the provider withdrew or nothing was delivered in time. */
+  async refundAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/refund", { method: "POST", body, auth: true });
+    return response.data;
+  }
+
+  async readAgentDealHold(dealId: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>(`/deals/holds/${encodeURIComponent(dealId)}`, { method: "GET", auth: true });
+    return response.data;
+  }
+
   async readAgentDealSettlement(dealId: string): Promise<Record<string, unknown>> {
     await this.ensureSession();
     const response = await this.request<Record<string, unknown>>(`/deals/settlements/${encodeURIComponent(dealId)}`, {
