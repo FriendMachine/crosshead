@@ -97,6 +97,13 @@ const summarize = (record: LocalAgentDealRecord, state: AgentDealChainState | nu
 			const last = record.events[record.events.length - 1];
 			return last ? { type: last.event.eventType, by: last.signerNpub === record.selfNpub ? "you" : "counterparty", summary: last.event.summary, at: last.event.createdAt } : null;
 		})(),
+		history: record.events.map((event) => ({
+			sequence: event.sequence,
+			type: event.event.eventType,
+			by: event.signerNpub === record.selfNpub ? "you" : "counterparty",
+			priceCredits: event.event.terms?.priceSats ?? null,
+			summary: event.event.summary.length > 160 ? `${event.event.summary.slice(0, 157)}...` : event.event.summary,
+		})),
 		delivery: state.delivery,
 		handoff: record.handoff,
 		settlement: record.settlement ?? (state.settlementRef ? { settlementRef: state.settlementRef } : null),
@@ -123,8 +130,13 @@ const render = (value: Record<string, unknown> | Record<string, unknown>[], json
 				const criteria = terms.acceptanceCriteria as string[];
 				if (criteria?.length) lines.push(`  Acceptance: ${criteria.join("; ")}`);
 			}
-			const latest = row.latestEvent as Record<string, unknown> | null | undefined;
-			if (latest) lines.push(`  Latest: ${String(latest.type)} by ${String(latest.by)}: ${String(latest.summary)}`);
+			const history = row.history as Array<Record<string, unknown>> | undefined;
+			if (history && history.length > 0) {
+				lines.push("  History:");
+				for (const entry of history) {
+					lines.push(`    ${String(entry.sequence)}. ${String(entry.type)} by ${String(entry.by)}${entry.priceCredits !== null ? ` (${String(entry.priceCredits)} credits)` : ""}: ${String(entry.summary)}`);
+				}
+			}
 			const delivery = row.delivery as Record<string, unknown> | null | undefined;
 			if (delivery) lines.push(`  Delivery: ${String(delivery.summary)}`);
 			const settlement = row.settlement as Record<string, unknown> | null | undefined;
