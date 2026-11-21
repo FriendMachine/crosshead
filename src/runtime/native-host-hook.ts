@@ -7,7 +7,7 @@ import { LocalRuntimeClient } from "./local-client";
 import { loadNativeHostConfig, NativeHostRuntimeAdapter, type NativeHost, type NativeHostConfig } from "./native-host-adapter";
 
 export const NATIVE_HOST_WARNING = "Crosshead continuity is unavailable for this turn. Do not assume saved memory was loaded or this turn was captured. Run crosshead doctor to diagnose.";
-export type NativeHostTurn = { workspaceRoot: string; sessionId: string; turnId: string; prompt: string; summary?: string; packId?: string | null };
+export type NativeHostTurn = { workspaceRoot: string; sessionId: string; turnId: string; prompt: string; profileName?: string; summary?: string; packId?: string | null };
 export type NativeHostEvent = "prepare" | "complete" | "failed" | "compact-started" | "compact-completed";
 export const dispatchNativeHostEvent = async (config: NativeHostConfig, event: NativeHostEvent, input: NativeHostTurn) => {
   if (!input || typeof input.workspaceRoot !== "string" || !path.isAbsolute(input.workspaceRoot) ||
@@ -15,10 +15,12 @@ export const dispatchNativeHostEvent = async (config: NativeHostConfig, event: N
     !input.turnId || typeof input.turnId !== "string" || input.turnId.length > 512 || typeof input.prompt !== "string") throw new Error("Invalid host event");
   recordHostActivity(resolveRuntimePaths(config.runtimeHome));
   await ensureHookRuntime(config.runtimeHome);
-  const status = await new LocalRuntimeClient({ home: config.runtimeHome, timeoutMs: 5_000 }).status(config.profileName);
-  if (event === "prepare" && status.profile?.memoryMode === "off") return { ok: true, contextText: "", packId: null };
+  const profileName = config.name === "agy" ? input.profileName ?? config.profileName : config.profileName;
+  const status = await new LocalRuntimeClient({ home: config.runtimeHome, timeoutMs: 5_000 }).status(profileName);
+  const mode = status.profile?.memoryMode;
+  if ((event === "prepare" && mode === "off") || (config.name === "agy" && mode !== "auto" && mode !== "assist")) return { ok: true, contextText: "", packId: null };
   const adapter = new NativeHostRuntimeAdapter(config);
-  const base = { workspaceRoot: path.resolve(input.workspaceRoot), sessionId: input.sessionId, turnId: input.turnId };
+  const base = { workspaceRoot: path.resolve(input.workspaceRoot), sessionId: input.sessionId, turnId: input.turnId, profileName };
   if (event === "prepare") return { ok: true, ...await adapter.prepareTurn({ ...base, prompt: input.prompt.slice(0, 8192) }) };
   if (event === "compact-started" || event === "compact-completed") {
     await (event === "compact-started" ? adapter.compactStarted({ ...base, summary: "Host context compaction started" }) : adapter.compactCompleted({ ...base, summary: "Host context compaction completed" }));
@@ -27,7 +29,10 @@ export const dispatchNativeHostEvent = async (config: NativeHostConfig, event: N
     const request = { ...base, packId: input.packId, goal: input.prompt.slice(0, 8192), summary,
       transcript: [{ role: "user" as const, content: input.prompt.slice(0, 8192) }, { role: "assistant" as const, content: summary }] };
     if (event === "complete") {
-      if (summary.trim()) await adapter.completeTurn(request);
+      if (summary.trim()) await adapter.completeTurn({
+	...request,
+	eventId: config.name === "agy" ? `agy:${input.turnId}:completed` : undefined,
+      });
     } else if (event === "failed") await adapter.failTurn(request);
     else throw new Error("Unknown host event");
   }

@@ -1,8 +1,8 @@
 # Crosshead runtime
 
-Persistent memory for Claude Code, Codex, Hermes, and OpenCode. This repository contains everything
+Persistent memory for Claude Code, Codex, Hermes, OpenCode, and Antigravity CLI. This repository contains everything
 that runs on your machine: the `crosshead` CLI (`xhd` for short; `onlybotsctl`
-remains for existing scripts), the local daemon, the Claude Code, Codex, Pi, Hermes, and OpenCode
+remains for existing scripts), the local daemon, the Claude Code, Codex, Pi, Hermes, OpenCode, and Antigravity CLI
 adapters, and their lifecycle hooks. The hosted service at
 [crosshead.sh](https://crosshead.sh) is a separate codebase.
 
@@ -121,7 +121,7 @@ registrations after scoped setup. Review and restart host sessions after a
 scope change. Source excerpts are off for new bindings unless you choose
 `--source-excerpts on`. Checkpoints can still contain prompts and summaries.
 
-Other hosts use `crosshead quickstart --adapter pi|omp|hermes|opencode`.
+Other hosts use `crosshead quickstart --adapter pi|omp|hermes|opencode|agy`.
 
 The installer downloads one release tarball, checks its SHA-256 against the
 installer script, installs the runtime npm dependencies with install scripts
@@ -302,6 +302,13 @@ project directories without dropping the remaining runtime diagnostics.
 (`claude plugin uninstall crosshead@crosshead`, `codex plugin remove
 crosshead@crosshead`) to remove its hooks; `crosshead uninstall claude-code`
 and `crosshead uninstall codex` remove installer-written hooks and adapter files.
+
+## Antigravity CLI (`agy`)
+
+Run `crosshead quickstart --adapter agy --profile work` to set up a profile, or
+`crosshead install agy --profile work` to use an existing one. Restart `agy` in
+a trusted project and run `/hooks` to confirm Crosshead is loaded. For setup,
+verification, and removal, see the [Antigravity CLI guide](docs/NATIVE-HOSTS.md#antigravity-cli).
 
 ## Hermes and OpenCode
 
