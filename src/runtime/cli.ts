@@ -19,6 +19,7 @@ import { continuityFromCli } from "./cli/continuity";
 import { applyFromCli, checkUpdatesFromCli, doctorFromCli, eventsFromCli, installCoreFromCli, keygenFromCli, logsFromCli, rollbackFromCli, setupProfileFromCli, startFromCli, statusFromCli, stopFromCli, uninstallFromCli, updateFromCli } from "./cli/core";
 import { handoffFromCli } from "./cli/handoff";
 import { dealFromCli } from "./cli/deal";
+import { rememberFromCli, rememberHelpLine } from "./cli/remember";
 import { memoryFromCli, workspaceFromCli } from "./cli/memory";
 import { messagesFromCli } from "./cli/messages";
 import { publicFromCli } from "./cli/public";
@@ -237,6 +238,9 @@ export const runOnlyBotsCtlCli = async (
 		case "handoff":
 			output = await handoffFromCli(rest);
 			break;
+		case "remember":
+			output = await rememberFromCli(rest);
+			break;
 		case "deal":
 			// Agent deals are in testing and deliberately absent from the general help text.
 			output = await dealFromCli(rest);
@@ -360,6 +364,7 @@ export const runOnlyBotsCtlCli = async (
 				"crosshead usage [on|off] [--profile <name>] [--home <path>] [--json]",
 				"crosshead usage sync <on|off|status|now> [--profile <name> | --all-profiles]",
 				"crosshead usage --all-profiles [--home <path>] [--json]",
+				rememberHelpLine,
 				"crosshead memory sync [--home <path>] [--profile <name>]",
 				"crosshead memory hot reset --scope <scope> [--home <path>] [--profile <name>]",
 				"crosshead memory hot [--inspect] [--home <path>] [--profile <name>] [--json|--debug]",
