@@ -76,7 +76,7 @@ export const hostHooksRunning = (excludePid: number, processTable = (): string =
 		return processTable().split("\n").some(line => {
 			const fields = line.trim().match(/^(\d+)\s+(.+)$/);
 			if (!fields || [excludePid, process.pid].includes(Number(fields[1]))) return false;
-			return /\/dist\/runtime\/(?:codex|claude-code|native-host|agy)-hook\.js(?:\s|$)|\/dist\/runtime\/cli\.js\s+host-hook\s+(?:codex|claude-code)(?:\s|$)/.test(fields[2]!);
+			return /\/dist\/runtime\/(?:codex|claude-code|native-host|agy)-hook\.js(?:\s|$)|\/dist\/runtime\/cli\.js\s+host-hook\s+(?:codex|claude-code|agy)(?:\s|$)/.test(fields[2]!);
 		});
 	} catch { return true; } // Unknown liveness must defer, never force an update.
 };

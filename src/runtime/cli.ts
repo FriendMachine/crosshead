@@ -35,6 +35,7 @@ const homeFlag = (args: string[]): string | undefined => {
 };
 import { parseArgs } from "./adapter-utils";
 import { scopedQuickstartFromCli, uninstallWorkspaceHostFromCli, workspaceHooksFromCli } from "./cli/workspace";
+import { runAgyHookCli } from "./agy-hook";
 import { runOnlyBotsCodexHookCli } from "./codex-hook";
 import { runOnlyBotsClaudeCodeHookCli } from "./claude-code-hook";
 import { reportHookFailure } from "./hook-runtime";
@@ -260,6 +261,10 @@ export const runOnlyBotsCtlCli = async (
 		}
 		case "host-hook": {
 			const [host, ...args] = rest;
+			if (host === "agy") {
+				await runAgyHookCli(args);
+				return;
+			}
 			if (host !== "codex" && host !== "claude-code") throw new Error("Unknown Crosshead hook host");
 			const runHook = host === "codex" ? runOnlyBotsCodexHookCli : runOnlyBotsClaudeCodeHookCli;
 			await runHook(args).catch((error: unknown) => reportHookFailure(host, args[0], error));

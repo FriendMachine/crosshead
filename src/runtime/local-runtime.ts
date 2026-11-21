@@ -1293,15 +1293,19 @@ export const uninstallRuntimeCore = async (home?: string): Promise<void> => {
 	}
 	const policy = readWorkspaceHookPolicy(paths);
 	const daemon = readDaemonOwnershipState(paths);
+	const removeInstalledRuntime = async () => {
+		if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
+		const { uninstallNativeHostAdapter } = await import("./native-host-adapter");
+		await uninstallNativeHostAdapter("agy", paths.home);
+		rmSync(canonicalHome, { recursive: true, force: true });
+	};
 	if (policy) {
 		await withWorkspaceSetupLock(paths, async () => {
 			applyWorkspaceHookPlan(planWorkspaceHooks({ home: paths.home, scope: "manual", targets: [], cleanup: true }));
-			if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-			rmSync(canonicalHome, { recursive: true, force: true });
+			await removeInstalledRuntime();
 		});
 	} else {
-		if (daemonOwnerIsLive(daemon)) await stopDetachedRuntimeDaemon(paths.home);
-		rmSync(canonicalHome, { recursive: true, force: true });
+		await removeInstalledRuntime();
 	}
 	if (resolvedHome !== canonicalHome) {
 		try { if (lstatSync(resolvedHome).isSymbolicLink()) rmSync(resolvedHome, { force: true }); }

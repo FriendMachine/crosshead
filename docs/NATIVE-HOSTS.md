@@ -136,7 +136,8 @@ an alternate root for the `.gemini` directory layout.
 
 In `assist` or `auto` mode, Crosshead loads the repository’s working memory
 before model generation. It captures the final assistant text from the local
-transcript when the turn finishes. To verify it, finish a turn that records a
+transcript when the model finishes its reply, even if a background command is
+still running. To verify it, finish a turn that records a
 specific project finding, then open a fresh session in the same repository and
 ask the agent to pick up the work. You can inspect the checkpoint with
 `crosshead memory hot --profile work`.

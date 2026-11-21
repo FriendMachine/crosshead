@@ -1,28 +1,34 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { LocalRuntimeClient } from "../../src/runtime/local-client";
-import { OnlyBotsLocalRuntimeDaemon } from "../../src/runtime/local-runtime";
-import { installNativeHostAdapter, uninstallNativeHostAdapter } from "../../src/runtime/native-host-adapter";
-import { hostTurnInProgress } from "../../src/runtime/runtime-idle-update";
+import { installRuntimeCore, OnlyBotsLocalRuntimeDaemon, reapplyManagedRuntimeRelease, uninstallRuntimeCore } from "../../src/runtime/local-runtime";
+import { installNativeHostAdapter } from "../../src/runtime/native-host-adapter";
+import { hostHooksRunning, hostTurnInProgress } from "../../src/runtime/runtime-idle-update";
 import { resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
 
-const cli = path.resolve(__dirname, "../../dist/runtime/cli.js");
+const repo = path.resolve(__dirname, "../..");
+const cli = path.join(repo, "dist/runtime/cli.js");
 const exec = promisify(execFile);
 const otherHooks = { lint: { Stop: [{ type: "command", command: "echo '{}'" }] } };
+const managedGroup = (hooks: Record<string, any>) => hooks[Object.keys(hooks).find(name => name.startsWith("crosshead-agy-"))!];
+const userStep = (index: number, content: string) => ({ step_index: index, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", content });
+const modelStep = (index: number, content: string) => ({ step_index: index, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content });
 
-it("installs agy hooks and saves only the finished model response into the selected repository profile", async () => {
-	const root = mkdtempSync(path.join(os.tmpdir(), "crosshead-agy-"));
+it("recalls and saves Antigravity turns by transcript user row across repeated prompts and background work", async () => {
+	const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "crosshead-agy-")));
 	const home = path.join(root, "runtime");
 	const agyHome = path.join(root, "gemini settings");
+	const realAgyHome = path.join(root, "gemini settings data");
 	const project = path.join(root, "project");
 	const subdir = path.join(project, "src");
 	const separate = path.join(root, "other-project");
-	const env = { ...process.env, CROSSHEAD_PROFILE: "", ONLYBOTS_PROFILE: "" };
-	const cmdOptions = { cwd: project, env, timeout: 12_000 };
+	const env = { PATH: process.env.PATH!, TMPDIR: os.tmpdir(), CROSSHEAD_HOOK_AUTOSTART: "0" };
+	const cmdOptions = { cwd: project, env, timeout: 15_000 };
 	const cliRun = (...args: string[]) => exec(process.execPath, [cli, ...args, "--home", home], cmdOptions);
 	const hooksFile = path.join(agyHome, "config", "hooks.json");
 	const hooks = () => JSON.parse(readFileSync(hooksFile, "utf8"));
@@ -32,28 +38,40 @@ it("installs agy hooks and saves only the finished model response into the selec
 	const busy = () => hostTurnInProgress(paths, Date.now());
 	const prompt = "Find the ledger migration flag.";
 	const answer = "Use sunrise-7b41 for the maintenance migration.";
-	const transcriptFor = (id: string) => path.join(agyHome, "antigravity-cli", "brain", id, ".system_generated", "logs", "transcript.jsonl");
-	const hook = (event: "PreInvocation" | "Stop", id: string, extra: Record<string, unknown> = {}): Promise<Record<string, unknown>> =>
+	const nextPrompt = "Find the ledger rollback flag.";
+	const nextAnswer = "Use marigold-1881 to roll the migration back.";
+	const session = "first-conversation";
+	const transcriptFor = (id: string) => path.join(realAgyHome, "antigravity-cli", "brain", id, ".system_generated", "logs", "transcript.jsonl");
+	const addSteps = (id: string, ...steps: object[]) => {
+		const file = transcriptFor(id);
+		mkdirSync(path.dirname(file), { recursive: true });
+		appendFileSync(file, steps.map(row => JSON.stringify(row)).join("\n") + "\n");
+	};
+	const hook = (event: "PreInvocation" | "Stop", id: string, extra: Record<string, unknown> = {}, warning?: RegExp): Promise<Record<string, unknown>> =>
 		new Promise((resolve, reject) => {
-			const group = Object.keys(hooks()).find(name => name.startsWith("crosshead-agy-"))!;
-			const child = execFile("sh", ["-c", hooks()[group][event][0].command], cmdOptions, (error, stdout, stderr) => {
-				if (error || stderr.trim()) { reject(error ?? new Error(stderr)); return; }
-				try { resolve(JSON.parse(stdout)); } catch (parseError) { reject(parseError); }
+			const child = execFile("sh", ["-c", managedGroup(hooks())[event][0].command], cmdOptions, (error, stdout, stderr) => {
+				if (error) { reject(error); return; }
+				try {
+					if (warning) expect(stderr.trim()).toMatch(warning);
+					else expect(stderr.trim()).toBe("");
+					resolve(JSON.parse(stdout));
+				} catch (parseError) { reject(parseError); }
 			});
 			child.stdin!.end(JSON.stringify({
 				conversationId: id, workspacePaths: [project], transcriptPath: transcriptFor(id), lastUserInput: prompt,
-				...(event === "PreInvocation" ? { invocationNum: 0, initialNumSteps: 4 } : { executionNum: 1, terminationReason: "model_stop", fullyIdle: true }),
+				...(event === "PreInvocation" ? { invocationNum: 9, initialNumSteps: 400 } : { executionNum: 1, terminationReason: "model_stop", fullyIdle: true }),
 				...extra,
 			}));
 		});
 	const hot = async (profile: string) => JSON.stringify(await client.readHotMemory(profile, "all"));
-	const session = "first-conversation";
+	const events = async (type: string) => (await client.readActivity(100)).events.filter(event => event.runtime === "agy" && event.type === type);
 
 	try {
 		mkdirSync(subdir, { recursive: true });
 		mkdirSync(separate);
 		await exec("git", ["init", "--quiet", project]);
-		mkdirSync(path.dirname(hooksFile), { recursive: true });
+		mkdirSync(path.join(realAgyHome, "config"), { recursive: true });
+		symlinkSync(realAgyHome, agyHome, "dir");
 		writeFileSync(hooksFile, JSON.stringify(otherHooks));
 		await cliRun("quickstart", "--adapter", "agy", "--profile", "studio", "--agy-home", agyHome, "--api-base", "http://127.0.0.1:0", "--no-start");
 		await cliRun("quickstart", "--adapter", "none", "--profile", "repository", "--api-base", "http://127.0.0.1:0", "--no-start");
@@ -63,51 +81,77 @@ it("installs agy hooks and saves only the finished model response into the selec
 		await cliRun("install", "agy", "--profile", "studio", "--agy-home", agyHome);
 		expect(Object.keys(hooks())).toHaveLength(2);
 		expect(hooks().lint).toEqual(otherHooks.lint);
+		expect(managedGroup(hooks()).PreInvocation[0].command).toContain("bin/crosshead' host-hook agy prepare");
+		expect(hostHooksRunning(1, () => "123456 node /release/dist/runtime/cli.js host-hook agy complete")).toBe(true);
 
 		await daemon.start();
+		await cliRun("memory", "mode", "off", "--profile", "studio");
+		addSteps(session, userStep(1, "Earlier request."), modelStep(2, "An earlier unrelated answer."), userStep(3, prompt));
 		const first = await hook("PreInvocation", session, { workspacePaths: [subdir] });
 		expect(JSON.stringify(first.injectSteps)).toContain("profile=repository");
 		expect(busy()).toBe(true);
-		expect(await hook("PreInvocation", session)).toEqual({});
-		expect(await hook("PreInvocation", session, { invocationNum: 1, initialNumSteps: 6 })).toEqual({});
+		addSteps(session, { ...modelStep(4, "Intermediate tool call text."), tool_calls: [{}] },
+			{ step_index: 5, source: "MODEL", type: "GENERIC", status: "DONE", content: "Raw tool output." });
+		expect(await hook("PreInvocation", session, { invocationNum: 10, initialNumSteps: 535 })).toEqual({});
+		expect(await events("turn.started")).toHaveLength(1);
 		expect(await hook("Stop", session, { lastUserInput: "Different prompt" })).toEqual({});
-		expect(await hook("Stop", session, { fullyIdle: false })).toEqual({});
 		expect(busy()).toBe(true);
-
-		const transcript = transcriptFor(session);
-		mkdirSync(path.dirname(transcript), { recursive: true });
-		writeFileSync(transcript, [
-			{ step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content: "An earlier unrelated answer." },
-			{ step_index: 3, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", content: prompt },
-			{ step_index: 4, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content: "Intermediate tool call text.", tool_calls: [{}] },
-			{ step_index: 5, source: "MODEL", type: "GENERIC", status: "DONE", content: "Raw tool output." },
-			{ step_index: 6, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content: answer, thinking: "Private model reasoning." },
-		].map(row => JSON.stringify(row)).join("\n") + "\n");
-		expect(await hook("Stop", session)).toEqual({});
-		expect(await hook("Stop", session)).toEqual({});
+		addSteps(session, { ...modelStep(6, answer), thinking: "Private model reasoning.", tool_calls: [{}] });
+		// A model can finish its reply while a background command still runs.
+		await hook("Stop", session, { fullyIdle: false });
 		expect(busy()).toBe(false);
 		await expect.poll(() => hot("repository"), { timeout: 6_000 }).toContain(answer);
+		await hook("Stop", session);
+		expect(await events("turn.completed")).toHaveLength(1);
 		expect(await hot("repository")).not.toMatch(/earlier unrelated|Intermediate tool call|Raw tool output|Private model reasoning/);
 		expect(await hot("studio")).not.toContain(answer);
 
-		// A resumed turn can stop before the host flushes any new response.
-		// The older response still in the log cannot satisfy that turn.
-		await hook("PreInvocation", session, { initialNumSteps: 8 });
-		await hook("Stop", session);
+		// The next user turn has a cumulative counter and its response flushes
+		// after the old 600 ms deadline. A resolved user row must win over indexes.
+		const secondInput = { lastUserInput: nextPrompt, invocationNum: 41, initialNumSteps: 900 };
+		addSteps(session, userStep(7, nextPrompt));
+		const second = await hook("PreInvocation", session, secondInput);
+		expect(JSON.stringify(second.injectSteps)).toContain(answer);
+		await Promise.all([
+			hook("Stop", session, { lastUserInput: nextPrompt }),
+			delay(1_200).then(() => addSteps(session, modelStep(8, nextAnswer))),
+		]);
+		expect(await events("turn.completed")).toHaveLength(2);
+
+		// A wake-up carrying the previous prompt must never replay its reply.
+		expect(await hook("PreInvocation", session, secondInput)).toEqual({});
+		await hook("Stop", session, { lastUserInput: nextPrompt });
+		expect(await events("turn.completed")).toHaveLength(2);
 		expect(busy()).toBe(false);
 
-		const recalled = await hook("PreInvocation", "fresh-conversation", { workspacePaths: [project], initialNumSteps: 1 });
+		// Repeating the exact prompt with a fresh USER_INPUT does start a turn.
+		addSteps(session, userStep(9, nextPrompt));
+		const repeated = await hook("PreInvocation", session, secondInput);
+		expect(JSON.stringify(repeated.injectSteps)).toContain(nextAnswer);
+		addSteps(session, modelStep(10, "A newly confirmed rollback flag is iris-7241."));
+		await hook("Stop", session, { lastUserInput: nextPrompt });
+		expect(await events("turn.completed")).toHaveLength(3);
+
+		const failed = "What is the rollback fallback?";
+		addSteps(session, userStep(11, failed));
+		await hook("PreInvocation", session, { lastUserInput: failed });
+		addSteps(session, modelStep(12, "The fallback flag is daisy-4331."));
+		const rejection = vi.spyOn(daemon, "submitLifecycleEvent").mockRejectedValueOnce(new Error("synthetic stop-time failure"));
+		try {
+			await hook("Stop", session, { lastUserInput: failed }, /could not complete an Antigravity CLI hook/);
+		} finally { rejection.mockRestore(); }
+		expect(busy()).toBe(false);
+		expect(await events("turn.completed")).toHaveLength(3);
+
+		const recalled = await hook("PreInvocation", "fresh-conversation");
 		expect(JSON.stringify(recalled.injectSteps)).toContain(answer);
-		await hook("Stop", "fresh-conversation", { terminationReason: "error", error: "Fixture error" });
-		const elsewhere = await hook("PreInvocation", "other-conversation", { workspacePaths: [separate] });
-		expect(JSON.stringify(elsewhere)).not.toContain(answer);
-		await hook("Stop", "other-conversation", { workspacePaths: [separate], terminationReason: "error" });
+		await hook("Stop", "fresh-conversation", {}, /no checkpoint was saved/);
+		expect(await events("turn.completed")).toHaveLength(3);
+		expect(await hook("PreInvocation", "other-conversation", { workspacePaths: [separate] })).toEqual({});
 		expect(await hook("PreInvocation", "mixed", { workspacePaths: [project, separate] })).toEqual({});
 		expect(await hook("PreInvocation", "app", { transcriptPath: path.join(agyHome, "antigravity", "brain", "app", ".system_generated", "logs", "transcript.jsonl") })).toEqual({});
 		await cliRun("memory", "mode", "manual", "--profile", "repository");
 		expect(await hook("PreInvocation", "manual")).toEqual({});
-		await cliRun("memory", "mode", "off", "--profile", "studio");
-		expect(await hook("PreInvocation", "off", { workspacePaths: [separate] })).toEqual({});
 		expect(busy()).toBe(false);
 		await cliRun("uninstall", "agy");
 		expect(hooks()).toEqual(otherHooks);
@@ -117,23 +161,49 @@ it("installs agy hooks and saves only the finished model response into the selec
 	}
 }, 45_000);
 
-it("preserves disabled hooks across reinstall and rejects another runtime's claim to the same configuration", async () => {
-	const root = mkdtempSync(path.join(os.tmpdir(), "crosshead-agy-settings-"));
+it("keeps the same Antigravity command through upgrades and removes only its group when uninstalling the runtime", async () => {
+	const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "crosshead-agy-settings-")));
 	try {
 		const home = path.join(root, "first");
 		const hostHome = path.join(root, "gemini");
 		const file = path.join(hostHome, "config", "hooks.json");
+		const oldRelease = path.join(root, "old");
+		const nextRelease = path.join(root, "next");
+		const script = (root: string, name: string) => path.join(root, "dist", "runtime", name + ".js");
+		const nextScript = (name: string) => script(nextRelease, name);
+		await installRuntimeCore({ home, cliScriptPath: script(oldRelease, "cli"), daemonScriptPath: script(oldRelease, "daemon") });
+		mkdirSync(path.dirname(file), { recursive: true });
+		writeFileSync(file, JSON.stringify(otherHooks));
 		await installNativeHostAdapter("agy", { home, hostHome });
 		const original = JSON.parse(readFileSync(file, "utf8"));
-		const group = Object.values(original)[0] as { enabled: boolean };
+		const group = managedGroup(original);
 		group.enabled = false;
 		writeFileSync(file, JSON.stringify(original));
-		await installNativeHostAdapter("agy", { home, hostHome });
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
 		await expect(installNativeHostAdapter("agy", { home: path.join(root, "second"), hostHome })).rejects.toThrow("another runtime");
 		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
-		await uninstallNativeHostAdapter("agy", home);
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({});
+
+		const paths = resolveRuntimePaths(home);
+		const release = {
+			baseUrl: "http://127.0.0.1:0", releaseId: "fixture", releaseUrl: "", releaseSha256: "",
+			releaseRoot: nextRelease, cliScriptPath: nextScript("cli"), daemonScriptPath: nextScript("daemon"),
+			localRuntimeModulePath: nextScript("local-runtime"), codexAdapterModulePath: nextScript("codex-adapter"),
+			claudeCodeAdapterModulePath: nextScript("claude-code-adapter"), piAdapterModulePath: nextScript("pi-adapter"),
+		};
+		const adapters = [{ name: "agy" as const, profileName: "default", hostHome, hostBinary: "agy" }];
+		await expect(reapplyManagedRuntimeRelease(paths, release, adapters)).rejects.toThrow("does not support installed Antigravity CLI hooks");
+		mkdirSync(nextRelease);
+		cpSync(path.join(repo, "dist"), path.join(nextRelease, "dist"), { recursive: true });
+		symlinkSync(path.join(repo, "node_modules"), path.join(nextRelease, "node_modules"), "dir");
+		await reapplyManagedRuntimeRelease(paths, release, adapters);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
+		expect(readFileSync(path.join(paths.bin, "crosshead"), "utf8")).toContain(nextScript("cli"));
+		const invoked = await exec("sh", ["-c", "printf '{}' | " + group.PreInvocation[0].command], { timeout: 10_000 });
+		expect(JSON.parse(invoked.stdout)).toEqual({});
+		expect(invoked.stderr).toBe("");
+
+		await uninstallRuntimeCore(home);
+		expect(existsSync(home)).toBe(false);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(otherHooks);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

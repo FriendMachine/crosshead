@@ -25,11 +25,12 @@ export const renderAgySettings = (config: NativeHostConfig, owner: string, insta
 	}
 	const previous = groups[name];
 	const enabled = !(previous && typeof previous === "object" && "enabled" in previous && previous.enabled === false);
-	const command = [config.nodeExecutable, path.join(__dirname, "agy-hook.js"), "--home", config.runtimeHome].map(shellQuote).join(" ");
+	const launcher = shellQuote(path.join(config.runtimeHome, "bin", "crosshead")) + " host-hook agy";
+	const home = " --home " + shellQuote(config.runtimeHome);
 	groups[name] = {
 		enabled,
-		PreInvocation: [{ type: "command", command: command + " prepare", timeout: 20 }],
-		Stop: [{ type: "command", command: command + " complete", timeout: 20 }],
+		PreInvocation: [{ type: "command", command: launcher + " prepare" + home, timeout: 20 }],
+		Stop: [{ type: "command", command: launcher + " complete" + home, timeout: 30 }],
 	};
 	return JSON.stringify(groups, null, 2) + "\n";
 };

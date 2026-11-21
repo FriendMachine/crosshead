@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, rmSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { assertManagedFilePath, parseArgs, writeManagedFile } from "./adapter-utils";
-import { loadNativeHostConfig } from "./native-host-adapter";
+import { loadNativeHostConfig, type NativeHostConfig } from "./native-host-adapter";
 import { dispatchNativeHostEvent } from "./native-host-hook";
-import { AUTO_UPDATE_TURN_MAX_MS } from "./runtime-idle-update";
+import { AUTO_UPDATE_TURN_MAX_MS, recordHostActivity } from "./runtime-idle-update";
 import { loadProfile, resolveRuntimePaths } from "./runtime-persistence";
 import { readWorkspaceHookPolicy, workspaceProfileOverrideFor } from "./workspace-hooks";
 import { workspaceDirectoryPath, workspaceProjectRoot } from "./workspace-identity";
@@ -16,10 +16,7 @@ type AgyHookInput = {
 	workspacePaths?: unknown;
 	transcriptPath?: unknown;
 	lastUserInput?: unknown;
-	invocationNum?: unknown;
-	initialNumSteps?: unknown;
 	terminationReason?: unknown;
-	fullyIdle?: unknown;
 	error?: unknown;
 };
 
@@ -31,35 +28,39 @@ type ActiveTurn = {
 	profileName: string;
 	identity: string;
 	promptHash: string;
-	initialNumSteps: number;
+	previousUser: string | null;
+	user: string | null;
+	prepared: boolean;
 	packId: string | null;
 };
 
-const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
-const isStep = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+type ConversationState = { activeTurns?: { current: ActiveTurn }; handledUser?: string };
+type TranscriptTurn = { user: string; prompt: string; truncated: boolean; reply: string | null };
 
-const readTurn = (file: string): ActiveTurn | undefined => {
+const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
+const TRANSCRIPT_WAIT_MS = 2_500;
+
+const readState = (file: string): ConversationState => {
 	try {
-		return (JSON.parse(readFileSync(file, "utf8")) as { activeTurns?: { current?: ActiveTurn } }).activeTurns?.current;
+		return JSON.parse(readFileSync(file, "utf8")) as ConversationState;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		return undefined;
+		return {};
 	}
 };
 
-const isActive = (turn: ActiveTurn | undefined): turn is ActiveTurn =>
-	Boolean(turn && Date.now() - Date.parse(turn.updatedAt) < AUTO_UPDATE_TURN_MAX_MS);
-
-// The global hook file is shared with the App and IDE. Limit this adapter to
-// CLI transcripts and open only the documented log for this conversation.
+// The global hook file is shared with the App and IDE. Open only the known
+// CLI log for this conversation. A dotfiles symlink may alias the Gemini root.
 const transcriptForConversation = (geminiHome: string, conversationId: string, provided: unknown): string | null => {
 	if (typeof provided !== "string") return null;
 	const supplied = provided.startsWith("~/") ? path.join(os.homedir(), provided.slice(2)) : provided;
-	const expected = path.join(geminiHome, "antigravity-cli", "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
-	return path.isAbsolute(supplied) && path.resolve(supplied) === expected ? expected : null;
+	if (!path.isAbsolute(supplied)) return null;
+	const suffix = path.join("antigravity-cli", "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
+	const expected = path.join(geminiHome, suffix);
+	return [expected, path.join(realpathSync(geminiHome), suffix)].includes(path.resolve(supplied)) ? expected : null;
 };
 
-const readFinalResponse = (geminiHome: string, transcript: string, initialNumSteps: number): string | null => {
+const readLatestTurn = (geminiHome: string, transcript: string): TranscriptTurn | null => {
 	assertManagedFilePath(transcript, geminiHome);
 	let fd: number | undefined;
 	try {
@@ -72,17 +73,29 @@ const readFinalResponse = (geminiHome: string, transcript: string, initialNumSte
 		const bytes = readSync(fd, buffer, 0, length, offset);
 		const lines = buffer.subarray(0, bytes).toString("utf8").split(/\r?\n/);
 		if (offset > 0) lines.shift();
+		let reply: string | null = null;
+		let seenPlanner = false;
+		let seenToolResult = false;
 		for (const line of lines.reverse()) {
 			let step;
 			try { step = JSON.parse(line); } catch { continue; }
-			if (!step || !isStep(step.step_index)) continue;
-			if (step.step_index < initialNumSteps) return null;
-			if (step.source === "USER_EXPLICIT" && step.type === "USER_INPUT") return null;
-			if (step.source !== "MODEL" || step.type !== "PLANNER_RESPONSE") continue;
-			// Planner steps may contain reasoning and tool calls. Only a finished
-			// model message with displayable text is a checkpoint.
-			return step.status === "DONE" && typeof step.content === "string" && step.content.trim() &&
-				(!Array.isArray(step.tool_calls) || step.tool_calls.length === 0) ? step.content.slice(0, 16_384) : null;
+			if (!step || !Number.isSafeInteger(step.step_index)) continue;
+			if (step.source === "USER_EXPLICIT" && step.type === "USER_INPUT") {
+				if (typeof step.content !== "string") return null;
+				return {
+					user: digest(JSON.stringify([step.step_index, step.created_at, step.content])),
+					prompt: step.content,
+					truncated: Array.isArray(step.truncated_fields) && step.truncated_fields.includes("content"),
+					reply,
+				};
+			}
+			if (step.type === "GENERIC") seenToolResult = true;
+			if (seenPlanner || step.source !== "MODEL" || step.type !== "PLANNER_RESPONSE") continue;
+			seenPlanner = true;
+			const hasToolCalls = Array.isArray(step.tool_calls) && step.tool_calls.length > 0;
+			if (step.status === "DONE" && typeof step.content === "string" && step.content.trim() && !(hasToolCalls && seenToolResult)) {
+				reply = step.content.slice(0, 16_384);
+			}
 		}
 		return null;
 	} catch (error) {
@@ -93,12 +106,32 @@ const readFinalResponse = (geminiHome: string, transcript: string, initialNumSte
 	}
 };
 
+const matchesPrompt = (turn: TranscriptTurn | null, prompt: string): turn is TranscriptTurn => {
+	if (!turn) return false;
+	if (turn.prompt === prompt) return true;
+	// Long user messages in agy logs contain a truncated prefix. When the
+	// truncation flag is present require a substantial prefix from that row.
+	return turn.truncated && turn.prompt.length >= 512 && prompt.length > turn.prompt.length &&
+		prompt.startsWith(turn.prompt.slice(0, 512));
+};
+
+const userForTurn = (transcript: TranscriptTurn | null, active: ActiveTurn, prompt: string): TranscriptTurn | null =>
+	matchesPrompt(transcript, prompt) && (active.user ? transcript.user === active.user : transcript.user !== active.previousUser)
+		? transcript : null;
+
+const prepareTurn = async (config: NativeHostConfig, active: ActiveTurn, prompt: string) => {
+	const result = await dispatchNativeHostEvent(config, "prepare", { ...active, prompt });
+	if (!("injectedPrompt" in result)) return null;
+	active.prepared = true;
+	active.packId = result.packId ?? null;
+	return result.contextText ? { injectSteps: [{ ephemeralMessage: result.contextText }] } : {};
+};
+
 const handleHook = async (event: "prepare" | "complete", input: AgyHookInput, home?: string) => {
 	const { conversationId: sessionId, lastUserInput: prompt, workspacePaths } = input;
 	if (typeof sessionId !== "string" || !/^[a-z0-9_-]{1,128}$/i.test(sessionId) || typeof prompt !== "string" || !prompt.trim() ||
 		!Array.isArray(workspacePaths) || workspacePaths.length === 0 || workspacePaths.length > 32 ||
 		!workspacePaths.every((directory): directory is string => typeof directory === "string" && path.isAbsolute(directory))) return {};
-	if (event === "prepare" && (input.invocationNum !== 0 || !isStep(input.initialNumSteps))) return {};
 	const config = loadNativeHostConfig("agy", home);
 	const transcript = transcriptForConversation(config.hostHome, sessionId, input.transcriptPath);
 	if (!transcript) return {};
@@ -108,51 +141,79 @@ const handleHook = async (event: "prepare" | "complete", input: AgyHookInput, ho
 	const paths = resolveRuntimePaths(config.runtimeHome);
 	const file = path.join(paths.state, "agy-turns", digest(sessionId) + ".json");
 	assertManagedFilePath(file, paths.home);
-	const active = readTurn(file);
+	const state = readState(file);
+	const active = state.activeTurns?.current;
 	const directory = workspaceDirectoryPath(workspacePaths[0]!);
 	const profileName = workspaceProfileOverrideFor(readWorkspaceHookPolicy(paths), directory)?.profile ?? config.profileName;
 	const profile = loadProfile(paths, profileName);
 	const identity = profile ? digest(profile.npub) : "";
 	const promptHash = digest(prompt);
-	const matches = isActive(active) && active.workspaceRoot === workspaceRoot && active.profileName === profileName &&
-		active.promptHash === promptHash && active.identity === identity;
+	const sameRequest = active?.workspaceRoot === workspaceRoot && active.promptHash === promptHash;
+	const sameProfile = active?.profileName === profileName && active.identity === identity;
+	const matches = active && "previousUser" in active && sameRequest && sameProfile && Date.now() - Date.parse(active.updatedAt) < AUTO_UPDATE_TURN_MAX_MS;
 	const canCapture = profile?.memoryMode === "assist" || profile?.memoryMode === "auto";
+	const saveState = (value: ConversationState) => {
+		if (value.activeTurns || value.handledUser) writeManagedFile(file, JSON.stringify(value), paths.home);
+		else rmSync(file, { force: true });
+	};
+
 	if (event === "prepare") {
-		const initialNumSteps = input.initialNumSteps as number;
-		if (matches && active.initialNumSteps === initialNumSteps) return {};
-		rmSync(file, { force: true });
 		if (!canCapture) return {};
-		const turnId = randomUUID();
-		const result = await dispatchNativeHostEvent(config, "prepare", { workspaceRoot, profileName, sessionId, turnId, prompt });
-		if (!("injectedPrompt" in result)) return {};
-		const current: ActiveTurn = {
-			sessionId, turnId, updatedAt: new Date().toISOString(), workspaceRoot, profileName, identity, promptHash,
-			initialNumSteps, packId: result.packId ?? null,
+		const latest = readLatestTurn(config.hostHome, transcript);
+		const observed = matchesPrompt(latest, prompt) ? latest.user : null;
+		const newUser = observed && observed !== state.handledUser && !latest?.reply ? observed : null;
+		// Additional invocations in one turn can happen after tool use. The
+		// explicit transcript user row anchors the turn, independent of counters.
+		const changedUser = active?.user && newUser && newUser !== active.user;
+		if (sameRequest && !sameProfile && !changedUser) return {};
+		recordHostActivity(paths);
+		const current: ActiveTurn = matches && !changedUser ? active : {
+			sessionId, turnId: randomUUID(), updatedAt: "", workspaceRoot, profileName, identity, promptHash,
+			previousUser: latest?.user ?? null, user: newUser, prepared: false, packId: null,
 		};
-		writeManagedFile(file, JSON.stringify({ activeTurns: { current } }), paths.home);
-		return result.contextText ? { injectSteps: [{ ephemeralMessage: result.contextText }] } : {};
+		if (!current.user && newUser && newUser !== current.previousUser) current.user = newUser;
+		current.updatedAt = new Date().toISOString();
+		// A background wake-up may carry the previous prompt. Wait for a new
+		// user row before injecting again. Stop can still save a late-written turn.
+		const waitForUser = !current.user && observed !== null;
+		const output = current.prepared || waitForUser ? {} : await prepareTurn(config, current, prompt);
+		if (output === null) {
+			saveState({ handledUser: state.handledUser });
+			return {};
+		}
+		saveState({ ...state, activeTurns: { current } });
+		return output;
 	}
-	if (!matches) return {};
-	if (canCapture && input.terminationReason === "model_stop" && !input.error) {
-		if (input.fullyIdle === false) return {};
-		if (input.fullyIdle !== true) return {};
-		let summary = readFinalResponse(config.hostHome, transcript, active.initialNumSteps);
-		// The transcript can be flushed separately from the Stop notification.
-		for (let retry = 0; !summary && retry < 4; retry += 1) {
+
+	if (!active || !sameRequest) return {};
+	let finishedUser: TranscriptTurn | null = null;
+	try {
+		if (!matches || !canCapture || input.terminationReason !== "model_stop" || input.error) return {};
+		recordHostActivity(paths);
+		const deadline = Date.now() + TRANSCRIPT_WAIT_MS;
+		for (;;) {
+			finishedUser = userForTurn(readLatestTurn(config.hostHome, transcript), active, prompt);
+			if (finishedUser?.reply || Date.now() >= deadline) break;
 			await delay(150);
-			summary = readFinalResponse(config.hostHome, transcript, active.initialNumSteps);
 		}
-		if (summary && readTurn(file)?.turnId === active.turnId) {
-			await dispatchNativeHostEvent(config, "complete", { ...active, prompt, summary });
+		if (readState(file).activeTurns?.current.turnId !== active.turnId) return {};
+		if (finishedUser?.reply) {
+			await dispatchNativeHostEvent(config, "complete", { ...active, prompt, summary: finishedUser.reply });
+		} else if (active.prepared || finishedUser) {
+			process.stderr.write("Crosshead found no final Antigravity reply for this turn; no checkpoint was saved.\n");
+		}
+	} finally {
+		const latestState = readState(file);
+		if (latestState.activeTurns?.current.turnId === active.turnId) {
+			saveState({ handledUser: finishedUser?.user ?? active.user ?? latestState.handledUser });
 		}
 	}
-	if (readTurn(file)?.turnId === active.turnId) rmSync(file, { force: true });
 	return {};
 };
 
-const main = async (): Promise<void> => {
+export const runAgyHookCli = async (argv: string[]): Promise<void> => {
 	try {
-		const { positionals, flags } = parseArgs(process.argv.slice(2));
+		const { positionals, flags } = parseArgs(argv);
 		const event = positionals[0];
 		if (event !== "prepare" && event !== "complete") throw new Error("Unknown Antigravity hook event.");
 		const chunks: Buffer[] = [];
@@ -172,4 +233,4 @@ const main = async (): Promise<void> => {
 	}
 };
 
-if (require.main === module) void main();
+if (require.main === module) void runAgyHookCli(process.argv.slice(2));
