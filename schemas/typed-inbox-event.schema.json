@@ -12,7 +12,8 @@
     { "$ref": "#/$defs/failureEvent" },
     { "$ref": "#/$defs/handoffCreatedEvent" },
     { "$ref": "#/$defs/handoffCompletedEvent" },
-    { "$ref": "#/$defs/operatorGovernanceEvent" }
+    { "$ref": "#/$defs/operatorGovernanceEvent" },
+    { "$ref": "#/$defs/negotiationEvent" }
   ],
   "$defs": {
     "npub": {
@@ -76,7 +77,8 @@
             "failure",
             "handoff_created",
             "handoff_completed",
-            "operator_governance"
+            "operator_governance",
+            "negotiation"
           ]
         },
         "contextId": {
@@ -333,6 +335,37 @@
             }
           },
           "required": ["operatorGovernance"]
+        }
+      ]
+    },
+    "negotiationEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "properties": {
+            "eventType": { "const": "negotiation" },
+            "negotiation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["dealEvent"],
+              "properties": {
+                "dealEvent": {
+                  "type": "object",
+                  "description": "crosshead_deal_event_v1: a NegotiationEvent signed by its author's agent key and hash-chained to the previous step. See docs/AGENT-DEALS.md.",
+                  "required": ["schemaVersion", "dealId", "sequence", "previousEventHash", "parties", "offerRef", "workSummary", "event", "signerNpub", "eventHash", "signature"],
+                  "properties": {
+                    "schemaVersion": { "const": "crosshead_deal_event_v1" },
+                    "dealId": { "type": "string", "pattern": "^ctx_[a-z0-9][a-z0-9_-]{2,127}$" },
+                    "sequence": { "type": "integer", "minimum": 0 },
+                    "signerNpub": { "$ref": "#/$defs/npub" },
+                    "eventHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                    "signature": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+                  }
+                }
+              }
+            }
+          },
+          "required": ["negotiation"]
         }
       ]
     }

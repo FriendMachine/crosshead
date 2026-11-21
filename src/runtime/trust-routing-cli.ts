@@ -1,6 +1,7 @@
 import { publicDiscoveryRawEvents } from "./public-discovery";
 import { readFileSync, writeFileSync } from "fs";
 import path from "path";
+import { nip19 } from "nostr-tools";
 
 import { OnlyBotsLocalRuntimeDaemon } from "./local-runtime";
 import {
@@ -214,6 +215,41 @@ const fetchLivePublicDiscovery = async (
 	return publicDiscoveryRawEvents(result);
 };
 
+/**
+ * Receipts stored on the hosted service about the given agents. Each receipt is re-verified locally by
+ * the graph and routing code; the server's copy is only a transport.
+ */
+const fetchHostedReceipts = async (
+	daemon: OnlyBotsLocalRuntimeDaemon,
+	flags: Record<string, string | boolean>,
+	events: unknown[],
+	profileName?: string
+): Promise<unknown[]> => {
+	if (!parseBoolean(flags["fetch-receipts"] ?? flags.fetchReceipts, false)) return [];
+	const subjects = new Set<string>([
+		...csv(flags["receipt-subjects"] ?? flags.receiptSubjects),
+		...csv(flags.authors),
+	]);
+	for (const event of events) {
+		const pubkey = (event as { pubkey?: unknown }).pubkey;
+		if (typeof pubkey === "string" && /^[0-9a-f]{64}$/.test(pubkey)) subjects.add(nip19.npubEncode(pubkey));
+	}
+	if (subjects.size === 0) return [];
+	const session = await daemon.openAgentSession(profileName);
+	try {
+		const receipts: unknown[] = [];
+		for (const subjectNpub of subjects) {
+			const result = await session.client.listTrustReceipts({ subjectNpub, limit: 100 });
+			// Only receipts the server tied to a real settlement between the two agents count as history.
+			const stored = Array.isArray(result.stored) ? (result.stored as Array<Record<string, unknown>>) : [];
+			receipts.push(...extractTrustReceipts(stored.filter((row) => row.settlement_verified === true).map((row) => row.receipt)));
+		}
+		return receipts;
+	} finally {
+		await session.persist().catch(() => undefined);
+	}
+};
+
 export const trustFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
 	const subcommand = positionals[0];
@@ -262,8 +298,9 @@ export const trustFromCli = async (argv: string[]): Promise<string> => {
       ? [...inputs.publicDiscoveryEvents, ...(await fetchLivePublicDiscovery(daemon, flags, profileName))]
       : inputs.publicDiscoveryEvents;
     const publicDiscoveryItems = extractPublicDiscoveryObservations({ revision_events: events });
+		const hostedReceipts = (await fetchHostedReceipts(daemon, flags, events, profileName)) as typeof inputs.receipts;
 		const result = await inspectTrustGraph({
-			trustReceipts: inputs.receipts,
+			trustReceipts: [...inputs.receipts, ...hostedReceipts],
 			capabilityClaims: inputs.capabilityClaims,
 			trustEdges: inputs.trustEdges,
 			publicDiscoveryItems,
@@ -282,8 +319,9 @@ export const trustFromCli = async (argv: string[]): Promise<string> => {
       ? [...inputs.publicDiscoveryEvents, ...(await fetchLivePublicDiscovery(daemon, flags, profileName))]
       : inputs.publicDiscoveryEvents;
     const publicDiscoveryItems = extractPublicDiscoveryObservations({ revision_events: events });
+		const hostedReceipts = (await fetchHostedReceipts(daemon, flags, events, profileName)) as typeof inputs.receipts;
 		const result = await explainCapabilityRouting({
-			trustReceipts: inputs.receipts,
+			trustReceipts: [...inputs.receipts, ...hostedReceipts],
 			capabilityClaims: inputs.capabilityClaims,
 			trustEdges: inputs.trustEdges,
 			publicDiscoveryItems,

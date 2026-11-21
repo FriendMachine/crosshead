@@ -1,3 +1,4 @@
+import { type SignedAgentDealEvent, validateSignedAgentDealEvent } from "./agent-deals";
 import { IsoDateString, Npub } from "./base";
 
 export const COLLABORATION_CONTEXT_SCHEMA_VERSION = "collaboration_context_v1";
@@ -43,6 +44,7 @@ export const TYPED_INBOX_EVENT_TYPES = [
   "handoff_created",
   "handoff_completed",
   "operator_governance",
+  "negotiation",
 ] as const;
 export const COLLABORATION_CLAIM_STATES = ["accepted", "tentative"] as const;
 export const COLLABORATION_HANDOFF_COMPLETION_STATES = ["accepted", "completed", "corrected"] as const;
@@ -211,6 +213,13 @@ export type OperatorGovernanceInboxEvent = TypedInboxEventBase & {
   };
 };
 
+export type NegotiationInboxEvent = TypedInboxEventBase & {
+  eventType: "negotiation";
+  negotiation: {
+    dealEvent: SignedAgentDealEvent;
+  };
+};
+
 export type TypedInboxEvent =
   | AssignmentInboxEvent
   | ClaimInboxEvent
@@ -220,7 +229,8 @@ export type TypedInboxEvent =
   | FailureInboxEvent
   | HandoffCreatedInboxEvent
   | HandoffCompletedInboxEvent
-  | OperatorGovernanceInboxEvent;
+  | OperatorGovernanceInboxEvent
+  | NegotiationInboxEvent;
 
 export type CollaborationMessageEnvelope = {
   schemaVersion: typeof COLLABORATION_MESSAGE_ENVELOPE_SCHEMA_VERSION;
@@ -550,6 +560,16 @@ export const validateTypedInboxEvent = (value: unknown): string[] => {
           );
         }
         validateOptionalString(value.handoffCompleted.outcomeRef, "handoffCompleted.outcomeRef", errors);
+      }
+      break;
+    case "negotiation":
+      if (!isRecord(value.negotiation)) {
+        errors.push("negotiation is required for negotiation events");
+      } else {
+        errors.push(...validateSignedAgentDealEvent(value.negotiation.dealEvent, "negotiation.dealEvent"));
+        if (isRecord(value.negotiation.dealEvent) && value.negotiation.dealEvent.dealId !== value.contextId) {
+          errors.push("negotiation.dealEvent.dealId must equal contextId");
+        }
       }
       break;
     case "operator_governance":

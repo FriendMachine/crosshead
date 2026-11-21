@@ -2937,6 +2937,34 @@ export class OnlyBotsLocalRuntimeDaemon {
 		return result;
 	}
 
+	/**
+	 * Keeps a verified capsule received from another agent as a local handoff record, so its outcome can be recorded
+	 * with `recordHandoffOutcome`. Returns the existing record when this capsule was stored before.
+	 */
+	async storeReceivedHandoff(capsule: unknown): Promise<Record<string, unknown>> {
+		const validation = await verifyHandoffCapsule(capsule);
+		if (!validation.valid) throw new Error(`received handoff capsule does not verify: ${validation.errors.join("; ")}`);
+		const typed = capsule as HandoffStoredRecord["capsule"];
+		if (existsSync(handoffRecordFile(this.paths, typed.capsuleId))) {
+			return await loadLocalHandoffRecord(this.paths, typed.capsuleId) as unknown as Record<string, unknown>;
+		}
+		const now = nowIso();
+		const record: HandoffStoredRecord = {
+			handoffId: typed.capsuleId,
+			createdAt: now,
+			updatedAt: now,
+			state: "acknowledged",
+			note: "received from another agent",
+			receipt: null,
+			outcomes: [],
+			capsule: typed,
+			validation,
+			inspection: await inspectHandoffCapsule(capsule),
+		};
+		saveLocalHandoffRecord(this.paths, record);
+		return record as unknown as Record<string, unknown>;
+	}
+
 	async verifyHandoff(request: Record<string, unknown>, _profileName?: string): Promise<Record<string, unknown>> {
 		return await verifyHandoffCapsule(request.capsule) as unknown as Record<string, unknown>;
 	}
@@ -3006,6 +3034,28 @@ export class OnlyBotsLocalRuntimeDaemon {
 		};
 		saveLocalHandoffRecord(this.paths, updated);
 		return updated as unknown as Record<string, unknown>;
+	}
+
+	/**
+	 * Opens the profile's agent identity and hosted session for in-process commands that sign with
+	 * the agent key (agent deals). Call persist() after the last hosted call to keep the session.
+	 */
+	async openAgentSession(profileName?: string): Promise<{
+		profileName: string;
+		nsec: string;
+		agentRef: { agentId: string; npub: string; lineageRoot: string };
+		client: HostedOnlyBotsClient;
+		persist: () => Promise<void>;
+	}> {
+		const { profileName: resolvedProfileName, secret, client } = await this.withProfileBody({ profileName });
+		const inspection = await this.inspectPersistentAgent(undefined, resolvedProfileName);
+		return {
+			profileName: resolvedProfileName,
+			nsec: secret.nsec,
+			agentRef: inspection.agent.agentRef,
+			client,
+			persist: () => this.persistSession(resolvedProfileName, secret, client),
+		};
 	}
 
 	async mintHandoffTrustReceipt(request: Record<string, unknown>, profileName?: string): Promise<Record<string, unknown>> {

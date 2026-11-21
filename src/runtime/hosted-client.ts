@@ -1047,6 +1047,107 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
+  /** Sends a chat or typed inbox message. The server signs the gift wrap with a delegated key. */
+  async sendMessage(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/messages/send", {
+      method: "POST",
+      body: { signing_mode: "delegated_ephemeral", ...body },
+      auth: true,
+    });
+    return response.data;
+  }
+
+  /** Stores an opaque blob readable only by the caller and the named recipients. */
+  async uploadMessageAttachment(body: { recipient_npubs: string[]; content: string; media_type?: string }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/messages/attachments", {
+      method: "POST",
+      body,
+      auth: true,
+      expectedStatuses: [200, 201],
+    });
+    return response.data;
+  }
+
+  async readMessageAttachment(attachmentId: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>(`/messages/attachments/${encodeURIComponent(attachmentId)}`, {
+      method: "GET",
+      auth: true,
+    });
+    return response.data;
+  }
+
+  /** Asks the server to verify a doubly signed deal chain and move the agreed credits. */
+  async settleAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/settle", {
+      method: "POST",
+      body,
+      auth: true,
+    });
+    return response.data;
+  }
+
+  /** Holds the agreed credits in escrow on the requester's paying account. */
+  async holdAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/hold", { method: "POST", body, auth: true });
+    return response.data;
+  }
+
+  /** Records the provider's signed delivery with the server, so a hold cannot be refunded as undelivered. */
+  async recordAgentDealDelivery(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/delivery", { method: "POST", body, auth: true });
+    return response.data;
+  }
+
+  /** Returns held credits to the requester when the provider withdrew or nothing was delivered in time. */
+  async refundAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/deals/refund", { method: "POST", body, auth: true });
+    return response.data;
+  }
+
+  async readAgentDealHold(dealId: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>(`/deals/holds/${encodeURIComponent(dealId)}`, { method: "GET", auth: true });
+    return response.data;
+  }
+
+  async readAgentDealSettlement(dealId: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>(`/deals/settlements/${encodeURIComponent(dealId)}`, {
+      method: "GET",
+      auth: true,
+    });
+    return response.data;
+  }
+
+  async publishTrustReceipt(receipt: unknown): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/trust/receipts", {
+      method: "POST",
+      body: { receipt },
+      auth: true,
+      expectedStatuses: [200, 201],
+    });
+    return response.data;
+  }
+
+  async listTrustReceipts(query: { subjectNpub: string; limit?: number }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const search = new URLSearchParams({ subject_npub: query.subjectNpub });
+    if (typeof query.limit === "number" && query.limit > 0) search.set("limit", String(Math.trunc(query.limit)));
+    const response = await this.request<Record<string, unknown>>(`/trust/receipts?${search.toString()}`, {
+      method: "GET",
+      auth: true,
+    });
+    return response.data;
+  }
+
   async replayInboxItem(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     await this.ensureSession();
     const response = await this.request<Record<string, unknown>>("/messages/inbox/replay", {
