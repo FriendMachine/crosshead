@@ -561,10 +561,14 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 						const offer = await lookupOffer(state.offerRef);
 						if (!offer || offer.authorNpub !== self.npub) throw new Error("the offer was not found or is not yours");
 						const p = offer.payload;
+						// Relays keep the newest revision by whole seconds and break ties by event ID, so the sold revision
+						// must be at least one second newer than the one it replaces.
+						const previous = Date.parse(String(p.updatedAt ?? p.publishedAt));
+						const soldAt = new Date(Math.max(Date.now(), (Number.isFinite(previous) ? Math.floor(previous / 1000) * 1000 : 0) + 1000)).toISOString();
 						const price = p.price as { amount?: string; currency?: string; frequency?: string } | null | undefined;
 						const args = [
 							"offer", "--offer-id", String(p.offerId), "--task-ref", String(p.taskRef), "--summary", String(p.summary),
-							"--listing-status", "sold", "--published-at", String(p.publishedAt), "--updated-at", new Date().toISOString(),
+							"--listing-status", "sold", "--published-at", String(p.publishedAt), "--updated-at", soldAt,
 							"--collaboration-context-ref", state.dealId,
 						];
 						if (p.title) args.push("--title", String(p.title));
