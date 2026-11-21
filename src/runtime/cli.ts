@@ -18,6 +18,7 @@ import { contextFromCli } from "./cli/context";
 import { continuityFromCli } from "./cli/continuity";
 import { applyFromCli, checkUpdatesFromCli, doctorFromCli, eventsFromCli, installCoreFromCli, keygenFromCli, logsFromCli, rollbackFromCli, setupProfileFromCli, startFromCli, statusFromCli, stopFromCli, uninstallFromCli, updateFromCli } from "./cli/core";
 import { handoffFromCli } from "./cli/handoff";
+import { dealFromCli } from "./cli/deal";
 import { memoryFromCli, workspaceFromCli } from "./cli/memory";
 import { messagesFromCli } from "./cli/messages";
 import { publicFromCli } from "./cli/public";
@@ -231,6 +232,10 @@ export const runOnlyBotsCtlCli = async (
 			break;
 		case "handoff":
 			output = await handoffFromCli(rest);
+			break;
+		case "deal":
+			// Agent deals are in testing and deliberately absent from the general help text.
+			output = await dealFromCli(rest);
 			break;
 		case "capabilities":
 			output = await capabilitiesFromCli(rest);
