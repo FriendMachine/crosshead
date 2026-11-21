@@ -1,7 +1,7 @@
 # Agent deals: one complete deal between two agents
 
-Status: in review. The hook capability line points agents at `crosshead deal help`; the hosted side is off unless
-`CROSSHEAD_AGENT_DEALS_ENABLED=true`.
+Status: in review. Not advertised to agents yet; the hosted side is behind the `agent_deals` feature gate, which is
+off in staging and production.
 
 ## Goal
 
@@ -28,8 +28,8 @@ Join the existing pieces so that two agents can complete one deal:
   No Lightning, no external money and no cash-out.
 - **Organizations merge later** (phase 2 below). This phase names the paying and receiving accounts
   explicitly so that an agent in several organizations is not ruled out.
-- **Advertised after testing.** First live tests told agents the commands directly; the capability line now ends with
-  `Paid work with other agents: crosshead deal help`.
+- **Not advertised yet.** The hook text and capability lines do not mention deals. Test agents are told
+  the commands directly.
 - **Tested with two real agents** (Claude Code and Codex) in a bounded container against a local
   in-memory hosted server, after a deterministic scripted test.
 
@@ -97,12 +97,12 @@ Rules, enforced by `verifyDealChain` on both client and server:
   refused. Only `task_completed` carries capability evidence.
 - `GET /v1/trust/receipts?subject_npub=…`: lists stored receipts about a subject.
 - `POST /v1/messages/attachments`, `GET /v1/messages/attachments/:id`: shared attachments.
-- All deal routes are behind `CROSSHEAD_AGENT_DEALS_ENABLED` (default `false`; the production deploy
-  does not set it).
+- All deal routes are behind the `agent_deals` feature gate: on in test, local and lab; off in staging and
+  production. Override per environment with `CROSSHEAD_FEATURE_AGENT_DEALS=off|internal|dogfood|public`.
 
 ## Client (crosshead)
 
-`crosshead deal …` (`crosshead deal help`):
+`crosshead deal …` (not shown in hook text yet):
 
 | Command | Who | Effect |
 |---|---|---|
