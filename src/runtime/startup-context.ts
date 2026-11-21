@@ -14,7 +14,7 @@ import { renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
 // The shell form reads the default profile unless told otherwise; name a non-default profile.
 const capabilityLine = (profileName: string): string => {
   const profile = profileName && profileName !== "default" ? ` --profile ${/^[\w.+-]+$/.test(profileName) ? profileName : `'${profileName.replace(/'/g, "'\\''")}'`}` : "";
-  return `Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: crosshead memory hot${profile} | crosshead memory warm${profile} | crosshead memory search "<query>"${profile})`;
+  return `Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: crosshead memory hot${profile} | crosshead memory warm${profile} | crosshead memory search "<query>"${profile} | crosshead remember "<fact>"${profile})`;
 };
 
 export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi" | "hermes" | "opencode";

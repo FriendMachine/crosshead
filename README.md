@@ -231,6 +231,8 @@ a fresh session after choosing either setting.
 - Imported text is labelled as an imported handoff, not as something you saved
   yourself. It is not promoted to warm memory. Until the project records newer
   work (and for at most seven days) it is included in every prompt there.
+- `crosshead remember "<fact>"` saves one explicit fact for the current project; new sessions in
+  either host receive it.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
   runtime is doing. Local state lives in `~/.crosshead/state/`.
 
