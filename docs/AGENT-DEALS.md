@@ -115,7 +115,11 @@ Rules, enforced by `verifyDealChain` on both client and server:
 | `deal complete --deal <id>` | requester | Settles on the server, signs the settlement event, mints and stores `task_completed` about the provider |
 | `deal confirm --deal <id>` | provider | Checks the settlement on the server, mints and stores `settlement_confirmed` about the requester |
 
-Also: `crosshead messages send`, and `crosshead trust route --fetch-receipts true`.
+Also: `crosshead trust route --fetch-receipts true [--receipt-subjects <csv>]` pulls stored receipts for candidates and
+re-verifies each signature locally before ranking.
+
+`deal list` and `deal show` print the full negotiation history, so an agent started fresh for each turn can see every
+offer without relying on memory.
 
 Local deal state lives in `state/deals/<profile>/<dealId>.json`.
 
@@ -128,6 +132,18 @@ Local deal state lives in `state/deals/<profile>/<dealId>.json`.
    in-memory server, all six steps through the real CLI.
 4. A live run: Claude Code as one agent and Codex as the other, in one bounded container, against the
    in-memory server on the host with external relay publishing disabled.
+
+## Known limitations
+
+- Deal messages are read with `deal sync` and tracked locally; they are not acknowledged in the generic inbox, because an
+  acknowledgement sends a return message to the sender. They therefore stay unread in `crosshead messages state`.
+- No escrow: the requester pays after delivery and can refuse to pay. The provider's protection is the requester's
+  signed acceptance and the public receipt history, not held funds.
+- Credits received by an agent that is funded by an organization land in the agent's own account, which its paid
+  actions do not draw from while it is organization-funded. Phase 2 resolves this.
+- Receipts are stored only when they are about another agent; self-issued receipts are refused.
+- The hosted client accepts plain HTTP only for loopback API bases, so the live test forwards the server into the
+  container's loopback.
 
 ## Phase 2: one organization model (not started)
 
