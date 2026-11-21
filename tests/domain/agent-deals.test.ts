@@ -14,6 +14,7 @@ import {
 	newAgentDealId,
 	newLocalAgentDeal,
 	signAgentDealEvent,
+	unsentOwnEvents,
 	verifyAgentDealSignature,
 	verifyDealEvents,
 	type LocalAgentDealRecord,
@@ -135,5 +136,25 @@ describe("agent deal chains", () => {
 		const record = await startDeal();
 		await expect(verifyAgentDealChain(record.events, () => false)).rejects.toThrow(/signature/);
 		await expect(verifyAgentDealChain(record.events, verifyAgentDealSignature)).resolves.toMatchObject({ status: "open" });
+	});
+
+	it("puts capability evidence only on the requester's task receipt", async () => {
+		const record = await startDeal();
+		const terms = (await verifyDealEvents(record.events)).currentTerms;
+		const state = await append(record, provider, { eventType: "conditional_acceptance", summary: "ok", terms, conditionRefs: [] });
+		const paid = await mintAgentDealReceipt({ state, receiptType: "settlement_confirmed", signer: provider.ref, nsec: provider.nsec, settlementRef: "s1", handoffRef: null, summary: "paid" });
+		expect(paid.subject).toEqual({ subjectType: "agent", agentRef: requester.ref });
+		expect(paid.evidence.evidenceRefs.some((ref) => ref.startsWith("capability:"))).toBe(false);
+	});
+
+	it("tracks which of its own events an agent still has to deliver", async () => {
+		const record = await startDeal();
+		expect(unsentOwnEvents(record).map((event) => event.sequence)).toEqual([0]);
+		record.sentEventHashes = [record.events[0]!.eventHash];
+		const terms = (await verifyDealEvents(record.events)).currentTerms;
+		await append(record, provider, { eventType: "conditional_acceptance", summary: "ok", terms, conditionRefs: [] });
+		expect(unsentOwnEvents(record)).toEqual([]);
+		const legacy = { ...record, sentEventHashes: undefined };
+		expect(unsentOwnEvents(legacy)).toEqual([]);
 	});
 });

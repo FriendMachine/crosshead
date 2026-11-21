@@ -20,8 +20,10 @@ import {
 	requireAgentDeal,
 	saveAgentDeal,
 	verifyDealEvents,
+	unsentOwnEvents,
 	type LocalAgentDealRecord,
 } from "../agent-deals";
+import { verifyHandoffCapsule } from "../handoff-capsules";
 import { buildCapturedContinuityContext, normalizeCapturedContextToContinuityIr, type ContinuityRuntime } from "../continuity-ir";
 import { OnlyBotsLocalRuntimeDaemon, parseArgs } from "../local-runtime";
 import { resolveRuntimePaths } from "../runtime-persistence";
@@ -183,11 +185,36 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 			const message = buildNegotiationMessage({ signed, state, agentRef: self });
 			const errors = validateTypedInboxEvent(message.inbox_event);
 			if (errors.length > 0) throw new Error(`deal message is invalid: ${errors.join("; ")}`);
-			// Save first: a failed send can be retried with `deal sync --resend`, but a lost signed event cannot.
+			// Save first: a failed send is retried by the next deal command, but a lost signed event cannot be recovered.
 			record.events.push(signed);
 			saveAgentDeal(paths, record);
-			await session.client.sendMessage(message);
+			await deliver(record, signed, state);
 		};
+
+		const deliver = async (record: LocalAgentDealRecord, signed: SignedAgentDealEvent, state: AgentDealChainState): Promise<void> => {
+			try {
+				await session.client.sendMessage(buildNegotiationMessage({ signed, state, agentRef: self }));
+			} catch (error) {
+				record.lastError = `event ${signed.sequence} is saved but not delivered yet; the next deal command retries it (${error instanceof Error ? error.message : String(error)})`;
+				saveAgentDeal(paths, record);
+				throw new Error(record.lastError);
+			}
+			record.sentEventHashes = [...(record.sentEventHashes ?? []), signed.eventHash];
+			if (record.lastError?.includes("not delivered yet")) record.lastError = null;
+			saveAgentDeal(paths, record);
+		};
+
+		// Deliver any of this agent's events that an earlier command saved but could not send, oldest first.
+		for (const record of listAgentDeals(paths, session.profileName)) {
+			const pending = unsentOwnEvents(record);
+			if (pending.length === 0) continue;
+			const state = await verifyDealEvents(record.events);
+			try {
+				for (const signed of pending) await deliver(record, signed, state);
+			} catch {
+				// Recorded in lastError; reading or other deals must not be blocked by one undelivered event.
+			}
+		}
 
 		const step = async (
 			record: LocalAgentDealRecord,
@@ -377,6 +404,24 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 				if (record.handoff) {
 					const attachment = await session.client.readMessageAttachment(record.handoff.attachmentId);
 					const content = String(attachment.content ?? "");
+					// Trust the brief only if the requester uploaded it and signed the capsule.
+					let parsedCapsule: unknown = null;
+					try { parsedCapsule = JSON.parse(content); } catch { parsedCapsule = null; }
+					const capsuleCheck = parsedCapsule ? await verifyHandoffCapsule(parsedCapsule) : null;
+					const problem =
+						attachment.owner_npub !== state.parties.requesterNpub ? "the attachment was not uploaded by the requester"
+						: !capsuleCheck?.valid ? `the capsule does not verify (${(capsuleCheck?.errors ?? ["not JSON"]).join("; ")})`
+						: capsuleCheck.signedBy !== state.parties.requesterNpub ? "the capsule is not signed by the requester"
+						: null;
+					if (problem) {
+						record.handoff.importedAt = null;
+						record.handoff.importResult = `rejected: ${problem}`;
+						record.lastError = `handoff rejected: ${problem}`;
+						saveAgentDeal(paths, record);
+						lines.push(`Handoff rejected: ${problem}. Work from the agreed terms above, or ask the requester to resend.`);
+						lines.push("When done: crosshead deal deliver --deal " + state.dealId + " --summary \"<what you delivered>\"");
+						return json ? JSON.stringify({ ...summarize(record, state), brief: lines }, null, 2) : lines.join("\n");
+					}
 					const dir = path.join(paths.state, "deals", session.profileName, "capsules");
 					mkdirSync(dir, { recursive: true, mode: 0o700 });
 					const capsuleFile = path.join(dir, `${state.dealId}.json`);

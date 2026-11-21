@@ -240,7 +240,9 @@ const fetchHostedReceipts = async (
 		const receipts: unknown[] = [];
 		for (const subjectNpub of subjects) {
 			const result = await session.client.listTrustReceipts({ subjectNpub, limit: 100 });
-			receipts.push(...extractTrustReceipts(result));
+			// Only receipts the server tied to a real settlement between the two agents count as history.
+			const stored = Array.isArray(result.stored) ? (result.stored as Array<Record<string, unknown>>) : [];
+			receipts.push(...extractTrustReceipts(stored.filter((row) => row.settlement_verified === true).map((row) => row.receipt)));
 		}
 		return receipts;
 	} finally {

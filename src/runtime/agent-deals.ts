@@ -92,6 +92,8 @@ export type LocalAgentDealRecord = {
 	/** Valid events that arrived before the events they follow. */
 	pendingEvents: SignedAgentDealEvent[];
 	processedInboxIds: string[];
+	/** Hashes of this agent's own events that the server accepted for delivery. */
+	sentEventHashes?: string[];
 	handoff: {
 		attachmentId: string;
 		capsuleId: string | null;
@@ -151,6 +153,7 @@ export const newLocalAgentDeal = (dealId: string, profileName: string, selfNpub:
 	events: [],
 	pendingEvents: [],
 	processedInboxIds: [],
+	sentEventHashes: [],
 	handoff: null,
 	settlement: null,
 	receipts: [],
@@ -399,7 +402,10 @@ export const mintAgentDealReceipt = async (input: {
 	const otherRef = state.agentRefs[otherNpub];
 	if (!otherRef) throw new Error("the other party has not signed any event in this deal");
 	const signedAt = new Date().toISOString();
-	const capabilityRefs = (state.agreement?.terms.requiredCapabilityClaimRefs ?? []).filter((ref) => ref.startsWith("capability:"));
+	// Only the requester's receipt about delivered work evidences the provider's capabilities; paying is not a skill.
+	const capabilityRefs = input.receiptType === "task_completed"
+		? (state.agreement?.terms.requiredCapabilityClaimRefs ?? []).filter((ref) => ref.startsWith("capability:"))
+		: [];
 	const unsigned: Omit<TrustReceipt, "payloadHash" | "signature"> = {
 		schemaVersion: TRUST_RECEIPT_SCHEMA_VERSION,
 		receiptId: `trust_receipt_deal_${input.receiptType}_${hashSuffix(`${state.dealId}:${input.receiptType}:${input.signer.npub}`)}`,
@@ -440,3 +446,9 @@ export const dealRole = (state: AgentDealChainState, npub: string): "requester" 
 
 export const latestSignerNpub = (record: LocalAgentDealRecord): string =>
 	record.events[record.events.length - 1]?.signerNpub ?? record.selfNpub;
+
+/** This agent's own signed events that were saved but not yet delivered, oldest first. */
+export const unsentOwnEvents = (record: LocalAgentDealRecord): SignedAgentDealEvent[] => {
+	const sent = new Set(record.sentEventHashes ?? record.events.filter((event) => event.signerNpub === record.selfNpub).map((event) => event.eventHash));
+	return record.events.filter((event) => event.signerNpub === record.selfNpub && !sent.has(event.eventHash));
+};
