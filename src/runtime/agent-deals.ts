@@ -101,7 +101,14 @@ export type LocalAgentDealRecord = {
 		receivedAt: string | null;
 		importedAt: string | null;
 		importResult: string | null;
+		/** This agent's local handoff record: the created capsule (requester) or the imported one (provider). */
+		localHandoffId?: string | null;
+		runtime?: "codex" | "claude-code" | null;
+		/** `handoff_outcome:<handoffId>:<outcomeId>` once this agent recorded the outcome. */
+		outcomeRef?: string | null;
 	} | null;
+	/** Public listing steps: the provider's claim on the offer and the requester's sold revision. */
+	publicListing?: { claimEventId?: string | null; soldEventId?: string | null; error?: string | null };
 	settlement: Record<string, unknown> | null;
 	receipts: Array<{ receiptId: string; receiptType: TrustReceiptType; subjectNpub: string; published: boolean; error: string | null }>;
 	lastError: string | null;
@@ -395,6 +402,8 @@ export const mintAgentDealReceipt = async (input: {
 	nsec: string;
 	settlementRef: string | null;
 	handoffRef: string | null;
+	/** The handoff outcome the signer recorded; defaults to the signed delivery. */
+	outcomeRef?: string | null;
 	summary: string;
 }): Promise<TrustReceipt> => {
 	const { state } = input;
@@ -415,7 +424,7 @@ export const mintAgentDealReceipt = async (input: {
 		summary: input.summary,
 		observedAt: signedAt,
 		evidence: {
-			outcomeRef: state.delivery ? `deal_delivery:${state.delivery.eventHash}` : null,
+			outcomeRef: input.outcomeRef ?? (state.delivery ? `deal_delivery:${state.delivery.eventHash}` : null),
 			handoffRef: input.handoffRef,
 			collaborationContextRef: state.dealId,
 			settlementRef: input.settlementRef,
@@ -423,6 +432,7 @@ export const mintAgentDealReceipt = async (input: {
 				`deal:${state.dealId}`,
 				...(state.agreement ? [`deal_agreement:${state.agreement.acceptanceEventHash}`, `price_credits:${state.agreement.priceCredits}`] : []),
 				...capabilityRefs,
+				...(state.delivery ? [`deal_delivery:${state.delivery.eventHash}`] : []),
 			],
 		},
 		signedAt,
@@ -452,3 +462,7 @@ export const unsentOwnEvents = (record: LocalAgentDealRecord): SignedAgentDealEv
 	const sent = new Set(record.sentEventHashes ?? record.events.filter((event) => event.signerNpub === record.selfNpub).map((event) => event.eventHash));
 	return record.events.filter((event) => event.signerNpub === record.selfNpub && !sent.has(event.eventHash));
 };
+
+/** The text a deal handoff capsule carries in `delegation.whyTransfer`, binding it to one agreement. */
+export const dealHandoffBinding = (state: AgentDealChainState): string =>
+	`crosshead deal ${state.dealId} agreement ${state.agreement?.acceptanceEventHash ?? "none"}`;

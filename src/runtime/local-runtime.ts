@@ -2937,6 +2937,34 @@ export class OnlyBotsLocalRuntimeDaemon {
 		return result;
 	}
 
+	/**
+	 * Keeps a verified capsule received from another agent as a local handoff record, so its outcome can be recorded
+	 * with `recordHandoffOutcome`. Returns the existing record when this capsule was stored before.
+	 */
+	async storeReceivedHandoff(capsule: unknown): Promise<Record<string, unknown>> {
+		const validation = await verifyHandoffCapsule(capsule);
+		if (!validation.valid) throw new Error(`received handoff capsule does not verify: ${validation.errors.join("; ")}`);
+		const typed = capsule as HandoffStoredRecord["capsule"];
+		if (existsSync(handoffRecordFile(this.paths, typed.capsuleId))) {
+			return await loadLocalHandoffRecord(this.paths, typed.capsuleId) as unknown as Record<string, unknown>;
+		}
+		const now = nowIso();
+		const record: HandoffStoredRecord = {
+			handoffId: typed.capsuleId,
+			createdAt: now,
+			updatedAt: now,
+			state: "acknowledged",
+			note: "received from another agent",
+			receipt: null,
+			outcomes: [],
+			capsule: typed,
+			validation,
+			inspection: await inspectHandoffCapsule(capsule),
+		};
+		saveLocalHandoffRecord(this.paths, record);
+		return record as unknown as Record<string, unknown>;
+	}
+
 	async verifyHandoff(request: Record<string, unknown>, _profileName?: string): Promise<Record<string, unknown>> {
 		return await verifyHandoffCapsule(request.capsule) as unknown as Record<string, unknown>;
 	}

@@ -10,6 +10,7 @@ import {
 	buildNextDealEvent,
 	dealRole,
 	deliveryNotes,
+	dealHandoffBinding,
 	latestSignerNpub,
 	listAgentDeals,
 	loadAgentDeal,
@@ -108,6 +109,7 @@ const summarize = (record: LocalAgentDealRecord, state: AgentDealChainState | nu
 		})),
 		delivery: state.delivery,
 		handoff: record.handoff,
+		publicListing: record.publicListing ?? null,
 		settlement: record.settlement ?? (state.settlementRef ? { settlementRef: state.settlementRef } : null),
 		receipts: record.receipts,
 		events: record.events.length,
@@ -225,6 +227,23 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 			return render({ ...summarize(record, state), sent: `${signed.event.eventType} to ${dealRole(state, self.npub) === "requester" ? state.parties.providerNpub : state.parties.requesterNpub}` }, json);
 		};
 
+		// Public listing steps reuse `crosshead public`, so listings get the same validation and signing.
+		const runPublic = async (args: string[]): Promise<Record<string, unknown>> => {
+			const { publicFromCli } = await import("./public");
+			const full = [...args, "--profile", session.profileName, "--json"];
+			if (home) full.push("--home", home);
+			return JSON.parse(await publicFromCli(full)) as Record<string, unknown>;
+		};
+		const lookupOffer = async (eventId: string): Promise<{ authorNpub: string; payload: Record<string, unknown> } | null> => {
+			const result = await runPublic(["state", "--event-id", eventId, "--event-type", "task_offer"]);
+			const items = Array.isArray(result.items) ? (result.items as Array<Record<string, unknown>>) : [];
+			const item = items.find((candidate) => candidate.event_id === eventId || candidate.eventId === eventId) ?? items[0];
+			const payload = item?.payload as Record<string, unknown> | undefined;
+			return item && payload ? { authorNpub: String(item.author_npub ?? ""), payload } : null;
+		};
+		const publishedEventId = (result: Record<string, unknown>): string | null =>
+			String((result.relay_event as Record<string, unknown> | undefined)?.id ?? (result.event as Record<string, unknown> | undefined)?.id ?? "") || null;
+
 		switch (subcommand) {
 			case "propose": {
 				const to = required(flags, "to", "propose");
@@ -241,7 +260,8 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					acceptanceCriteria: listFlag(str(flags, "acceptance"), /;/),
 					requiredCapabilityIds: listFlag(str(flags, "capabilities"), /,/),
 				});
-				return await step(record, {
+				const offerEventId = str(flags, "offer-event-id", "offer-ref") ?? null;
+				const output = await step(record, {
 					record,
 					agentRef: self,
 					nsec: session.nsec,
@@ -250,10 +270,27 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					terms,
 					genesis: {
 						parties: role === "requester" ? { requesterNpub: self.npub, providerNpub: to } : { requesterNpub: to, providerNpub: self.npub },
-						offerRef: str(flags, "offer-event-id", "offer-ref") ?? null,
+						offerRef: offerEventId,
 						workSummary: summary,
 					},
 				});
+				// Step 2: a provider answering a public offer also claims it publicly, pointing at this deal.
+				if (role === "provider" && offerEventId) {
+					try {
+						const offer = await lookupOffer(offerEventId);
+						if (!offer || offer.authorNpub !== to) throw new Error("the offer was not found or is not by --to");
+						const claim = await runPublic([
+							"claim", "--claim-id", `claim_${dealId.replace(/^ctx_/, "")}`, "--offer-id", String(offer.payload.offerId),
+							"--offer-event-id", offerEventId, "--summary", `Proposed terms in deal ${dealId}`,
+							"--claim-state", "claimed", "--collaboration-context-ref", dealId,
+						]);
+						record.publicListing = { ...record.publicListing, claimEventId: publishedEventId(claim) };
+					} catch (error) {
+						record.publicListing = { ...record.publicListing, error: `public claim not published: ${error instanceof Error ? error.message : String(error)}` };
+					}
+					saveAgentDeal(paths, record);
+				}
+				return output;
 			}
 			case "counter": {
 				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "counter"));
@@ -282,13 +319,26 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "deliver"));
 				const state = await stateOf(record);
 				if (!state || dealRole(state, self.npub) !== "provider") throw new Error("only the provider delivers");
+				const summaryText = required(flags, "summary", "deliver");
+				const artifactRefs = listFlag(str(flags, "artifact-refs"), /,/);
+				// Step 4: the provider reports the handoff it worked from as completed.
+				if (record.handoff?.localHandoffId && !record.handoff.outcomeRef) {
+					const updated = await daemon.recordHandoffOutcome({
+						handoffId: record.handoff.localHandoffId, kind: "completed", reporterRuntime: record.handoff.runtime ?? "codex",
+						summary: summaryText.slice(0, 500), taskSucceeded: true,
+					}, session.profileName);
+					const outcomes = (updated.outcomes as Array<{ outcomeId: string }>) ?? [];
+					record.handoff.outcomeRef = `handoff_outcome:${record.handoff.localHandoffId}:${outcomes[outcomes.length - 1]?.outcomeId}`;
+					saveAgentDeal(paths, record);
+				}
+				if (record.handoff?.localHandoffId) artifactRefs.push(`handoff:${record.handoff.localHandoffId}`);
 				return await step(record, {
 					record,
 					agentRef: self,
 					nsec: session.nsec,
 					eventType: "note",
-					summary: required(flags, "summary", "deliver"),
-					notes: deliveryNotes(listFlag(str(flags, "artifact-refs"), /,/)),
+					summary: summaryText,
+					notes: deliveryNotes(artifactRefs),
 				});
 			}
 			case "sync": {
@@ -380,6 +430,8 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					identity: { agentId: self.agentId, npub: self.npub, lineageRoot: self.lineageRoot },
 					task: { objective: state.workSummary, status: "in_progress", openLoops: state.agreement.terms.acceptanceCriteria, priority: null },
 					reasoning: { nextAction: brief },
+					// Step 3: the capsule names the exact agreement it carries out; the provider checks this on import.
+					delegation: { whyTransfer: dealHandoffBinding(state), requestedCapabilities: state.agreement.terms.requiredCapabilityClaimRefs.map((ref) => ref.replace(/^capability:/, "")), recommendedTarget: target },
 				});
 				const translation = normalizeCapturedContextToContinuityIr(captured, target);
 				const created = await daemon.createHandoff({ translation }, session.profileName);
@@ -393,7 +445,8 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 				const attachmentId = String(upload.attachment_id ?? (upload.attachment as Record<string, unknown> | undefined)?.attachment_id ?? "");
 				if (!attachmentId) throw new Error("attachment upload returned no attachment_id");
 				await session.client.sendMessage(buildHandoffCreatedMessage({ state, agentRef: self, attachmentId, capsuleId, targetRuntimeHost: target }));
-				record.handoff = { attachmentId, capsuleId, sentAt: new Date().toISOString(), receivedAt: null, importedAt: null, importResult: null };
+				const localHandoffId = String((created.handoff as Record<string, unknown> | undefined)?.handoffId ?? capsuleId);
+				record.handoff = { attachmentId, capsuleId, sentAt: new Date().toISOString(), receivedAt: null, importedAt: null, importResult: null, localHandoffId, runtime: source };
 				saveAgentDeal(paths, record);
 				return render({ ...summarize(record, state), sent: `handoff ${capsuleId} to ${state.parties.providerNpub}` }, json);
 			}
@@ -418,6 +471,8 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 						attachment.owner_npub !== state.parties.requesterNpub ? "the attachment was not uploaded by the requester"
 						: !capsuleCheck?.valid ? `the capsule does not verify (${(capsuleCheck?.errors ?? ["not JSON"]).join("; ")})`
 						: capsuleCheck.signedBy !== state.parties.requesterNpub ? "the capsule is not signed by the requester"
+						: (parsedCapsule as { continuityIr?: { delegation?: { whyTransfer?: unknown } } }).continuityIr?.delegation?.whyTransfer !== dealHandoffBinding(state)
+							? "the capsule is for a different deal or agreement"
 						: null;
 					if (problem) {
 						record.handoff.importedAt = null;
@@ -442,6 +497,10 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					const imported = JSON.parse(await handoffFromCli(importArgs)) as Record<string, unknown>;
 					process.exitCode = previousExitCode;
 					record.handoff.importedAt = new Date().toISOString();
+					record.handoff.runtime = target === "codex" ? "codex" : "claude-code";
+					// Keep the verified capsule as this agent's own handoff record, whatever host memory did with it.
+					const kept = await daemon.storeReceivedHandoff(parsedCapsule);
+					record.handoff.localHandoffId = String(kept.handoffId);
 					const verification = imported.verification as { errors?: unknown } | undefined;
 					const reasons = Array.isArray(verification?.errors) ? (verification!.errors as unknown[]).map(String) : [];
 					// The brief is still shown below: a refused import only means it was not added to host memory.
@@ -485,8 +544,42 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					await sendEvent(record, built.signed, built.state);
 					state = built.state;
 				}
-				// 3. Receipt about the provider's work.
+				// 3. Step 4: the requester records the outcome of its handoff, and its receipt cites that outcome.
+				if (record.handoff?.localHandoffId && !record.handoff.outcomeRef) {
+					const updated = await daemon.recordHandoffOutcome({
+						handoffId: record.handoff.localHandoffId, kind: "completed", reporterRuntime: record.handoff.runtime ?? "claude-code",
+						summary: `Accepted the delivery and paid ${state.agreement!.priceCredits} credits (${settlementId})`, taskSucceeded: true,
+					}, session.profileName);
+					const outcomes = (updated.outcomes as Array<{ outcomeId: string }>) ?? [];
+					record.handoff.outcomeRef = `handoff_outcome:${record.handoff.localHandoffId}:${outcomes[outcomes.length - 1]?.outcomeId}`;
+					saveAgentDeal(paths, record);
+				}
 				await publishReceipt(record, state, "task_completed", settlementId, str(flags, "summary") ?? `Completed deal: ${state.workSummary}`.slice(0, 300));
+				// 4. Step 2: mark the public offer sold, keeping its identity and original publication time.
+				if (state.offerRef && !record.publicListing?.soldEventId) {
+					try {
+						const offer = await lookupOffer(state.offerRef);
+						if (!offer || offer.authorNpub !== self.npub) throw new Error("the offer was not found or is not yours");
+						const p = offer.payload;
+						const price = p.price as { amount?: string; currency?: string; frequency?: string } | null | undefined;
+						const args = [
+							"offer", "--offer-id", String(p.offerId), "--task-ref", String(p.taskRef), "--summary", String(p.summary),
+							"--listing-status", "sold", "--published-at", String(p.publishedAt), "--updated-at", new Date().toISOString(),
+							"--collaboration-context-ref", state.dealId,
+						];
+						if (p.title) args.push("--title", String(p.title));
+						if (p.description) args.push("--description", String(p.description));
+						if (p.location) args.push("--location", String(p.location));
+						if (Array.isArray(p.requiredCapabilityIds) && p.requiredCapabilityIds.length > 0) args.push("--required-capability-ids", (p.requiredCapabilityIds as string[]).join(","));
+						if (price?.amount && price.currency) {
+							args.push("--price", price.amount, "--currency", price.currency);
+							if (price.frequency) args.push("--frequency", price.frequency);
+						}
+						record.publicListing = { ...record.publicListing, soldEventId: publishedEventId(await runPublic(args)) };
+					} catch (error) {
+						record.publicListing = { ...record.publicListing, error: `offer not marked sold: ${error instanceof Error ? error.message : String(error)}` };
+					}
+				}
 				saveAgentDeal(paths, record);
 				return render(summarize(record, state), json);
 			}
@@ -529,7 +622,8 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 			signer: session.agentRef,
 			nsec: session.nsec,
 			settlementRef: settlementId,
-			handoffRef: record.handoff?.capsuleId ?? null,
+			handoffRef: record.handoff?.localHandoffId ?? record.handoff?.capsuleId ?? null,
+			outcomeRef: receiptType === "task_completed" ? record.handoff?.outcomeRef ?? null : null,
 			summary,
 		});
 		const entry = { receiptId: receipt.receiptId, receiptType, subjectNpub: receipt.subject.subjectType === "agent" ? receipt.subject.agentRef.npub : "", published: false, error: null as string | null };

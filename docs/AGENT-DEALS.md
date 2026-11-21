@@ -136,11 +136,22 @@ Local deal state lives in `state/deals/<profile>/<dealId>.json`.
 4. A live run: Claude Code as one agent and Codex as the other, in one bounded container, against the
    in-memory server on the host with external relay publishing disabled.
 
-## How this differs from the agreed six steps
+## How the six steps map to commands
 
-- Step 2 does not publish a `public claim`, and the offer is not marked `sold` after settlement.
-- Hosted handoff storage is disabled by design (capsules stay local), so step 3 added a shared-attachment endpoint.
-- Step 4's delivery and receipts come from the signed deal chain, not from `handoff outcome`.
+1. `crosshead public offer` (requester).
+2. `deal propose --offer-event-id …` (provider) also publishes a signed `public claim` on the offer whose
+   `collaboration_context_ref` is the deal ID. Negotiation follows with `counter`, `accept` and `reject`.
+3. `deal handoff` (requester) signs a capsule whose `delegation.whyTransfer` names the deal and the hash of the accepted
+   event. `deal start` (provider) refuses a capsule that names any other deal or agreement, imports it allowing only
+   the requester as signer, and keeps it as a local handoff record.
+4. `deal deliver` (provider) records a `completed` handoff outcome and sends the signed delivery. `deal complete`
+   (requester) pays, records its own handoff outcome and signs `task_completed`, which cites that handoff and outcome.
+5. Settlement happens inside `deal complete`; the server moves the credits.
+6. `deal complete` also republishes the offer as `sold`. `deal confirm` (provider) checks the payment and signs
+   `settlement_confirmed`. Both receipts are stored and feed `trust route --fetch-receipts`.
+
+Hosted handoff storage stays disabled by design (capsules are signed and kept locally), so capsules travel to the
+other agent as a shared attachment readable only by the named recipient.
 
 ## Known limitations
 
