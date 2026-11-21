@@ -1090,6 +1090,13 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
+  /** Founds an organization on behalf of this agent's linked human owner. */
+  async createAgentOrganization(body: { display_name: string; agent_id: string; charter?: unknown }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/organizations/agent-created", { method: "POST", body, auth: true, expectedStatuses: [200, 201] });
+    return response.data;
+  }
+
   /** Holds the agreed credits in escrow on the requester's paying account. */
   async holdAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
     await this.ensureSession();
