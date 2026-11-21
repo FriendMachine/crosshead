@@ -30,9 +30,11 @@ import { OnlyBotsLocalRuntimeDaemon, parseArgs } from "../local-runtime";
 import { resolveRuntimePaths } from "../runtime-persistence";
 
 export const dealHelpLines = [
-	"crosshead deal propose --to <npub> --role requester|provider --summary <text> --price <credits> [--acceptance <a;b>] [--capabilities <csv>] [--turnaround-hours <n>] [--offer-event-id <id>] [--deal-id <ctx_id>] [--json]",
-	"crosshead deal counter --deal <id> --price <credits> [--summary <text>] [--acceptance <a;b>] [--json]",
-	"crosshead deal accept --deal <id> [--summary <text>] [--json]",
+	"crosshead deal propose --to <npub> --role requester|provider --summary <text> --price <credits> [--acceptance <a;b>] [--capabilities <csv>] [--turnaround-hours <n>] [--offer-event-id <id>] [--account <npub|org:id>] [--deal-id <ctx_id>] [--json]",
+	"crosshead deal counter --deal <id> --price <credits> [--summary <text>] [--acceptance <a;b>] [--account <npub|org:id>] [--json]",
+	"crosshead deal accept --deal <id> [--summary <text>] [--account <npub|org:id>] [--json]",
+	"crosshead deal fund --deal <id> [--json]",
+	"crosshead deal refund --deal <id> [--json]",
 	"crosshead deal reject --deal <id> --reason <text> [--json]",
 	"crosshead deal sync [--json]",
 	"crosshead deal list [--json]",
@@ -110,6 +112,7 @@ const summarize = (record: LocalAgentDealRecord, state: AgentDealChainState | nu
 		delivery: state.delivery,
 		handoff: record.handoff,
 		publicListing: record.publicListing ?? null,
+		escrow: record.hold ? { status: record.hold.status, amountCredits: record.hold.amount_credits, deadline: record.hold.deadline, delivered: Boolean(record.hold.delivered_at) } : null,
 		settlement: record.settlement ?? (state.settlementRef ? { settlementRef: state.settlementRef } : null),
 		receipts: record.receipts,
 		events: record.events.length,
@@ -143,6 +146,8 @@ const render = (value: Record<string, unknown> | Record<string, unknown>[], json
 			}
 			const delivery = row.delivery as Record<string, unknown> | null | undefined;
 			if (delivery) lines.push(`  Delivery: ${String(delivery.summary)}`);
+			const escrow = row.escrow as Record<string, unknown> | null | undefined;
+			if (escrow) lines.push(`  Escrow: ${String(escrow.status)} ${String(escrow.amountCredits)} credits${escrow.status === "held" ? ` until ${String(escrow.deadline)}` : ""}${escrow.delivered ? " (delivery recorded)" : ""}`);
 			const settlement = row.settlement as Record<string, unknown> | null | undefined;
 			if (settlement) {
 				const amount = settlement.amount_credits !== undefined ? ` (${String(settlement.amount_credits)} credits)` : "";
@@ -244,6 +249,22 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 		const publishedEventId = (result: Record<string, unknown>): string | null =>
 			String((result.relay_event as Record<string, unknown> | undefined)?.id ?? (result.event as Record<string, unknown> | undefined)?.id ?? "") || null;
 
+		const fundDeal = async (record: LocalAgentDealRecord): Promise<void> => {
+			const result = await session.client.holdAgentDeal({ events: record.events });
+			record.hold = (result.hold as Record<string, unknown>) ?? result;
+			saveAgentDeal(paths, record);
+		};
+		const registerDelivery = async (record: LocalAgentDealRecord): Promise<void> => {
+			try {
+				const result = await session.client.recordAgentDealDelivery({ events: record.events });
+				record.hold = (result.hold as Record<string, unknown>) ?? record.hold;
+				record.deliveryRegistered = true;
+			} catch (error) {
+				record.lastError = `delivery not yet recorded with the server; \`crosshead deal sync\` retries it (${error instanceof Error ? error.message : String(error)})`;
+			}
+			saveAgentDeal(paths, record);
+		};
+
 		switch (subcommand) {
 			case "propose": {
 				const to = required(flags, "to", "propose");
@@ -268,6 +289,7 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					eventType: "offer",
 					summary: str(flags, "message") ?? summary,
 					terms,
+					account: str(flags, "account") ?? null,
 					genesis: {
 						parties: role === "requester" ? { requesterNpub: self.npub, providerNpub: to } : { requesterNpub: to, providerNpub: self.npub },
 						offerRef: offerEventId,
@@ -302,18 +324,35 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					acceptanceCriteria: str(flags, "acceptance") !== undefined ? listFlag(str(flags, "acceptance"), /;/) : base?.acceptanceCriteria ?? [],
 					requiredCapabilityIds: (base?.requiredCapabilityClaimRefs ?? []).map((ref) => ref.replace(/^capability:/, "")),
 				});
-				return await step(record, { record, agentRef: self, nsec: session.nsec, eventType: "counteroffer", summary: str(flags, "summary") ?? `Counteroffer: ${terms.priceSats} credits`, terms });
+				return await step(record, { record, agentRef: self, nsec: session.nsec, eventType: "counteroffer", summary: str(flags, "summary") ?? `Counteroffer: ${terms.priceSats} credits`, terms, account: str(flags, "account") ?? null });
 			}
 			case "accept": {
 				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "accept"));
 				const state = await stateOf(record);
 				if (!state?.currentTerms) throw new Error("there is no offer to accept");
-				return await step(record, { record, agentRef: self, nsec: session.nsec, eventType: "conditional_acceptance", summary: str(flags, "summary") ?? `Accepted: ${state.currentTerms.priceSats} credits`, terms: state.currentTerms, conditionRefs: [] });
+				return await step(record, { record, agentRef: self, nsec: session.nsec, eventType: "conditional_acceptance", summary: str(flags, "summary") ?? `Accepted: ${state.currentTerms.priceSats} credits`, terms: state.currentTerms, conditionRefs: [], account: str(flags, "account") ?? null });
 			}
 			case "reject": {
 				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "reject"));
 				const reason = required(flags, "reason", "reject");
 				return await step(record, { record, agentRef: self, nsec: session.nsec, eventType: "rejection", summary: str(flags, "summary") ?? `Rejected: ${reason}`, reason });
+			}
+			case "fund": {
+				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "fund"));
+				const state = await stateOf(record);
+				if (!state || dealRole(state, self.npub) !== "requester") throw new Error("only the requester funds a deal");
+				if (!state.agreement) throw new Error("the deal is not agreed yet");
+				await fundDeal(record);
+				return render(summarize(record, state), json);
+			}
+			case "refund": {
+				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "refund"));
+				const state = await stateOf(record);
+				if (!state || dealRole(state, self.npub) !== "requester") throw new Error("only the requester asks for a refund");
+				const result = await session.client.refundAgentDeal({ events: record.events });
+				record.hold = (result.hold as Record<string, unknown>) ?? result;
+				saveAgentDeal(paths, record);
+				return render(summarize(record, state), json);
 			}
 			case "deliver": {
 				const record = requireAgentDeal(paths, session.profileName, required(flags, "deal", "deliver"));
@@ -332,7 +371,7 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					saveAgentDeal(paths, record);
 				}
 				if (record.handoff?.localHandoffId) artifactRefs.push(`handoff:${record.handoff.localHandoffId}`);
-				return await step(record, {
+				const delivered = await step(record, {
 					record,
 					agentRef: self,
 					nsec: session.nsec,
@@ -340,6 +379,9 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					summary: summaryText,
 					notes: deliveryNotes(artifactRefs),
 				});
+				// Record the delivery with the server so the held credits cannot be refunded as undelivered.
+				await registerDelivery(record);
+				return delivered;
 			}
 			case "sync": {
 				const inbox = await session.client.inspectInboxState({ messageType: "inbox_event", includeTerminal: true, limit: 200 });
@@ -391,6 +433,13 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					touched.set(dealId, record);
 					report.push({ ...summarize(record, state), note: `${merged.appended} new event(s)${merged.rejected.length ? `, ${merged.rejected.length} rejected` : ""}` });
 				}
+				// A provider whose delivery did not reach the server records it now.
+				for (const pending of listAgentDeals(paths, session.profileName)) {
+					const pendingState = await stateOf(pending).catch(() => null);
+					if (pendingState?.delivery && !pending.deliveryRegistered && dealRole(pendingState, self.npub) === "provider") {
+						await registerDelivery(pending).catch(() => undefined);
+					}
+				}
 				// Acknowledge what was read so the oldest-first inbox window keeps moving. The deal itself already tells
 				// the sender what happened, so no automatic acknowledgement message is sent back.
 				for (const inboxId of toAcknowledge) {
@@ -418,6 +467,8 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 				if (!state || dealRole(state, self.npub) !== "requester") throw new Error("only the requester sends the handoff");
 				if (!state.agreement) throw new Error("the deal is not agreed yet");
 				const brief = required(flags, "brief", "handoff");
+				// Fund before sending work, so the provider can see the credits are held for it.
+				if (!record.hold || record.hold.status !== "held") await fundDeal(record);
 				const source = (str(flags, "source") ?? "claude-code") as ContinuityRuntime;
 				const target = (str(flags, "target") ?? (source === "codex" ? "claude-code" : "codex")) as ContinuityRuntime;
 				// Only the agreed terms and the explicit brief go into the capsule: no transcript, files or memory.
@@ -460,6 +511,14 @@ export const dealFromCli = async (argv: string[]): Promise<string> => {
 					`Agreed price: ${state.agreement.priceCredits} credits`,
 					...(state.agreement.terms.acceptanceCriteria.length > 0 ? [`Acceptance criteria: ${state.agreement.terms.acceptanceCriteria.join("; ")}`] : []),
 				];
+				try {
+					const holdView = await session.client.readAgentDealHold(state.dealId);
+					record.hold = (holdView.hold as Record<string, unknown>) ?? holdView;
+					saveAgentDeal(paths, record);
+					lines.push(`Funding: ${String(record.hold.amount_credits)} credits held for you until ${String(record.hold.deadline)}`);
+				} catch {
+					lines.push("Funding: not held yet. Wait until the requester funds the deal before doing paid work.");
+				}
 				if (record.handoff) {
 					const attachment = await session.client.readMessageAttachment(record.handoff.attachmentId);
 					const content = String(attachment.content ?? "");

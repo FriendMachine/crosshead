@@ -157,4 +157,16 @@ describe("agent deal chains", () => {
 		const legacy = { ...record, sentEventHashes: undefined };
 		expect(unsentOwnEvents(legacy)).toEqual([]);
 	});
+
+	it("fixes each party's named account at agreement and only accepts the signer's own npub", async () => {
+		const record = newLocalAgentDeal(newAgentDealId(), "default", requester.ref.npub);
+		const terms = buildDealTerms({ priceCredits: 100 });
+		const genesis = { parties: { requesterNpub: requester.ref.npub, providerNpub: provider.ref.npub }, offerRef: null, workSummary: "w" };
+		await expect(buildNextDealEvent({ record, agentRef: requester.ref, nsec: requester.nsec, eventType: "offer", summary: "o", terms, genesis, account: provider.ref.npub })).rejects.toThrow(/own npub/);
+		record.events.push((await buildNextDealEvent({ record, agentRef: requester.ref, nsec: requester.nsec, eventType: "offer", summary: "o", terms, genesis, account: "org:acme" })).signed);
+		const accepted = await buildNextDealEvent({ record, agentRef: provider.ref, nsec: provider.nsec, eventType: "conditional_acceptance", summary: "ok", terms, conditionRefs: [], account: provider.ref.npub });
+		record.events.push(accepted.signed);
+		expect(accepted.state.agreement).toMatchObject({ requesterAccount: "org:acme", providerAccount: provider.ref.npub });
+		await expect(buildNextDealEvent({ record, agentRef: provider.ref, nsec: provider.nsec, eventType: "note", summary: "n", account: "org:other" })).rejects.toThrow(/fixed at agreement/);
+	});
 });

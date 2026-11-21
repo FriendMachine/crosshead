@@ -107,6 +107,10 @@ export type LocalAgentDealRecord = {
 		/** `handoff_outcome:<handoffId>:<outcomeId>` once this agent recorded the outcome. */
 		outcomeRef?: string | null;
 	} | null;
+	/** Server escrow state for this deal, as last read (`held`, `settled` or `refunded`). */
+	hold?: Record<string, unknown> | null;
+	/** True once the server recorded the provider's signed delivery (provider side). */
+	deliveryRegistered?: boolean;
 	/** Public listing steps: the provider's claim on the offer and the requester's sold revision. */
 	publicListing?: { claimEventId?: string | null; soldEventId?: string | null; error?: string | null };
 	settlement: Record<string, unknown> | null;
@@ -205,6 +209,8 @@ export const buildNextDealEvent = async (input: {
 	reason?: string | null;
 	settlementRef?: string | null;
 	notes?: string[];
+	/** This agent's paying (requester) or receiving (provider) account; omit to keep the default. */
+	account?: string | null;
 	genesis?: { parties: { requesterNpub: string; providerNpub: string }; offerRef: string | null; workSummary: string };
 }): Promise<{ signed: SignedAgentDealEvent; state: AgentDealChainState }> => {
 	const sequence = input.record.events.length;
@@ -230,6 +236,7 @@ export const buildNextDealEvent = async (input: {
 		parties: sequence === 0 ? input.genesis!.parties : null,
 		offerRef: sequence === 0 ? input.genesis!.offerRef : null,
 		workSummary: sequence === 0 ? input.genesis!.workSummary : null,
+		...(input.account ? { account: input.account } : {}),
 		event,
 		signerNpub: input.agentRef.npub,
 	};
