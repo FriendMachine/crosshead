@@ -52,7 +52,7 @@ const writeCapsuleFile = (outputFile: string, capsule: unknown, force: boolean):
 	}
 };
 
-const scopedWorkspaceId = (root: string, requested: string | undefined): string => {
+export const scopedWorkspaceId = (root: string, requested: string | undefined): string => {
 	const canonical = `repo:${root}`;
 	if (requested !== undefined && requested !== canonical) {
 		throw new Error(`This scoped workspace uses ${canonical}. Remove the workspace-id override or use the bound project.`);
@@ -60,7 +60,7 @@ const scopedWorkspaceId = (root: string, requested: string | undefined): string 
 	return canonical;
 };
 
-const scopedHandoffBinding = (home: string | undefined, host: HandoffHost, directory: string, profileName: string | undefined, hostHome: string | undefined) => {
+export const scopedHandoffBinding = (home: string | undefined, host: HandoffHost, directory: string, profileName: string | undefined, hostHome: string | undefined) => {
 	const paths = resolveRuntimePaths(home);
 	const policy = readWorkspaceHookPolicy(paths);
 	if (!policy) return null;
@@ -520,7 +520,7 @@ export const handoffFromCli = async (argv: string[]): Promise<string> => {
 	throw new Error("handoff requires one of: export, import, outcome, create, verify, explain");
 };
 
-const importWorkspaceRoot = (directory: string): string => {
+export const importWorkspaceRoot = (directory: string): string => {
 	try {
 		return workspaceProjectRoot(directory);
 	} catch {

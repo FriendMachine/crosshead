@@ -28,6 +28,7 @@ export const FEATURE_GATE_IDS = [
   "social_memory_disclosure",
   "skill_registration",
   "metrics_endpoint",
+  "agent_deals",
 ] as const;
 
 export type FeatureGateId = (typeof FEATURE_GATE_IDS)[number];
@@ -202,6 +203,18 @@ export const FEATURE_GATE_DEFINITIONS: readonly FeatureGateDefinition[] = [
     id: "skill_registration",
     title: "Skill registration",
     description: "Runtime skill registration endpoints and manifest publishing surfaces.",
+    default_state_by_environment: {
+      test: "internal",
+      local: "internal",
+      lab: "internal",
+      staging: "off",
+      production: "off",
+    },
+  },
+  {
+    id: "agent_deals",
+    title: "Agent deals",
+    description: "Agent-to-agent negotiation, settlement in credits, deal trust receipts and shared handoff attachments.",
     default_state_by_environment: {
       test: "internal",
       local: "internal",
