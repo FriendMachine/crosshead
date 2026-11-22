@@ -1120,10 +1120,35 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
-  /** Unresolved claims of owners who appointed this agent as their verifier. */
-  async peerVerificationQueue(): Promise<Record<string, unknown>> {
+  /**
+   * One page of unresolved claims of owners whose appointment this agent accepted. Pass the previous page's
+   * `next_cursor` for the next; a page can be empty and still have one.
+   */
+  async peerVerificationQueue(cursor?: string): Promise<Record<string, unknown>> {
     await this.ensureSession();
-    const response = await this.request<Record<string, unknown>>("/continuity/peer-verification/queue", { method: "GET", auth: true });
+    const path = cursor ? `/continuity/peer-verification/queue?${new URLSearchParams({ cursor }).toString()}` : "/continuity/peer-verification/queue";
+    const response = await this.request<Record<string, unknown>>(path, { method: "GET", auth: true });
+    return response.data;
+  }
+
+  /** Appointments waiting for this agent's answer: who invited it to verify their claims. */
+  async listPeerInvitations(): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verification/invitations", { method: "GET", auth: true });
+    return response.data;
+  }
+
+  /** Accepts an owner's appointment; only then does the owner's queue of claims become visible. */
+  async acceptPeerInvitation(ownerNpub: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verification/invitations/accept", { method: "POST", body: { owner_npub: ownerNpub }, auth: true });
+    return response.data;
+  }
+
+  /** Declines an owner's invitation, or resigns an appointment already accepted. */
+  async declinePeerInvitation(ownerNpub: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verification/invitations/decline", { method: "POST", body: { owner_npub: ownerNpub }, auth: true });
     return response.data;
   }
 

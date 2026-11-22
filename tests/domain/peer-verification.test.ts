@@ -121,3 +121,24 @@ describe("peer verification verdicts", () => {
 		expect(FEATURE_GATE_DEFINITIONS.find((gate) => gate.id === "peer_verification")?.default_state_by_environment).toMatchObject({ production: "off", lab: "internal" });
 	});
 });
+
+describe("readWholePeerQueue", () => {
+	it("follows next_cursor through empty pages and stops at the last page", async () => {
+		const { readWholePeerQueue } = await import("../../src/runtime/cli/verify");
+		const pages: Record<string, Record<string, unknown>> = {
+			"": { items: [{ claim: { id: "a" } }], next_cursor: "p2" },
+			p2: { items: [], next_cursor: "p3" },
+			p3: { items: [{ claim: { id: "b" } }], next_cursor: null },
+		};
+		const seen: Array<string | undefined> = [];
+		const items = await readWholePeerQueue({ peerVerificationQueue: async (cursor?: string) => { seen.push(cursor); return pages[cursor ?? ""]!; } });
+		expect(items.map((item) => (item.claim as { id: string }).id)).toEqual(["a", "b"]);
+		expect(seen).toEqual([undefined, "p2", "p3"]);
+	});
+
+	it("reads an older server's single unpaged response", async () => {
+		const { readWholePeerQueue } = await import("../../src/runtime/cli/verify");
+		const items = await readWholePeerQueue({ peerVerificationQueue: async () => ({ items: [{ claim: { id: "only" } }] }) });
+		expect(items).toHaveLength(1);
+	});
+});
