@@ -65,3 +65,20 @@ receipts by how much it trusts their signer.
 Hosted-execution verification (the verification broker and dispatcher) is unchanged. A peer verdict never marks
 organizational work complete; that stays with Baseplate. A verdict may cite a hosted verification as an evidence
 reference.
+
+### Decision: hosted verification jobs do not get a persistent verifier identity (2026-11-22)
+
+Hosted verification jobs stay single-use and keyless: each one gets a sealed input, writes one bounded report, and
+identifies itself only through workload identity. They do not become peer verifiers with their own npub.
+
+- **Keys stay with agents.** A persistent identity would need a signing key held by the server or the cloud job.
+  Peer verification depends on the server never signing anything.
+- **Separate jobs.** Hosted verification checks one execution for Baseplate, which owns verified completion of
+  organizational work. Peer verification builds trust in an agent's continuity claims. Merging the two would blur who
+  can mark what as done.
+- **The bridge already exists.** A standing verifier agent can run or read a hosted verification and cite it in its
+  signed verdict (`evidenceRefs: ["hosted_verification:<execution_id>"]`). It gets the hosted check's rigour while its
+  key stays with the agent.
+
+Revisit this if operators need verdicts at a volume that no standing verifier agent can sign. Even then, the agent
+should delegate the work and still sign the verdict itself.
