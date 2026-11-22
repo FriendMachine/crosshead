@@ -39,6 +39,8 @@ type TranscriptTurn = { user: string; prompt: string; truncated: boolean; reply:
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const TRANSCRIPT_WAIT_MS = 2_500;
+const TRANSCRIPT_CHUNK_BYTES = 64 * 1024;
+const MAX_TRANSCRIPT_SCAN_BYTES = 32 * 1024 * 1024;
 
 const readState = (file: string): ConversationState => {
 	try {
@@ -74,6 +76,35 @@ const transcriptPrompt = (content: string, truncated: boolean): string => {
 	return truncated ? content.slice(opening.length) : content;
 };
 
+// Read backward to the newest user row without loading the entire transcript.
+// Keep partial rows as bytes so multibyte characters survive chunk boundaries.
+function* recentTranscriptLines(fd: number, size: number): Generator<string> {
+	const buffer = Buffer.alloc(Math.min(size, TRANSCRIPT_CHUNK_BYTES));
+	const floor = Math.max(0, size - MAX_TRANSCRIPT_SCAN_BYTES);
+	let position = size;
+	let fragments: Buffer[] = [];
+	while (position > floor) {
+		const length = Math.min(buffer.length, position - floor);
+		position -= length;
+		// A truncated file is retried by the Stop hook against a fresh snapshot.
+		if (readSync(fd, buffer, 0, length, position) !== length) return;
+		let end = length;
+		while (end > 0) {
+			const index = buffer.lastIndexOf(0x0a, end - 1);
+			if (index < 0) break;
+			const prefix = buffer.subarray(index + 1, end);
+			if (prefix.length || fragments.length) {
+				yield fragments.length ? Buffer.concat([prefix, ...fragments.reverse()]).toString("utf8") : prefix.toString("utf8");
+			}
+			fragments = [];
+			end = index;
+		}
+		if (end > 0) fragments.push(Buffer.from(buffer.subarray(0, end)));
+	}
+	// The leftmost fragment is complete only if we reached the start of the file.
+	if (floor === 0 && fragments.length) yield Buffer.concat(fragments.reverse()).toString("utf8");
+}
+
 const readLatestTurn = (geminiHome: string, transcript: string): TranscriptTurn | null => {
 	assertManagedFilePath(transcript, geminiHome);
 	let fd: number | undefined;
@@ -81,16 +112,9 @@ const readLatestTurn = (geminiHome: string, transcript: string): TranscriptTurn 
 		fd = openSync(transcript, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		const stat = fstatSync(fd);
 		if (!stat.isFile()) return null;
-		const length = Math.min(stat.size, 1024 * 1024);
-		const buffer = Buffer.alloc(length);
-		const offset = stat.size - length;
-		const bytes = readSync(fd, buffer, 0, length, offset);
-		const lines = buffer.subarray(0, bytes).toString("utf8").split(/\r?\n/);
-		if (offset > 0) lines.shift();
 		let reply: string | null = null;
 		let seenPlanner = false;
-		let seenToolResult = false;
-		for (const line of lines.reverse()) {
+		for (const line of recentTranscriptLines(fd, stat.size)) {
 			let step;
 			try { step = JSON.parse(line); } catch { continue; }
 			if (!step || !Number.isSafeInteger(step.step_index)) continue;
@@ -105,11 +129,12 @@ const readLatestTurn = (geminiHome: string, transcript: string): TranscriptTurn 
 					reply,
 				};
 			}
-			if (step.type === "GENERIC") seenToolResult = true;
 			if (seenPlanner || step.source !== "MODEL" || step.type !== "PLANNER_RESPONSE") continue;
 			seenPlanner = true;
 			const hasToolCalls = Array.isArray(step.tool_calls) && step.tool_calls.length > 0;
-			if (step.status === "DONE" && typeof step.content === "string" && step.content.trim() && !(hasToolCalls && seenToolResult)) {
+			// A planner issuing a tool call is intermediate even if its tool result
+			// has not reached disk yet. Stop polls for the final text-only planner.
+			if (!hasToolCalls && step.status === "DONE" && typeof step.content === "string" && step.content.trim()) {
 				reply = step.content.slice(0, 16_384);
 			}
 		}

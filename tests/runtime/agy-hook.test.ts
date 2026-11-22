@@ -99,7 +99,7 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		expect(await events("turn.started")).toHaveLength(1);
 		expect(await hook("Stop", session, { lastUserInput: "Different prompt" })).toEqual({});
 		expect(busy()).toBe(true);
-		addSteps(session, { ...modelStep(6, answer), thinking: "Private model reasoning.", tool_calls: [{}] });
+		addSteps(session, { ...modelStep(6, answer), thinking: "Private model reasoning." });
 		// A model can finish its reply while a background command still runs.
 		await hook("Stop", session, { fullyIdle: false, terminationReason: "NO_TOOL_CALL" });
 		expect(busy()).toBe(false);
@@ -115,11 +115,16 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		addSteps(session, fullUserStep(7, nextPrompt));
 		const second = await hook("PreInvocation", session, secondInput);
 		expect(JSON.stringify(second.injectSteps)).toContain(answer);
+		addSteps(session, { ...modelStep(8, "Wait while I read the rollback table."), tool_calls: [{}] });
 		await Promise.all([
 			hook("Stop", session, { lastUserInput: nextPrompt }),
-			delay(1_200).then(() => addSteps(session, modelStep(8, nextAnswer))),
+			delay(1_200).then(() => addSteps(session,
+				{ step_index: 9, source: "MODEL", type: "GENERIC", status: "DONE", content: "Rollback table." },
+				modelStep(10, nextAnswer))),
 		]);
-		expect(await events("turn.completed")).toHaveLength(2);
+		const completed = await events("turn.completed");
+		expect(completed).toHaveLength(2);
+		expect(completed[1]?.payload.summary).toBe(nextAnswer);
 
 		// A wake-up carrying the previous prompt must never replay its reply.
 		expect(await hook("PreInvocation", session, secondInput)).toEqual({});
@@ -128,17 +133,24 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		expect(busy()).toBe(false);
 
 		// Repeating the exact prompt with a fresh USER_INPUT does start a turn.
-		addSteps(session, fullUserStep(9, nextPrompt));
+		addSteps(session, fullUserStep(11, nextPrompt));
 		const repeated = await hook("PreInvocation", session, secondInput);
 		expect(JSON.stringify(repeated.injectSteps)).toContain(nextAnswer);
-		addSteps(session, modelStep(10, "A newly confirmed rollback flag is iris-7241."));
+		// The full transcript can put more than a MiB between the user row
+		// and final reply in a single large tool result.
+		const largeTurnAnswer = "A newly confirmed rollback flag is iris-7241.";
+		addSteps(session, { ...modelStep(12, "Read the large rollback log."), tool_calls: [{}] },
+			{ step_index: 13, source: "MODEL", type: "GENERIC", status: "DONE", content: "Raw tool output café.\n".repeat(95_000) },
+			modelStep(14, largeTurnAnswer));
 		await hook("Stop", session, { lastUserInput: nextPrompt });
-		expect(await events("turn.completed")).toHaveLength(3);
+		const afterLargeTurn = await events("turn.completed");
+		expect(afterLargeTurn).toHaveLength(3);
+		expect(afterLargeTurn[2]?.payload.summary).toBe(largeTurnAnswer);
 
 		const failed = "What is the rollback fallback?";
-		addSteps(session, userStep(11, failed));
+		addSteps(session, userStep(15, failed));
 		await hook("PreInvocation", session, { lastUserInput: failed });
-		addSteps(session, modelStep(12, "The fallback flag is daisy-4331."));
+		addSteps(session, modelStep(16, "The fallback flag is daisy-4331."));
 		const rejection = vi.spyOn(daemon, "submitLifecycleEvent").mockRejectedValueOnce(new Error("synthetic stop-time failure"));
 		try {
 			await hook("Stop", session, { lastUserInput: failed }, /could not complete an Antigravity CLI hook/);
