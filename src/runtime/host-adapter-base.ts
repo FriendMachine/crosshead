@@ -11,6 +11,7 @@ import { resolveRuntimeHome } from "./local-runtime";
 import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
 import type { LocalRuntimeClient } from "./local-client";
 import {
+  appendVerifiedArchiveContext,
   buildRuntimeStartupFreshness,
   renderRuntimeStartupContext,
   type RuntimeStartupRuntime,
@@ -388,9 +389,7 @@ export abstract class HostRuntimeAdapterBase {
       goal: input.prompt,
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
-    if (input.prompt.trim() && typeof contextPack?.verifiedArchiveContext === "string") {
-      contextText = [contextText, contextPack.verifiedArchiveContext].filter(Boolean).join("\n\n");
-    }
+    if (input.prompt.trim()) contextText = appendVerifiedArchiveContext(contextText, contextPack);
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
     if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
       const home = this.config.runtimeHome;

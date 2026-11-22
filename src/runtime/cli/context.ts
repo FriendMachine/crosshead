@@ -1,3 +1,4 @@
+import { workspaceProfileForDirectory } from "../workspace-hooks";
 import { workspaceDirectoryPath } from "../workspace-identity";
 import { importWorkspaceRoot, scopedHandoffBinding } from "./handoff";
 import { OnlyBotsLocalRuntimeDaemon, formatContextPackInspection, formatContinuityInspection, formatDreamInspection, formatDreamReviewResult, formatDreamRunResult, formatJudgmentInspection, formatObligationInspection, formatSelfModelReviewResult, parseArgs, parseJsonFlag } from "../local-runtime";
@@ -20,7 +21,7 @@ export const contextFromCli = async (argv: string[]): Promise<string> => {
 		}
 		const binding = bindings.find(binding => !profileName || binding.profileName === profileName);
 		const workspaceId = `repo:${binding?.root ?? (explicitRoot ? workspaceDirectoryPath(explicitRoot) : importWorkspaceRoot(directory))}`;
-		const archiveProfile = binding?.profileName ?? profileName;
+		const archiveProfile = profileName ?? binding?.profileName ?? workspaceProfileForDirectory(home, directory) ?? undefined;
 		const action = positionals[1];
 		let result: Record<string, unknown>;
 		if (action === "preview" && typeof flags.goal === "string") {

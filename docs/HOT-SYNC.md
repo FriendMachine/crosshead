@@ -34,7 +34,10 @@ waits for in-flight work before releasing the runtime-home ownership lock.
 From the workspace, preview the complete saved task and verify its requirements
 and corrections. The preview requests a paid context pack. Approving its
 displayed digest opts this runtime home and profile into paid recall on matching
-native hooks in assist or auto mode.
+turns in Codex, Claude Code, Antigravity CLI, Hermes, OpenCode, Pi, and Oh My Pi
+in assist or auto mode. Use `--profile` when the host uses a different profile
+from the workspace or runtime default. For existing Oh My Pi installations,
+rerun `crosshead install omp` after updating to refresh the project extension.
 
 ```sh
 crosshead context recall preview --goal "Repair payment retries without duplicate charges"

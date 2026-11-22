@@ -20,7 +20,7 @@ const OMP_ENVRC_END = "# <<< onlybots omp <<<";
 // boundary when materializing it so hosted lifecycle fields can never become
 // Pi-compatible model instructions. Exact replacements intentionally fail
 // closed if the generated template changes shape.
-export const hardenOmpExtensionSource = (source: string, pinnedRuntimeHome?: string): string => {
+export const hardenOmpExtensionSource = (source: string, pinnedRuntimeHome?: string, archiveRecall = true): string => {
 	const safeRuntimeHomeResolver = pinnedRuntimeHome
 		? `const resolveRuntimeHome = () => ${JSON.stringify(path.resolve(pinnedRuntimeHome))};`
 		: [
@@ -109,6 +109,36 @@ export const hardenOmpExtensionSource = (source: string, pinnedRuntimeHome?: str
 			"        contextText = baseContextText || renderHotMemoryFallback(hotMemorySnapshot);",
 			"        contextText = renderHotMemoryFallback(hotMemorySnapshot);",
 		],
+		...(archiveRecall ? [
+			[
+				[
+					"          goal: prompt,",
+					"          transcript,",
+					"          allowedScope: {",
+					"            includeHotMemory: true,",
+					"            includeWarmMemory: false,",
+					"            includeColdMemory: false,",
+				].join("\n"),
+				[
+					"          goal: prompt,",
+					'          recallPolicy: "bounded",',
+					"          transcript,",
+					"          allowedScope: {",
+					"            includeHotMemory: true,",
+					"            includeWarmMemory: true,",
+					"            includeColdMemory: true,",
+				].join("\n"),
+			],
+			[
+				"      this.lastContextReadAt = observedAt;",
+				[
+					'      if (typeof contextPack?.verifiedArchiveContext === "string" && contextPack.verifiedArchiveContext) {',
+					'        contextText = [contextText, contextPack.verifiedArchiveContext].filter(Boolean).join("\\n\\n");',
+					"      }",
+					"      this.lastContextReadAt = observedAt;",
+				].join("\n"),
+			],
+		] as const : []),
 	];
 	let hardened = source;
 	for (const [unsafe, safe] of replacements) {
@@ -397,7 +427,8 @@ export const uninstallOmpProjectAdapter = async (
 	const expectedExtension = hardenOmpExtensionSource(OMP_EXTENSION_SOURCE, runtimeHome);
 	if (existsSync(extensionFile)) {
 		assertManagedFilePath(extensionFile, workspaceRoot);
-		if (readFileSync(extensionFile, "utf8") !== expectedExtension) {
+		const installed = readFileSync(extensionFile, "utf8");
+		if (installed !== expectedExtension && installed !== hardenOmpExtensionSource(OMP_EXTENSION_SOURCE, runtimeHome, false)) {
 			throw new Error(`Refusing to remove modified OMP extension: ${extensionFile}`);
 		}
 	}

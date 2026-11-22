@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { contextFromCli } from "../../src/runtime/cli/context";
 import { OnlyBotsLocalRuntimeDaemon, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 import { HostRuntimeAdapterBase, type HostAdapterIdentity } from "../../src/runtime/host-adapter-base";
-import type { LocalRuntimeClient } from "../../src/runtime/local-client";
+import { LocalRuntimeClient } from "../../src/runtime/local-client";
+import { NativeHostRuntimeAdapter } from "../../src/runtime/native-host-adapter";
+import { installPiAdapter, PiEmbeddedRuntime } from "../../src/runtime/pi-adapter";
 import { stopHotSyncManagers } from "../../src/runtime/hot-sync-manager";
 import { resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
 
@@ -255,7 +257,7 @@ class ArchiveHookAdapter extends HostRuntimeAdapterBase {
 }
 
 describe("verified recall through native prompt preparation", () => {
-	it.each(["codex", "claude-code"] as const)("recalls the whole approved warm and cold task in %s", async (runtime) => {
+	it.each(["codex", "claude-code", "agy", "hermes", "opencode", "pi"] as const)("recalls the whole approved warm and cold task in %s", async (runtime) => {
 		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "true");
 		const signer = identity();
 		const home = realpathSync(mkdtempSync(path.join(os.tmpdir(), "crosshead-verified-recall-")));
@@ -303,15 +305,33 @@ describe("verified recall through native prompt preparation", () => {
 				goal, summary: hot, occurredAt: "2026-10-31T12:00:00.000Z",
 			}] }),
 		}] };
+		const handle = (event: Parameters<typeof daemon.submitLifecycleEvent>[0]) => daemon.submitLifecycleEvent(event);
 		const localClient = {
-			emitEvent: (event: Parameters<typeof daemon.submitLifecycleEvent>[0]) => daemon.submitLifecycleEvent(event),
+			emitEvent: handle,
 			readHotMemory: async () => hotSnapshot,
+			attachAdapter: async () => ({}),
 		} as unknown as LocalRuntimeClient;
-		const adapter = new ArchiveHookAdapter(localClient, runtime);
-		const prepare = (turnId: string, prompt = goal, root = home) => adapter.prepareTurn({
-			workspaceRoot: root, sessionId: "session", turnId, prompt,
-			hookObservedAt: "2026-11-01T12:00:00.000Z",
-		});
+		if (runtime === "pi") {
+			await installPiAdapter({ home });
+			vi.spyOn(LocalRuntimeClient.prototype, "attachAdapter").mockResolvedValue({} as never);
+			vi.spyOn(LocalRuntimeClient.prototype, "readHotMemory").mockResolvedValue(hotSnapshot);
+			vi.spyOn(LocalRuntimeClient.prototype, "emitEvent").mockImplementation(handle);
+		}
+		const prepare = (turnId: string, prompt = goal, root = home) => {
+			const observedAt = "2026-11-01T12:00:00.000Z";
+			if (runtime === "pi") {
+				return new PiEmbeddedRuntime({
+					home, workspaceRoot: root, sessionId: "session", executor: async () => { throw new Error("unexpected inference"); },
+				}).prepareTurn({ turnId, prompt, observedAt });
+			}
+			const adapter = runtime === "codex" || runtime === "claude-code"
+				? new ArchiveHookAdapter(localClient, runtime)
+				: new NativeHostRuntimeAdapter({
+					marker: "crosshead-native-host-v1", name: runtime, runtimeHome: home, hostHome: home,
+					profileName: "default", adapterVersion: "fixture", hostBinary: runtime, nodeExecutable: process.execPath,
+				}, localClient);
+			return adapter.prepareTurn({ workspaceRoot: root, sessionId: "session", turnId, prompt, hookObservedAt: observedAt });
+		};
 		const command = async (...argv: string[]) => JSON.parse(await contextFromCli([
 			"recall", ...argv, "--home", home, "--workspace-root", home,
 		]));
