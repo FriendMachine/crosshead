@@ -21,6 +21,8 @@ export const TRUST_RECEIPT_TYPES = [
   "correction_confirmed",
   "deliverable_rejected",
   "settlement_confirmed",
+  "claim_verified",
+  "claim_refuted",
 ] as const;
 export const TRUST_EDGE_TYPES = [
   "worked_with",

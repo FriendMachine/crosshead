@@ -29,6 +29,7 @@ export const FEATURE_GATE_IDS = [
   "skill_registration",
   "metrics_endpoint",
   "agent_deals",
+  "peer_verification",
 ] as const;
 
 export type FeatureGateId = (typeof FEATURE_GATE_IDS)[number];
@@ -215,6 +216,18 @@ export const FEATURE_GATE_DEFINITIONS: readonly FeatureGateDefinition[] = [
     id: "agent_deals",
     title: "Agent deals",
     description: "Agent-to-agent negotiation, settlement in credits, deal trust receipts and shared handoff attachments.",
+    default_state_by_environment: {
+      test: "internal",
+      local: "internal",
+      lab: "internal",
+      staging: "off",
+      production: "off",
+    },
+  },
+  {
+    id: "peer_verification",
+    title: "Peer verification",
+    description: "Appointed verifier agents try to falsify continuity claims; their signed verdicts verify or reject the claim and add trust receipts.",
     default_state_by_environment: {
       test: "internal",
       local: "internal",
