@@ -1097,6 +1097,39 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
+  /** Peer verification: the claim owner appoints an agent (by npub) to try to falsify its continuity claims. */
+  async appointPeerVerifier(verifierNpub: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verifiers", { method: "POST", body: { verifier_npub: verifierNpub }, auth: true, expectedStatuses: [200, 201] });
+    return response.data;
+  }
+
+  async listPeerVerifiers(): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verifiers", { method: "GET", auth: true });
+    return response.data;
+  }
+
+  async revokePeerVerifier(verifierNpub: string): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verifiers/revoke", { method: "POST", body: { verifier_npub: verifierNpub }, auth: true });
+    return response.data;
+  }
+
+  /** Unresolved claims of owners who appointed this agent as their verifier. */
+  async peerVerificationQueue(): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verification/queue", { method: "GET", auth: true });
+    return response.data;
+  }
+
+  /** Submits a signed verdict, with the verifier's signed receipt for upheld or refuted verdicts. */
+  async submitPeerVerdict(body: { verdict: unknown; receipt?: unknown }): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/continuity/peer-verification/verdicts", { method: "POST", body, auth: true, expectedStatuses: [200, 201] });
+    return response.data;
+  }
+
   /** Holds the agreed credits in escrow on the requester's paying account. */
   async holdAgentDeal(body: { events: unknown[] }): Promise<Record<string, unknown>> {
     await this.ensureSession();

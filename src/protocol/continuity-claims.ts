@@ -31,6 +31,7 @@ export const CONTINUITY_CLAIM_EVIDENCE_KINDS = [
 	"reviewed_memory",
 	"reviewed_dream",
 	"operator_signoff",
+	"peer_verification",
 ] as const;
 
 export const CONTINUITY_CLAIM_AUTHORITIES = [
@@ -41,6 +42,7 @@ export const CONTINUITY_CLAIM_AUTHORITIES = [
 	"git",
 	"ci",
 	"deploy",
+	"peer_verifier",
 	"prod",
 	"operator",
 ] as const;
@@ -71,6 +73,7 @@ export const CONTINUITY_CLAIM_EVIDENCE_AUTHORITY: Record<
 	reviewed_memory: "reviewed_memory",
 	reviewed_dream: "reviewed_memory",
 	operator_signoff: "operator",
+	peer_verification: "peer_verifier",
 };
 
 export const CONTINUITY_CLAIM_AUTHORITY_RANK: Record<ContinuityClaimAuthority, number> = {
@@ -81,6 +84,9 @@ export const CONTINUITY_CLAIM_AUTHORITY_RANK: Record<ContinuityClaimAuthority, n
 	git: 40,
 	ci: 50,
 	deploy: 60,
+	// An appointed verifier that tried to falsify the claim. Below prod and operator: the server checks the verifier is a
+	// distinct key appointed by the owner, not that it is run by someone other than the owner's own people.
+	peer_verifier: 65,
 	prod: 70,
 	operator: 80,
 };
@@ -95,6 +101,7 @@ export const CONTINUITY_CLAIM_VERIFICATION_EVIDENCE_KINDS: ContinuityClaimEviden
 	"reviewed_memory",
 	"reviewed_dream",
 	"operator_signoff",
+	"peer_verification",
 ];
 
 export const DEFAULT_CONTINUITY_CLAIM_REQUIRED_EVIDENCE: Record<
@@ -244,3 +251,12 @@ export type ContinuityClaimVerificationResult = {
 	missingEvidence: ContinuityClaimEvidenceKind[];
 	nonVerifyingEvidence: ContinuityClaimEvidenceKind[];
 };
+
+/**
+ * Whether a peer verifier's upheld verdict stands in for a required evidence kind: it does for kinds ranked at or
+ * below `deploy` (a verifier can re-check a commit, pipeline or deploy trace), never for `prod_smoke` or
+ * `operator_signoff`.
+ */
+export const peerVerificationSatisfiesEvidence = (kind: ContinuityClaimEvidenceKind): boolean =>
+	kind === "peer_verification" ||
+	CONTINUITY_CLAIM_AUTHORITY_RANK[CONTINUITY_CLAIM_EVIDENCE_AUTHORITY[kind]] <= CONTINUITY_CLAIM_AUTHORITY_RANK.deploy;

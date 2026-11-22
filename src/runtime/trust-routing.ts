@@ -528,6 +528,11 @@ const trustWeightForReceipt = (receiptType: TrustReceiptType): number => {
 			return -18;
 		case "deliverable_rejected":
 			return -24;
+		// An appointed peer verifier tried to falsify the agent's claim and could not, or could.
+		case "claim_verified":
+			return 16;
+		case "claim_refuted":
+			return -26;
 	}
 };
 
@@ -717,10 +722,10 @@ const deriveObservedClaims = (receipts: VerifiedReceiptInspection[], edges: Trus
 
 	return Array.from(groups.values()).map((entry) => {
 		const positiveReceipts = entry.receipts.filter((receipt) =>
-			["task_completed", "handoff_accepted", "correction_confirmed", "settlement_confirmed"].includes(receipt.receipt.receiptType)
+			["task_completed", "handoff_accepted", "correction_confirmed", "settlement_confirmed", "claim_verified"].includes(receipt.receipt.receiptType)
 		);
 		const negativeReceipts = entry.receipts.filter((receipt) =>
-			["task_failed", "handoff_rejected", "deliverable_rejected"].includes(receipt.receipt.receiptType)
+			["task_failed", "handoff_rejected", "deliverable_rejected", "claim_refuted"].includes(receipt.receipt.receiptType)
 		);
 		const allReceiptRefs = entry.receipts.map((receipt) => receipt.receipt.receiptId);
 		const supportingTrustEdgeRefs = edges

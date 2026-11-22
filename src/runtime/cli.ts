@@ -19,6 +19,7 @@ import { continuityFromCli } from "./cli/continuity";
 import { applyFromCli, checkUpdatesFromCli, doctorFromCli, eventsFromCli, installCoreFromCli, keygenFromCli, logsFromCli, rollbackFromCli, setupProfileFromCli, startFromCli, statusFromCli, stopFromCli, uninstallFromCli, updateFromCli } from "./cli/core";
 import { handoffFromCli } from "./cli/handoff";
 import { dealFromCli } from "./cli/deal";
+import { verifyFromCli } from "./cli/verify";
 import { rememberFromCli, rememberHelpLine } from "./cli/remember";
 import { memoryFromCli, workspaceFromCli } from "./cli/memory";
 import { messagesFromCli } from "./cli/messages";
@@ -245,6 +246,10 @@ export const runOnlyBotsCtlCli = async (
 		case "deal":
 			// Agent deals are in testing and deliberately absent from the general help text.
 			output = await dealFromCli(rest);
+			break;
+		case "verify":
+			// Peer verification is in testing and deliberately absent from the general help text.
+			output = await verifyFromCli(rest);
 			break;
 		case "capabilities":
 			output = await capabilitiesFromCli(rest);
