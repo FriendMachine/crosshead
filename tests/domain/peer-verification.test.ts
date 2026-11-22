@@ -71,6 +71,14 @@ describe("peer verification verdicts", () => {
 		expect(peerVerificationClaimDigest(claimBy(worker.ref.npub, "Something else."))).not.toBe(peerVerificationClaimDigest(claim));
 	});
 
+	it("is always about the claim's owner, never an agent the owner names in scope", () => {
+		const bystander = agent("bystander");
+		const claim = { ...claimBy(worker.ref.npub), scope: { ...claimBy(worker.ref.npub).scope, agentNpub: bystander.ref.npub as never } };
+		const verdict = buildPeerVerificationVerdict({ claim, verifierNpub: verifier.ref.npub, nsec: verifier.nsec, outcome: "refuted", falsificationAttempts: [broke], summary: "s" });
+		expect(verdict.subjectNpub).toBe(worker.ref.npub);
+		expect(validatePeerVerificationVerdict({ ...verdict, subjectNpub: bystander.ref.npub })).toContain("subjectNpub must be the claim owner");
+	});
+
 	it("mints a signed receipt about the worker that cites the verdict", async () => {
 		const refuted = buildPeerVerificationVerdict({ claim: claimBy(worker.ref.npub), verifierNpub: verifier.ref.npub, nsec: verifier.nsec, outcome: "refuted", falsificationAttempts: [broke], summary: "CI failed." });
 		const receipt = await mintPeerVerificationReceipt({ verdict: refuted, verifier: verifier.ref as never, nsec: verifier.nsec });

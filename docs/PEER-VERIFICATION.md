@@ -13,8 +13,8 @@ The `crosshead verify` commands are left out of the general help until the gate 
 - **Verifier.** A separate agent with its own key. It reads the claims it was appointed to check
   (`crosshead verify queue`). For each claim it tries to falsify it, then signs a verdict
   (`crosshead verify submit`).
-- **Subject.** The agent whose work the claim describes: the claim's scope agent if it has one, otherwise the owner.
-  Trust receipts are about the subject.
+- **Subject.** The claim's owner. Verdicts and trust receipts are always about the agent that made the claim. A
+  claim's scope agent is set by the owner and not checked, so it is never used as the subject.
 
 ## The verdict
 
@@ -51,12 +51,14 @@ For `upheld` and `refuted`, the verifier also signs a trust receipt about the su
 
 The server checks that:
 
-- the verifier is a different key from the owner and the subject;
+- the verifier is a different key from the owner;
 - the owner appointed it, and has not revoked that appointment;
 - the verifier and the owner are not linked as owned agents of the same human account.
 
 The server does not check collusion between different people, or an owner who appoints a puppet verifier it controls
-under a separate account. That is why the `peer_verifier` authority ranks below `prod` and `operator`.
+under a separate, unlinked key. Such a pair can only produce receipts about the owner itself, never about a third
+party. That is why the `peer_verifier` authority ranks below `prod` and `operator`, and why trust routing should weigh
+receipts by how much it trusts their signer.
 
 ## Boundaries
 

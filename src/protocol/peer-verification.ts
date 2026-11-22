@@ -38,7 +38,7 @@ export type UnsignedPeerVerificationVerdict = {
 	verdictId: string;
 	claimId: string;
 	claimOwnerNpub: Npub;
-	/** The agent whose work the claim describes: the claim's scope agent, or else its owner. */
+	/** The agent the verdict is about: the claim's owner. */
 	subjectNpub: Npub;
 	claimDigest: string;
 	verifierNpub: Npub;
@@ -66,9 +66,15 @@ const VERDICT_KEYS = [
 
 const sha256Hex = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
-/** The agent a claim is about: its scope agent when set, otherwise the owner. */
-export const peerVerificationSubjectNpub = (claim: Pick<ContinuityClaim, "npub" | "scope">): Npub =>
-	(claim.scope?.agentNpub ?? claim.npub) as Npub;
+/**
+ * The agent a verdict and its receipt are about: always the claim's owner. A claim's scope agent is chosen by the owner
+ * and not checked, so using it would let an owner have receipts written about an agent that never made the claim.
+ */
+export const peerVerificationSubjectNpub = (claim: Pick<ContinuityClaim, "npub">): Npub => claim.npub as Npub;
+
+/** The receipt ID a verdict's receipt must carry, so a receipt cannot reuse the ID of an unrelated one. */
+export const peerVerificationReceiptId = (verdictId: string, receiptType: "claim_verified" | "claim_refuted"): string =>
+	`trust_receipt_${receiptType}_${verdictId.slice("peer_verdict_".length)}`;
 
 /**
  * Digest of what a claim asserts. A verdict names it, so a verdict cannot be applied to a claim whose content changed
@@ -172,6 +178,7 @@ export const validatePeerVerificationVerdict = (value: unknown): string[] => {
 	if (value.outcome === "refuted" && falsified === 0) {
 		errors.push("a refuted verdict needs at least one attempt that falsified the claim");
 	}
+	if (value.subjectNpub !== value.claimOwnerNpub) errors.push("subjectNpub must be the claim owner");
 	if (value.claimOwnerNpub === value.verifierNpub || value.subjectNpub === value.verifierNpub) {
 		errors.push("a verifier cannot verify its own claim or its own work");
 	}

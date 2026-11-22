@@ -11,6 +11,7 @@ import {
 	peerVerificationCanonicalPayload,
 	peerVerificationClaimDigest,
 	peerVerificationPayloadHash,
+	peerVerificationReceiptId,
 	peerVerificationReceiptType,
 	peerVerificationSubjectNpub,
 	peerVerificationVerdictId,
@@ -121,7 +122,7 @@ export const mintPeerVerificationReceipt = async (input: {
 	if (subject.npub !== verdict.subjectNpub) throw new Error("the receipt subject must be the verdict's subject");
 	const unsigned: Omit<TrustReceipt, "payloadHash" | "signature"> = {
 		schemaVersion: TRUST_RECEIPT_SCHEMA_VERSION,
-		receiptId: `trust_receipt_${receiptType}_${verdict.verdictId.slice("peer_verdict_".length)}`,
+		receiptId: peerVerificationReceiptId(verdict.verdictId, receiptType),
 		receiptType,
 		subject: { subjectType: "agent", agentRef: subject },
 		counterparty: { subjectType: "agent", agentRef: input.verifier },
