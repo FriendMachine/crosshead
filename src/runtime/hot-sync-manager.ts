@@ -136,7 +136,7 @@ export class HotSyncManager {
 	}
 	activate(runtime: string, raw: string): void {
 		const workspace = this.workspace(raw);
-		for (const source of new Set([runtime, "codex", "claude-code", "pi", "omp", "hermes", "opencode"]))
+		for (const source of new Set([runtime, "codex", "claude-code", "pi", "omp", "hermes", "opencode", "agy"]))
 			this.active.add(workspaceHotScope(source, workspace)!);
 	}
 	/** Ids of visible-candidate records that the per-turn collapse hides in this workspace scope. */

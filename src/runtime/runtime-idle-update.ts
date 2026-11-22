@@ -28,6 +28,10 @@ const hookStateFiles = (paths: RuntimePaths): string[] => {
 			throw error;
 		}
 	};
+	const agyRoot = path.join(paths.state, "agy-turns");
+	for (const name of list(() => readdirSync(agyRoot))) {
+		if (/^[a-f0-9]{64}\.json$/.test(name)) files.push(path.join(agyRoot, name));
+	}
 	for (const binding of list(() => readdirSync(scopedRoot, { withFileTypes: true }))) {
 		if (!binding.isDirectory()) continue;
 		for (const name of list(() => readdirSync(path.join(scopedRoot, binding.name)))) {
@@ -72,12 +76,12 @@ export const hostHooksRunning = (excludePid: number, processTable = (): string =
 		return processTable().split("\n").some(line => {
 			const fields = line.trim().match(/^(\d+)\s+(.+)$/);
 			if (!fields || [excludePid, process.pid].includes(Number(fields[1]))) return false;
-			return /\/dist\/runtime\/(?:codex|claude-code|native-host)-hook\.js(?:\s|$)|\/dist\/runtime\/cli\.js\s+host-hook\s+(?:codex|claude-code)(?:\s|$)/.test(fields[2]!);
+			return /\/dist\/runtime\/(?:codex|claude-code|native-host|agy)-hook\.js(?:\s|$)|\/dist\/runtime\/cli\.js\s+host-hook\s+(?:codex|claude-code|agy)(?:\s|$)/.test(fields[2]!);
 		});
 	} catch { return true; } // Unknown liveness must defer, never force an update.
 };
 
-/** True while some Codex or Claude Code turn has a prompt but no Stop yet. Tool
+/** True while some tracked host turn has a prompt but no Stop yet. Tool
  * calls such as Edit and long model output run no hook, so quiet hooks alone
  * do not prove a turn has ended. A session runs one turn at a time, so only
  * its newest marker counts: older ones belong to turns that were cancelled.
