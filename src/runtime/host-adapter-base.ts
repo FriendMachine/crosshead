@@ -11,6 +11,7 @@ import { resolveRuntimeHome } from "./local-runtime";
 import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
 import type { LocalRuntimeClient } from "./local-client";
 import {
+  appendVerifiedArchiveContext,
   buildRuntimeStartupFreshness,
   renderRuntimeStartupContext,
   type RuntimeStartupRuntime,
@@ -367,12 +368,8 @@ export abstract class HostRuntimeAdapterBase {
       previousContextReadAt,
       hotMemory: preTurnHotMemory,
     });
-    // A hook without a usable prompt still records its lifecycle event, but must
-    // not inject background state whose availability depends on debounce timing.
-    // The lifecycle response can contain hosted service data. Until those
-    // fields have end-to-end authenticity, none of them may become model
-    // instructions. The hot snapshot has already crossed the client's local
-    // signature-verification boundary and is the sole dynamic prompt source.
+    // The daemon supplies verified archive excerpts through a dedicated field.
+    // The hosted pack's context text, metadata and diagnostics stay outside the prompt.
     let contextText = input.prompt.trim() ? renderRuntimeStartupContext({
       runtime: this.identity.runtimeId,
       profileName,
@@ -392,6 +389,7 @@ export abstract class HostRuntimeAdapterBase {
       goal: input.prompt,
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
+    if (input.prompt.trim()) contextText = appendVerifiedArchiveContext(contextText, contextPack);
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
     if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
       const home = this.config.runtimeHome;

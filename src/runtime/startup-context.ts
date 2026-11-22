@@ -661,6 +661,14 @@ const formatInjectedContextLine = (manifest: ContextPackManifest | null): string
   return `Crosshead context: injected ${detail}`;
 };
 
+export const appendVerifiedArchiveContext = (
+  contextText: string,
+  contextPack: Record<string, unknown> | null
+): string =>
+  typeof contextPack?.verifiedArchiveContext === "string" && contextPack.verifiedArchiveContext
+    ? [contextText, contextPack.verifiedArchiveContext].filter(Boolean).join("\n\n")
+    : contextText;
+
 export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): string => {
   if (input.mode === "off") {
     return [

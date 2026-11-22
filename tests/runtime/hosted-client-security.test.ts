@@ -199,6 +199,26 @@ describe("hosted client security boundaries", () => {
     });
   });
 
+  it("starts the four-second archive deadline before hosted authentication", async () => {
+    const signer = identity();
+    const deadline = new AbortController();
+    const makeTimeout = vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal);
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }));
+    const client = new HostedOnlyBotsClient({
+      apiBase: "https://onlybots.example", npub: signer.npub, nsec: signer.nsec,
+    });
+
+    const recall = client.requestArchiveRecall({ goal: "Resume the reviewed archive task" });
+    const timedOut = expect(recall).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(makeTimeout).toHaveBeenNthCalledWith(1, 4_000);
+    expect(fetcher).toHaveBeenCalledWith("https://onlybots.example/v1/auth/challenge", expect.anything());
+    deadline.abort(new DOMException("Archive deadline reached", "TimeoutError"));
+    await timedOut;
+  });
+
   it("drops unauthenticated hosted context text and bounds JSON responses", async () => {
     const signer = identity();
     const base = await listen((request, response) => {

@@ -90,8 +90,20 @@ it("recalls and saves Antigravity turns by transcript user row across repeated p
 		await daemon.start();
 		await cliRun("memory", "mode", "off", "--profile", "studio");
 		addSteps(session, userStep(1, "Earlier request."), modelStep(2, "An earlier unrelated answer."), fullUserStep(3, prompt));
+		const submit = daemon.submitLifecycleEvent.bind(daemon);
+		const verifiedArchive = "Reviewed warm and cold migration evidence.";
+		const prepared = vi.spyOn(daemon, "submitLifecycleEvent").mockImplementationOnce(async event => {
+			const response = await submit(event);
+			expect(event.payload).toMatchObject({
+				recallPolicy: "bounded", allowedScope: { includeWarmMemory: true, includeColdMemory: true },
+			});
+			return { ...response, contextPack: { ...response.contextPack, verifiedArchiveContext: verifiedArchive, contextText: "UNVERIFIED_AGY_TEXT" } };
+		});
 		const first = await hook("PreInvocation", session, { workspacePaths: [subdir] });
+		prepared.mockRestore();
 		expect(JSON.stringify(first.injectSteps)).toContain("profile=repository");
+		expect(JSON.stringify(first.injectSteps)).toContain(verifiedArchive);
+		expect(JSON.stringify(first.injectSteps)).not.toContain("UNVERIFIED_AGY_TEXT");
 		expect(busy()).toBe(true);
 		addSteps(session, { ...modelStep(4, "Intermediate tool call text."), tool_calls: [{}] },
 			{ step_index: 5, source: "MODEL", type: "GENERIC", status: "DONE", content: "Raw tool output." });
