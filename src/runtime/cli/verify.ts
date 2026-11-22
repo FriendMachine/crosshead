@@ -118,12 +118,18 @@ export const verifyFromCli = async (argv: string[]): Promise<string> => {
 			}
 			case "queue": {
 				const items = await readWholePeerQueue(session.client);
-				return out({ items }, items.length
-					? items.map((item) => {
-						const claim = claimFromQueueItem(item);
-						return `${claim.id} · ${claim.kind} · ${claim.status} · owner ${claim.npub}\n  ${claim.statement}`;
-					}).join("\n")
-					: "Nothing to verify.");
+				if (items.length === 0) {
+					// An empty queue often means an invitation not yet accepted.
+					const invitations = await session.client.listPeerInvitations().catch(() => ({}) as Record<string, unknown>);
+					const waiting = Array.isArray(invitations.invitations) ? invitations.invitations.length : 0;
+					return out({ items, pending_invitations: waiting }, waiting > 0
+						? `Nothing to verify yet. ${waiting} invitation${waiting === 1 ? "" : "s"} waiting for your answer (crosshead verify invitations).`
+						: "Nothing to verify.");
+				}
+				return out({ items }, items.map((item) => {
+					const claim = claimFromQueueItem(item);
+					return `${claim.id} · ${claim.kind} · ${claim.status} · owner ${claim.npub}\n  ${claim.statement}`;
+				}).join("\n"));
 			}
 			case "submit": {
 				const claimId = required(flags, "claim", "submit");
