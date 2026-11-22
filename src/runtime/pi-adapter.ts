@@ -13,7 +13,7 @@ import {
   upsertRuntimeAdapterRecord,
 } from "./local-runtime";
 import { nowIso, parseArgs, writeManagedFile } from "./adapter-utils";
-import { buildRuntimeStartupFreshness, renderRuntimeStartupContext } from "./startup-context";
+import { appendVerifiedArchiveContext, buildRuntimeStartupFreshness, renderRuntimeStartupContext } from "./startup-context";
 import { loadProfile } from "./runtime-persistence";
 
 export const ONLYBOTS_PI_ADAPTER_VERSION = "0.3.0";
@@ -378,11 +378,12 @@ export class PiEmbeddedRuntime {
       type: "turn.started",
       payload: {
         goal: input.prompt,
+				recallPolicy: "bounded",
         transcript: input.transcript ?? [],
 				allowedScope: {
 					includeHotMemory: true,
-					includeWarmMemory: false,
-					includeColdMemory: false,
+					includeWarmMemory: true,
+					includeColdMemory: true,
 					includeLayeredContext: false,
 				},
 				includeResumeBrief: false,
@@ -408,7 +409,7 @@ export class PiEmbeddedRuntime {
       previousContextReadAt: input.previousContextReadAt ?? null,
       hotMemory: preTurnHotMemory,
     });
-    const contextText = renderRuntimeStartupContext({
+    const hotContextText = renderRuntimeStartupContext({
       runtime: "pi",
       profileName: this.config.profileName,
       mode: response.mode,
@@ -423,6 +424,7 @@ export class PiEmbeddedRuntime {
       freshness,
       hotMemorySnapshot: preTurnHotMemory,
     });
+    const contextText = appendVerifiedArchiveContext(hotContextText, contextPack);
     return {
       packId,
       contextText,

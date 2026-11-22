@@ -1,3 +1,8 @@
+import {
+  ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
+  archiveRecallIsIncomplete, getArchiveRecallPreview, listArchiveRecallApprovals, readArchiveRecallSnapshot,
+  recordArchiveRecallPreview, revokeArchiveRecall, type ArchiveRecallHost,
+} from "./archive-recall";
 import { startTokenUsageSync } from "./token-usage-sync";
 import { parsePrivateMemoryErasureChallenge, signPrivateMemoryErasureChallenge } from "./erasure-proof";
 import { getHotSyncManager, hotSyncEnabled, stopHotSyncManagers } from "./hot-sync-manager";
@@ -2669,6 +2674,77 @@ export class OnlyBotsLocalRuntimeDaemon {
 		await this.persistSession(resolvedProfileName, secret, client);
 		await this.lifecycleManager.recordContextPackResult(resolvedProfileName, result, "command");
 		return result;
+	}
+
+	async manageArchiveRecall(
+		workspaceId: string,
+		operation: { kind: "preview"; goal: string; runtimeHost: ArchiveRecallHost | null } | { kind: "approve"; packId: string; sha256: string; runtimeHost?: ArchiveRecallHost } |
+			{ kind: "list" } | { kind: "revoke"; taskId: string | null },
+		profileName?: string,
+	): Promise<Record<string, unknown>> {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const profile = name ? loadProfile(this.paths, name) : null;
+		if (!profile) throw new Error("No runtime profile is configured");
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Archive recall requires a hosted profile");
+		if (operation.kind === "list") {
+			return { workspaceId, approvals: listArchiveRecallApprovals(this.paths.state, profile, workspaceId) };
+		}
+		if (operation.kind === "revoke") {
+			await revokeArchiveRecall(this.paths.state, profile, workspaceId, operation.taskId);
+			return { workspaceId, revoked: operation.taskId ?? "all" };
+		}
+
+		const { governorState } = loadEffectiveContinuityGovernorState(this.paths);
+		const { memoryScope } = governorState;
+		if (governorState.paused || (!memoryScope.includeWarmMemory && !memoryScope.includeColdMemory)) {
+			throw new Error("The continuity governor has disabled archive recall");
+		}
+		const preview = operation.kind === "approve"
+			? getArchiveRecallPreview(this.paths.state, profile, workspaceId, operation.packId, operation.sha256)
+			: null;
+		if (operation.kind === "approve" && operation.runtimeHost && preview?.runtimeHost !== operation.runtimeHost) {
+			throw new Error("The archive preview belongs to a different host");
+		}
+		const goal = operation.kind === "preview" ? operation.goal.trim() : preview!.goal;
+		if (!goal || goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS) {
+			throw new Error("Provide a task description of up to 8192 characters");
+		}
+		const { client, secret, profileName: resolved } = await this.withProfileBody({ profileName: profile.name });
+		const pack = preview ? await client.inspectContextPack(preview.packId) : await client.requestArchiveRecall({
+			goal,
+			workspaceId,
+			runtimeHost: operation.kind === "preview" ? operation.runtimeHost : null,
+			allowedScope: {
+				includeHotMemory: false, includeWarmMemory: memoryScope.includeWarmMemory,
+				includeColdMemory: memoryScope.includeColdMemory, includeLayeredContext: false,
+			},
+			includeResumeBrief: false,
+			budget: ARCHIVE_RECALL_BUDGET,
+		});
+		const packId = archivePackId(pack?.packId);
+		const currentProfile = loadProfile(this.paths, resolved);
+		const currentSecret = loadSecret(this.paths, resolved);
+		if (currentProfile?.npub !== profile.npub || currentProfile.apiBase !== profile.apiBase || currentSecret?.nsec !== secret.nsec) {
+			throw new Error("The runtime profile changed during archive review. Preview the task again.");
+		}
+		await this.persistSession(resolved, currentSecret, client);
+		if (!preview) await this.lifecycleManager.recordContextPackResult(resolved, { packId }, "command");
+		if (archiveRecallIsIncomplete(pack)) {
+			throw new Error("Onlybots reported incomplete archive retrieval. Retry the preview before approving.");
+		}
+		const snapshot = readArchiveRecallSnapshot(pack, workspaceId, goal);
+		const currentGovernor = loadEffectiveContinuityGovernorState(this.paths).governorState;
+		const currentScope = currentGovernor.memoryScope;
+		if (!packId || (preview && packId !== preview.packId) || !snapshot || currentGovernor.paused ||
+				snapshot.sources.some(source => source.kind === "warm_memory" ? !currentScope.includeWarmMemory : !currentScope.includeColdMemory)) {
+			throw new Error("The hosted pack did not contain a complete, eligible archive task for this workspace");
+		}
+		if (operation.kind === "preview") {
+			const sha256 = await recordArchiveRecallPreview(this.paths.state, profile, snapshot, goal, operation.runtimeHost, packId);
+			return { packId, sha256, goal, runtimeHost: operation.runtimeHost, ...snapshot };
+		}
+		await approveArchiveRecall(this.paths.state, profile, snapshot, preview!);
+		return { approved: true, workspaceId, taskId: snapshot.taskId, sourceCount: snapshot.sources.length };
 	}
 
 	async inspectContextPack(packId: string, profileName?: string): Promise<Record<string, unknown>> {

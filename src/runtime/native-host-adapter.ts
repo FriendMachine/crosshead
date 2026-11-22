@@ -154,7 +154,7 @@ export const nativeHostFromCli = async (name: NativeHost, args: string[], uninst
 export class NativeHostRuntimeAdapter extends HostRuntimeAdapterBase {
   protected readonly identity;
   protected readonly config: NativeHostConfig & HostAdapterBaseConfig;
-  constructor(config: NativeHostConfig, protected readonly client = new LocalRuntimeClient({ home: config.runtimeHome, timeoutMs: 5_000 })) {
+  constructor(config: NativeHostConfig, protected readonly client = new LocalRuntimeClient({ home: config.runtimeHome, timeoutMs: 8_000 })) {
     super();
     this.config = config.name === "agy" ? { ...config, workspaceOnly: true, sourceExcerpts: false } : config;
     this.identity = { runtimeId: config.name, wrapperVersionFallback: `${config.name}-plugin`,

@@ -1,3 +1,4 @@
+import { archivePackId } from "./archive-recall";
 import type { UsageSnapshot } from "../protocol/token-usage";
 import type { HotSyncSnapshot, HotSyncEnvelope } from "../protocol/hot-sync";
 import { hotSyncEtag, HOT_SYNC_PROTOCOL_VERSION } from "../protocol/hot-sync";
@@ -609,24 +610,27 @@ export class HostedOnlyBotsClient {
     return this.authenticate(signal);
   }
 
-  async prepareContextPack(body: HostedContextPackRequest, idempotencyKey?: string): Promise<Record<string, unknown>> {
-    await this.ensureSession();
+  private async requestContextPack(body: HostedContextPackRequest, idempotencyKey?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    await this.ensureSession(signal);
     const response = await this.request<Record<string, unknown>>("/context/pack", {
       method: "POST",
       body,
       auth: true,
+      signal,
       headers: this.paidHeaders("context_pack_v1", body, idempotencyKey),
       timeoutMs: body.recallPolicy === "bounded" ? RECALL_TIMEOUT_MS : undefined,
     });
-    // Nothing returned by the hosted service is an authenticated instruction
-    // channel. Keep only a bounded opaque identifier used for reflection; all
-    // prompt material is rendered from locally verified hot memory instead.
-    const packId = response.data.packId;
-    return {
-      ...(typeof packId === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(packId) ? { packId } : {}),
-      contextText: "",
-      fragments: [],
-    };
+    return response.data;
+  }
+
+  async prepareContextPack(body: HostedContextPackRequest, idempotencyKey?: string): Promise<Record<string, unknown>> {
+    const packId = archivePackId((await this.requestContextPack(body, idempotencyKey)).packId);
+    return { ...(packId ? { packId } : {}), contextText: "", fragments: [] };
+  }
+
+  /** The caller must verify all archive sources against a local approval before rendering them. */
+  async requestArchiveRecall(body: HostedContextPackRequest, idempotencyKey?: string): Promise<Record<string, unknown>> {
+    return this.requestContextPack({ ...body, recallPolicy: "bounded" }, idempotencyKey, AbortSignal.timeout(RECALL_TIMEOUT_MS));
   }
 
   async inspectContextPack(packId: string): Promise<Record<string, unknown>> {
