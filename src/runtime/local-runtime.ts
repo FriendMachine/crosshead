@@ -1,3 +1,7 @@
+import {
+  ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
+  archiveRecallApprovalDigest, listArchiveRecallApprovals, readArchiveRecallSnapshot, revokeArchiveRecall,
+} from "./archive-recall";
 import { startTokenUsageSync } from "./token-usage-sync";
 import { parsePrivateMemoryErasureChallenge, signPrivateMemoryErasureChallenge } from "./erasure-proof";
 import { getHotSyncManager, hotSyncEnabled, stopHotSyncManagers } from "./hot-sync-manager";
@@ -2669,6 +2673,67 @@ export class OnlyBotsLocalRuntimeDaemon {
 		await this.persistSession(resolvedProfileName, secret, client);
 		await this.lifecycleManager.recordContextPackResult(resolvedProfileName, result, "command");
 		return result;
+	}
+
+	async manageArchiveRecall(
+		workspaceId: string,
+		operation: { kind: "preview"; goal: string } | { kind: "approve"; packId: string; sha256: string } |
+			{ kind: "list" } | { kind: "revoke"; taskId: string },
+		profileName?: string,
+	): Promise<Record<string, unknown>> {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const profile = name ? loadProfile(this.paths, name) : null;
+		if (!profile) throw new Error("No runtime profile is configured");
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Archive recall requires a hosted profile");
+		if (operation.kind === "list") {
+			return { workspaceId, approvals: listArchiveRecallApprovals(this.paths.state, profile, workspaceId) };
+		}
+		if (operation.kind === "revoke") {
+			revokeArchiveRecall(this.paths.state, profile, workspaceId, operation.taskId);
+			return { workspaceId, revoked: operation.taskId };
+		}
+
+		const { governorState } = loadEffectiveContinuityGovernorState(this.paths);
+		const { memoryScope } = governorState;
+		if (governorState.paused || (!memoryScope.includeWarmMemory && !memoryScope.includeColdMemory)) {
+			throw new Error("The continuity governor has disabled archive recall");
+		}
+		const { client, secret, profileName: resolved } = await this.withProfileBody({ profileName: profile.name });
+		let pack: Record<string, unknown>;
+		let packId: string | null;
+		if (operation.kind === "preview") {
+			if (!operation.goal.trim() || operation.goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS) {
+				throw new Error("Provide a task description of up to 8192 characters");
+			}
+			pack = await client.requestArchiveRecall({
+				goal: operation.goal,
+				workspaceId,
+				allowedScope: {
+					includeHotMemory: false, includeWarmMemory: memoryScope.includeWarmMemory,
+					includeColdMemory: memoryScope.includeColdMemory, includeLayeredContext: false,
+				},
+				includeResumeBrief: false,
+				budget: ARCHIVE_RECALL_BUDGET,
+			});
+			packId = archivePackId(pack.packId);
+			await this.lifecycleManager.recordContextPackResult(resolved, { packId }, "command");
+		} else {
+			packId = archivePackId(operation.packId);
+			if (!packId) throw new Error("Invalid context pack ID");
+			pack = await client.inspectContextPack(packId);
+			if (archivePackId(pack.packId) !== packId) throw new Error("The hosted pack did not match the requested ID");
+		}
+		await this.persistSession(resolved, secret, client);
+		const goal = operation.kind === "preview" ? operation.goal.trim() : pack.goal;
+		const snapshot = readArchiveRecallSnapshot(pack, workspaceId, typeof goal === "string" ? goal : undefined);
+		if (!packId || !snapshot || typeof goal !== "string" || !goal.trim() || goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS ||
+				snapshot.sources.some(source => source.kind === "warm_memory" ? !memoryScope.includeWarmMemory : !memoryScope.includeColdMemory)) {
+			throw new Error("The hosted pack did not contain a complete, eligible archive task for this workspace");
+		}
+		const sha256 = archiveRecallApprovalDigest(profile, snapshot, goal);
+		if (operation.kind === "preview") return { packId, sha256, goal, ...snapshot };
+		approveArchiveRecall(this.paths.state, profile, snapshot, goal, operation.sha256);
+		return { approved: true, workspaceId, taskId: snapshot.taskId, sourceCount: snapshot.sources.length };
 	}
 
 	async inspectContextPack(packId: string, profileName?: string): Promise<Record<string, unknown>> {

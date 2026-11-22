@@ -119,10 +119,11 @@ this runtime must observe these rules:
 - Hot-memory `content` is a `crosshead_signed_memory_v1` envelope. The server
   stores it opaquely. Reads with a missing, altered, foreign, or wrong-scope
   signature are discarded locally.
-- Hosted context text, manifests, warnings, lifecycle actions, inbox items,
-  dream-review items, obligations, and status details are not injected into an
-  agent prompt. A future context aggregation protocol must return client-
-  verifiable source envelopes rather than server-authored free-form
-  instructions.
+- Native hooks may render warm and cold archive records when the exact task
+  snapshot matches a locally approved SHA-256 digest. That digest binds the
+  hosted origin, profile, owner, workspace, task, and ordered source IDs, kinds
+  and text. The client renders the records and uses current local policy.
+  Hosted summaries, warnings, manifests, claims, dreams, inbox items and lifecycle
+  messages stay outside the archive prompt context. See [archive recall](HOT-SYNC.md#verified-archive-recall).
 - Public-discovery consumers request `include_raw=true` and derive identity,
   payload, and routing fields only from a locally verified Nostr event.

@@ -1,10 +1,41 @@
+import { workspaceDirectoryPath } from "../workspace-identity";
+import { importWorkspaceRoot, scopedHandoffBinding } from "./handoff";
 import { OnlyBotsLocalRuntimeDaemon, formatContextPackInspection, formatContinuityInspection, formatDreamInspection, formatDreamReviewResult, formatDreamRunResult, formatJudgmentInspection, formatObligationInspection, formatSelfModelReviewResult, parseArgs, parseJsonFlag } from "../local-runtime";
 
 export const contextFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
 	const subcommand = positionals[0];
-	const daemon = new OnlyBotsLocalRuntimeDaemon(typeof flags.home === "string" ? flags.home : undefined);
+	const home = typeof flags.home === "string" ? flags.home : undefined;
+	const daemon = new OnlyBotsLocalRuntimeDaemon(home);
 	const profileName = typeof flags.profile === "string" ? flags.profile : undefined;
+
+	if (subcommand === "recall") {
+		const explicitRoot = typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : undefined;
+		const directory = explicitRoot ?? process.cwd();
+		const bindings = (["codex", "claude-code"] as const)
+			.map(host => scopedHandoffBinding(home, host, directory, undefined, undefined))
+			.filter(binding => binding !== null);
+		if (!profileName && new Set(bindings.map(binding => binding.profileName)).size > 1) {
+			throw new Error("This project uses different Crosshead profiles. Select the archive profile with --profile.");
+		}
+		const binding = bindings.find(binding => !profileName || binding.profileName === profileName);
+		const workspaceId = `repo:${binding?.root ?? (explicitRoot ? workspaceDirectoryPath(explicitRoot) : importWorkspaceRoot(directory))}`;
+		const archiveProfile = binding?.profileName ?? profileName;
+		const action = positionals[1];
+		let result: Record<string, unknown>;
+		if (action === "preview" && typeof flags.goal === "string") {
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "preview", goal: flags.goal }, archiveProfile);
+		} else if (action === "approve" && typeof flags["pack-id"] === "string" && typeof flags.sha256 === "string") {
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "approve", packId: flags["pack-id"], sha256: flags.sha256 }, archiveProfile);
+		} else if (action === "list") {
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "list" }, archiveProfile);
+		} else if (action === "revoke" && typeof flags.task === "string") {
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "revoke", taskId: flags.task }, archiveProfile);
+		} else {
+			throw new Error('Use context recall preview --goal "<task>", approve --pack-id <id> --sha256 <digest>, list, or revoke --task <id>');
+		}
+		return JSON.stringify(result, null, 2);
+	}
 
 	if (subcommand === "pack") {
 		const goal =
@@ -232,5 +263,5 @@ export const contextFromCli = async (argv: string[]): Promise<string> => {
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatSelfModelReviewResult(result);
 	}
 
-	throw new Error("context requires one of: pack, inspect, judgment, dreams, self-model");
+	throw new Error("context requires one of: pack, inspect, recall, judgment, dreams, self-model");
 };

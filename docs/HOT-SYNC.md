@@ -11,11 +11,9 @@ rollback to the previous hosted hook path.
 A completed lifecycle capture is signed and written atomically, with file and
 directory fsync, before it is acknowledged. Hooks read the verified local view;
 ordinary hot-context delivery does not wait for authentication or the cloud.
-Explicit paid recall remains a hosted operation. Ordinary hooks do not request
-billable context packs or reflection, and do not wait for hosted inbox/dream HUD
-refreshes. Archive uploads run outside the lifecycle mutation lock and cannot
-block local capture or hot sync. Local-only profiles retain
-their existing behavior.
+An approved archive task can add a bounded paid recall request to a matching
+turn. The request runs outside the lifecycle lock, as do archive uploads.
+Local-only profiles continue to use their local hot memory.
 
 Pending checkpoints have a separate durable outbox. They survive restart,
 network failure, and retry exhaustion, even when they no longer fit the recent
@@ -30,6 +28,31 @@ prioritizes active workspaces and pending writes while rotating through recovery
 scopes. It honors rate-limit Retry-After, retries with bounded exponential
 backoff and jitter, and stops scheduling while continuity is paused. Shutdown
 waits for in-flight work before releasing the runtime-home ownership lock.
+
+## Verified archive recall
+
+From the workspace, preview the complete saved task and verify its requirements
+and corrections. The preview requests a paid context pack. Approving its
+displayed digest opts this runtime home and profile into paid recall on matching
+native hooks in assist or auto mode.
+
+```sh
+crosshead context recall preview --goal "Repair payment retries without duplicate charges"
+crosshead context recall approve --pack-id <id> --sha256 <digest>
+crosshead context recall list
+crosshead context recall revoke --task <task-id>
+```
+
+Both newly saved and existing scoped records can be reviewed. If the task
+changes, preview and approve its next revision or revoke the previous approval.
+Approvals are local to each runtime home. Review the snapshot on each machine
+where you want it recalled.
+
+A matching turn gets up to three whole archive excerpts and a separate
+4,000-character allowance. Crosshead checks the complete set against the
+current local approval, including after the request returns. A missing
+correction, a changed source, denial by local policy, payment failure or
+a request deadline leaves the turn with its ordinary hot context.
 
 ## Multiple machines and commands
 

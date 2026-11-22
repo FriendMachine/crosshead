@@ -1,3 +1,7 @@
+import {
+  ARCHIVE_RECALL_BUDGET, archivePackId, findArchiveRecallApproval, readArchiveRecallSnapshot,
+  renderArchiveRecall, verifyArchiveRecall,
+} from "./archive-recall";
 import { getHotSyncManager, hotSyncEnabled, tickHotSyncManagers } from "./hot-sync-manager";
 import { encodeArchivedTurn } from "./continuity-recall";
 import { existsSync, readFileSync } from "fs";
@@ -1654,7 +1658,7 @@ export class RuntimeLifecycleManager {
   }
 
   async handleEvent(request: RuntimeLifecycleEventRequest): Promise<RuntimeLifecycleEventResponse> {
-    return this.withLock(async () => {
+    const response = await this.withLock(async () => {
       const state = this.loadQueueState();
       const { profileName, profile, secret } = this.resolveProfile(request.profileName ?? null);
       const localOnlyProfile = isLocalOnlyRuntimeProfile(profile);
@@ -2286,7 +2290,74 @@ export class RuntimeLifecycleManager {
 
       return this.buildResponse(event, profile.memoryMode, processedState, inbox, dreamReview, obligations, contextPack, actions, warnings);
     });
-  }
+		// Only the opted-in turn waits for hosted recall. Hot capture and other turns keep the local path.
+		if (hotSyncEnabled() && response.contextPack && response.event.type === "turn.started" &&
+				response.event.payload.recallPolicy === "bounded" && (response.mode === "assist" || response.mode === "auto")) {
+			await this.appendVerifiedArchiveRecall(response, response.contextPack);
+		}
+		return response;
+	}
+
+	private async appendVerifiedArchiveRecall(response: RuntimeLifecycleEventResponse, contextPack: Record<string, unknown>): Promise<void> {
+		const { event } = response;
+		const workspaceId = event.workspaceId;
+		const goal = asString(event.payload.goal);
+		if (!workspaceId || !goal) return;
+
+		try {
+			const { profileName, profile, secret } = this.resolveProfile(event.profileName);
+			if (isLocalOnlyRuntimeProfile(profile)) return;
+			const governor = this.deps.loadContinuityGovernorState();
+			const scope = mergeAllowedScopeWithGovernor(event.payload.allowedScope, governor.memoryScope);
+			if (governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
+			const approval = findArchiveRecallApproval(this.deps.paths.state, profile, workspaceId, goal);
+			if (!approval) return;
+
+			const client = this.buildClient(profile, secret);
+			const hosted = await client.requestArchiveRecall({
+				goal,
+				workspaceId,
+				sessionId: event.sessionId,
+				runtimeHost: event.runtime,
+				allowedScope: { ...scope, includeHotMemory: false, includeLayeredContext: false },
+				includeResumeBrief: false,
+				budget: ARCHIVE_RECALL_BUDGET,
+			}, `context_pack_v1-${createHash("sha256").update(event.eventId).digest("hex").slice(0, 48)}`);
+
+			const packId = archivePackId(hosted.packId);
+			const snapshot = readArchiveRecallSnapshot(hosted, workspaceId, goal);
+			// Recheck policy and the local trust anchor after the request.
+			const current = this.resolveProfile(profileName);
+			const currentGovernor = this.deps.loadContinuityGovernorState();
+			const currentScope = mergeAllowedScopeWithGovernor(event.payload.allowedScope, currentGovernor.memoryScope);
+			const currentApproval = findArchiveRecallApproval(this.deps.paths.state, current.profile, workspaceId, goal);
+			if (current.secret.nsec !== secret.nsec || current.profile.apiBase !== profile.apiBase ||
+					(current.profile.memoryMode !== "assist" && current.profile.memoryMode !== "auto") || currentGovernor.paused) return;
+
+			this.persistClientSession(profileName, current.secret, client);
+			const verified = Boolean(packId && snapshot && currentApproval && currentApproval.sha256 === approval.sha256 &&
+				verifyArchiveRecall(current.profile, currentApproval, snapshot) &&
+				snapshot.sources.every(source => source.kind === "warm_memory"
+					? currentScope.includeWarmMemory : currentScope.includeColdMemory));
+			if (verified && snapshot) contextPack.verifiedArchiveContext = renderArchiveRecall(snapshot);
+			if (packId) contextPack.packId = packId;
+			if (!verified) response.warnings.push("Archive recall did not match the current local approval. Only hot context was delivered.");
+			if (packId) {
+				response.actions.push(this.recordAction({
+					eventId: event.eventId,
+					profileName,
+					type: "context_pack",
+					status: "completed",
+					mode: current.profile.memoryMode,
+					reason: verified ? "Verified archive recall against a local approval" : "Hosted archive recall withheld",
+					queueItemId: null,
+					details: { packId, verifiedArchiveRecall: verified },
+				}));
+			}
+		} catch (error) {
+			response.warnings.push(describeBoundedRecallFallback(error));
+		}
+	}
 
   async flushDueItems(force: boolean = true): Promise<void> {
     if (!hotSyncEnabled()) {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -7,13 +7,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { contextFromCli } from "../../src/runtime/cli/context";
 import { OnlyBotsLocalRuntimeDaemon, setupRuntimeProfile } from "../../src/runtime/local-runtime";
+import { HostRuntimeAdapterBase, type HostAdapterIdentity } from "../../src/runtime/host-adapter-base";
+import type { LocalRuntimeClient } from "../../src/runtime/local-client";
+import { stopHotSyncManagers } from "../../src/runtime/hot-sync-manager";
+import { resolveRuntimePaths } from "../../src/runtime/runtime-persistence";
 
 const homes: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
-	for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+	for (const home of homes.splice(0)) {
+		await stopHotSyncManagers(resolveRuntimePaths(home).state);
+		rmSync(home, { recursive: true, force: true });
+	}
 });
 
 const identity = () => {
@@ -27,8 +34,8 @@ const jsonResponse = (body: unknown, status = 200): Response =>
 		headers: { "content-type": "application/json" },
 	});
 
-const installFetchMock = (npub: string, contextStatus: number, contextPack?: () => Promise<Response>) => {
-	vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+const installFetchMock = (npub: string, contextStatus: number, contextPack?: (path: string, init?: RequestInit) => Promise<Response>) =>
+	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
 		if (url.pathname === "/v1/auth/challenge") {
 			const issuedAt = new Date();
@@ -52,7 +59,7 @@ const installFetchMock = (npub: string, contextStatus: number, contextPack?: () 
 			});
 		}
 		if (url.pathname === "/v1/context/pack") {
-			if (contextPack) return contextPack();
+			if (contextPack) return contextPack(url.pathname, init);
 			if (contextStatus !== 200) {
 				return jsonResponse({ error: { code: "payment_required", message: "funding required" } }, contextStatus);
 			}
@@ -63,6 +70,7 @@ const installFetchMock = (npub: string, contextStatus: number, contextPack?: () 
 			});
 		}
 		if (url.pathname === "/v1/context/packs/hosted-pack-safe-id") {
+			if (contextPack) return contextPack(url.pathname, init);
 			return jsonResponse({
 				packId: "hosted-pack-safe-id",
 				goal: "Inspect the explicit context pack",
@@ -72,7 +80,6 @@ const installFetchMock = (npub: string, contextStatus: number, contextPack?: () 
 		}
 		throw new Error(`unexpected hosted lifecycle request: ${url.pathname}`);
 	});
-};
 
 const verifiedHotSnapshot = {
 	scope: "all",
@@ -232,5 +239,132 @@ describe("hosted lifecycle prompt boundary", () => {
 			expect.stringContaining(warning),
 		]);
 		expect(JSON.stringify(result.contextPack)).toContain("CLIENT_VERIFIED_HOT_MEMORY_MUST_REACH_THE_PROMPT");
+	});
+});
+
+class ArchiveHookAdapter extends HostRuntimeAdapterBase {
+	protected readonly identity: HostAdapterIdentity;
+	protected readonly config = { profileName: "default", hostHome: "/fixture-host", adapterVersion: "fixture" };
+
+	constructor(protected readonly client: LocalRuntimeClient, runtime: "codex" | "claude-code") {
+		super();
+		this.identity = { runtimeId: runtime, wrapperVersionFallback: "fixture", requestLabel: runtime };
+	}
+
+	protected async attachWorkspace(): Promise<void> {}
+}
+
+describe("verified recall through native prompt preparation", () => {
+	it.each(["codex", "claude-code"] as const)("recalls the whole approved warm and cold task in %s", async (runtime) => {
+		vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "true");
+		const signer = identity();
+		const home = realpathSync(mkdtempSync(path.join(os.tmpdir(), "crosshead-verified-recall-")));
+		homes.push(home);
+		const workspaceId = `repo:${home}`;
+		const goal = "Repair payment retries without duplicate charges";
+		const taskId = "recall-task:payments-retry";
+		const hot = "The fixture worker is offline.";
+		const cold = { id: "cold:original", kind: "cold_memory", content: "Retry the payment with the original idempotency key." };
+		const warm = { id: "warm:correction", kind: "warm_memory", content: "Check the receipt before every payment retry." };
+		const previewPackId = "hosted-pack-safe-id";
+		const hostedText = "UNVERIFIED_HOSTED_PROMPT_TEXT";
+		let sources = [cold, warm];
+		let whenRequested: (() => Promise<void>) | undefined;
+		let responseStatus = 200;
+		const fetcher = installFetchMock(signer.npub, 200, async (_path, init) => {
+			const body = init?.body ? JSON.parse(String(init.body)) : null;
+			if (body) {
+				expect(body.allowedScope.includeHotMemory).toBe(false);
+				expect(body).not.toHaveProperty("hotMemorySnapshot");
+			}
+			const returned = sources;
+			await whenRequested?.();
+			if (responseStatus !== 200) return jsonResponse({ error: { code: "payment_required" } }, responseStatus);
+			return jsonResponse({
+				packId: previewPackId,
+				goal: body?.goal ?? goal,
+				workspaceId,
+				contextText: hostedText,
+				fragments: returned,
+				recall: {
+					policy: "bounded",
+					sources: returned.map(source => source.id),
+					decisions: [{ task: taskId, sources: returned.map(source => source.id) }],
+				},
+			});
+		});
+		await setupRuntimeProfile({ home, ...signer, profileName: "default", apiBase: "https://crosshead.sh", memoryMode: "assist" });
+		fetcher.mockClear();
+		const daemon = new OnlyBotsLocalRuntimeDaemon(home);
+		const hotSnapshot = { scope: "all", scopes: [{
+			scope: runtime,
+			content: JSON.stringify({ workspaceId, continuityCheckpoints: [{
+				workspaceId, runtime, sessionId: "previous", turnId: "previous",
+				goal, summary: hot, occurredAt: "2026-10-31T12:00:00.000Z",
+			}] }),
+		}] };
+		const localClient = {
+			emitEvent: (event: Parameters<typeof daemon.submitLifecycleEvent>[0]) => daemon.submitLifecycleEvent(event),
+			readHotMemory: async () => hotSnapshot,
+		} as unknown as LocalRuntimeClient;
+		const adapter = new ArchiveHookAdapter(localClient, runtime);
+		const prepare = (turnId: string, prompt = goal, root = home) => adapter.prepareTurn({
+			workspaceRoot: root, sessionId: "session", turnId, prompt,
+			hookObservedAt: "2026-11-01T12:00:00.000Z",
+		});
+		const command = async (...argv: string[]) => JSON.parse(await contextFromCli([
+			"recall", ...argv, "--home", home, "--workspace-root", home,
+		]));
+		const preview = () => command("preview", "--goal", goal);
+		const approve = ({ packId, sha256 }: { packId: string; sha256: string }) =>
+			command("approve", "--pack-id", packId, "--sha256", sha256);
+
+		const baseline = await prepare("unapproved");
+		expect(baseline.contextText).toContain(hot);
+		expect(fetcher).not.toHaveBeenCalled();
+		const original = await preview();
+		expect(original.sources).toEqual([cold, warm]);
+		await approve(original);
+
+		const verified = await prepare("approved");
+		expect(verified.contextText.startsWith(baseline.contextText + "\n\n")).toBe(true);
+		expect(verified.contextText).toContain(cold.content);
+		expect(verified.contextText).toContain(warm.content);
+		expect(verified.contextText).not.toContain(hostedText);
+
+		sources = [cold]; // An internally consistent response that omits the approved correction.
+		expect((await prepare("omits-correction")).contextText).toBe(baseline.contextText);
+		sources = [cold, { ...warm, content: "Check the receipt and verify that the payer matches." }];
+		await expect(approve(original)).rejects.toThrow("digest changed");
+		await approve(await preview());
+		expect((await prepare("new-revision")).contextText).toContain(sources[1]!.content);
+		sources = [cold, warm];
+		expect((await prepare("replayed-revision")).contextText).toBe(baseline.contextText);
+
+		responseStatus = 402;
+		expect((await prepare("unfunded")).contextText).toBe(baseline.contextText);
+		responseStatus = 200;
+		const calls = fetcher.mock.calls.length;
+		expect((await prepare("declined", "Repair payment retries using only the provided specification")).contextText).not.toContain(cold.content);
+		expect((await prepare("foreign", goal, path.join(home, "different-workspace"))).contextText).not.toContain(cold.content);
+		expect(fetcher.mock.calls.length).toBe(calls);
+
+		await approve(await preview());
+		let release!: () => void;
+		whenRequested = () => new Promise<void>(resolve => { release = resolve; });
+		const inFlight = prepare("in-flight");
+		try {
+			await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+			const independentTurn = prepare("unrelated", "Inspect rendering metrics");
+			await expect(Promise.race([
+				independentTurn.then(() => "prepared"),
+				new Promise(resolve => setTimeout(() => resolve("blocked"), 250)),
+			])).resolves.toBe("prepared");
+			await command("revoke", "--task", taskId);
+		} finally {
+			release?.();
+		}
+		expect((await inFlight).contextText).toBe(baseline.contextText);
+		expect((await command("list")).approvals).toEqual([]);
 	});
 });
