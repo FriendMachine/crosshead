@@ -33,10 +33,13 @@ waits for in-flight work before releasing the runtime-home ownership lock.
 
 From the workspace, preview the complete saved task and verify its requirements
 and corrections. The preview requests a paid context pack. Approving its
-displayed digest opts this runtime home and profile into paid recall on matching
-turns in Codex, Claude Code, Antigravity CLI, Hermes, OpenCode, Pi, and Oh My Pi
+displayed, one-use digest opts this runtime home and profile into paid recall on
+turns with the same task text in Codex, Claude Code, Antigravity CLI, Hermes, OpenCode, Pi, and Oh My Pi
 in assist or auto mode. Use `--profile` when the host uses a different profile
-from the workspace or runtime default. For existing Oh My Pi installations,
+from the workspace or runtime default. Add `--host` to the preview to use
+records restricted to that host. A preview without a host uses records shared
+across hosts. Use the same explicit profile for preview and approval if the
+workspace has multiple host profiles. For existing Oh My Pi installations,
 rerun `crosshead install omp` after updating to refresh the project extension.
 
 ```sh
@@ -46,10 +49,11 @@ crosshead context recall list
 crosshead context recall revoke --task <task-id>
 ```
 
-Both newly saved and existing scoped records can be reviewed. If the task
-changes, preview and approve its next revision or revoke the previous approval.
-Approvals are local to each runtime home. Review the snapshot on each machine
-where you want it recalled.
+Both newly saved and existing scoped records can be reviewed. Preview and
+approve the next revision with the same task text and host selection to replace
+the previous approval. Revoke the old approval if you change the task text.
+Approvals and preview receipts are local to each runtime home. Review the
+snapshot on each machine where you want it recalled.
 
 A matching turn gets up to three whole archive excerpts and a separate
 4,000-character allowance. Crosshead checks the complete set against the

@@ -5,6 +5,7 @@ import path from "node:path";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { readArchiveRecallSnapshot } from "../../src/runtime/archive-recall";
 import { contextFromCli } from "../../src/runtime/cli/context";
 import { OnlyBotsLocalRuntimeDaemon, setupRuntimeProfile } from "../../src/runtime/local-runtime";
 import { HostRuntimeAdapterBase, type HostAdapterIdentity } from "../../src/runtime/host-adapter-base";
@@ -264,7 +265,7 @@ describe("verified recall through native prompt preparation", () => {
 		homes.push(home);
 		const workspaceId = `repo:${home}`;
 		const goal = "Repair payment retries without duplicate charges";
-		const taskId = "recall-task:payments-retry";
+		let taskId = "recall-task:payments-retry";
 		const hot = "The fixture worker is offline.";
 		const cold = { id: "cold:original", kind: "cold_memory", content: "Retry the payment with the original idempotency key." };
 		const warm = { id: "warm:correction", kind: "warm_memory", content: "Check the receipt before every payment retry." };
@@ -273,11 +274,14 @@ describe("verified recall through native prompt preparation", () => {
 		let sources = [cold, warm];
 		let whenRequested: (() => Promise<void>) | undefined;
 		let responseStatus = 200;
+		let warnings: string[] = [];
+		const requestHosts: (string | null)[] = [];
 		const fetcher = installFetchMock(signer.npub, 200, async (_path, init) => {
 			const body = init?.body ? JSON.parse(String(init.body)) : null;
 			if (body) {
 				expect(body.allowedScope.includeHotMemory).toBe(false);
 				expect(body).not.toHaveProperty("hotMemorySnapshot");
+				requestHosts.push(body.runtimeHost);
 			}
 			const returned = sources;
 			await whenRequested?.();
@@ -290,6 +294,7 @@ describe("verified recall through native prompt preparation", () => {
 				fragments: returned,
 				recall: {
 					policy: "bounded",
+					warnings,
 					sources: returned.map(source => source.id),
 					decisions: [{ task: taskId, sources: returned.map(source => source.id) }],
 				},
@@ -335,13 +340,18 @@ describe("verified recall through native prompt preparation", () => {
 		const command = async (...argv: string[]) => JSON.parse(await contextFromCli([
 			"recall", ...argv, "--home", home, "--workspace-root", home,
 		]));
-		const preview = () => command("preview", "--goal", goal);
+		const preview = (...args: string[]) => command("preview", "--goal", goal, ...args);
 		const approve = ({ packId, sha256 }: { packId: string; sha256: string }) =>
 			command("approve", "--pack-id", packId, "--sha256", sha256);
 
 		const baseline = await prepare("unapproved");
 		expect(baseline.contextText).toContain(hot);
 		expect(fetcher).not.toHaveBeenCalled();
+		await expect(approve({ packId: previewPackId, sha256: "0".repeat(64) })).rejects.toThrow("requires a current preview");
+		expect(fetcher).not.toHaveBeenCalled();
+		warnings = ["Hosted archive search was skipped."];
+		await expect(preview()).rejects.toThrow("reported incomplete archive retrieval");
+		warnings = [];
 		const original = await preview();
 		expect(original.sources).toEqual([cold, warm]);
 		await approve(original);
@@ -351,13 +361,46 @@ describe("verified recall through native prompt preparation", () => {
 		expect(verified.contextText).toContain(cold.content);
 		expect(verified.contextText).toContain(warm.content);
 		expect(verified.contextText).not.toContain(hostedText);
+		expect(requestHosts.every(host => host === null)).toBe(true);
 
+		const beforeDenied = fetcher.mock.calls.length;
+		const denied = await daemon.submitLifecycleEvent({
+			runtime, type: "turn.started", workspaceId, sessionId: "session", turnId: "archive-scope-legacy-alias",
+			payload: { goal, recallPolicy: "bounded", allowed_scope: { includeWarmMemory: false, includeColdMemory: false } },
+		});
+		expect(denied.contextPack?.verifiedArchiveContext).toBeUndefined();
+		expect(fetcher.mock.calls).toHaveLength(beforeDenied);
+
+		const coldDenied = await daemon.submitLifecycleEvent({
+			runtime, type: "turn.started", workspaceId, sessionId: "session", turnId: "archive-scope-cold-denied",
+			payload: { goal, recallPolicy: "bounded", allowed_scope: { include_cold_memory: false } },
+		});
+		const posted = fetcher.mock.calls.at(-1)?.[1]?.body;
+		expect(JSON.parse(String(posted)).allowedScope.includeColdMemory).toBe(false);
+		expect(coldDenied.contextPack?.verifiedArchiveContext).toBeUndefined();
+		expect(coldDenied.contextPack?.packId).toBeNull();
+
+		warnings = ["Archive search was skipped."];
+		expect((await prepare("incomplete")).packId).toBeNull();
+		warnings = [];
 		sources = [cold]; // An internally consistent response that omits the approved correction.
-		expect((await prepare("omits-correction")).contextText).toBe(baseline.contextText);
+		const withheld = await prepare("omits-correction");
+		expect(withheld.contextText).toBe(baseline.contextText);
+		expect(withheld.packId).toBeNull();
+		expect((await daemon.readActivity(100)).actions).toContainEqual(expect.objectContaining({
+			details: expect.objectContaining({ packId: previewPackId, verifiedArchiveRecall: false }),
+		}));
+		sources = [cold, warm];
+		const previousTaskId = taskId;
+		const stale = await preview();
+		taskId = "recall-task:payment-retry-v2";
 		sources = [cold, { ...warm, content: "Check the receipt and verify that the payer matches." }];
-		await expect(approve(original)).rejects.toThrow("digest changed");
+		await expect(approve(stale)).rejects.toThrow("digest changed");
 		await approve(await preview());
+		await expect(approve(original)).rejects.toThrow("requires a current preview");
+		expect((await command("list")).approvals).toEqual([expect.objectContaining({ taskId })]);
 		expect((await prepare("new-revision")).contextText).toContain(sources[1]!.content);
+		taskId = previousTaskId;
 		sources = [cold, warm];
 		expect((await prepare("replayed-revision")).contextText).toBe(baseline.contextText);
 
@@ -365,11 +408,14 @@ describe("verified recall through native prompt preparation", () => {
 		expect((await prepare("unfunded")).contextText).toBe(baseline.contextText);
 		responseStatus = 200;
 		const calls = fetcher.mock.calls.length;
+		expect((await prepare("nearby-goal", "Repair payment retries with a different contract")).contextText).not.toContain(cold.content);
 		expect((await prepare("declined", "Repair payment retries using only the provided specification")).contextText).not.toContain(cold.content);
 		expect((await prepare("foreign", goal, path.join(home, "different-workspace"))).contextText).not.toContain(cold.content);
 		expect(fetcher.mock.calls.length).toBe(calls);
 
-		await approve(await preview());
+		await approve(await preview("--host", runtime));
+		expect((await prepare("host-scoped")).contextText).toContain(warm.content);
+		expect(requestHosts.slice(-2)).toEqual([runtime, runtime]);
 		let release!: () => void;
 		whenRequested = () => new Promise<void>(resolve => { release = resolve; });
 		const inFlight = prepare("in-flight");
@@ -385,6 +431,36 @@ describe("verified recall through native prompt preparation", () => {
 			release?.();
 		}
 		expect((await inFlight).contextText).toBe(baseline.contextText);
-		expect((await command("list")).approvals).toEqual([]);
+		expect((await command("list")).approvals).toEqual([
+			expect.objectContaining({ taskId: "recall-task:payment-retry-v2", runtimeHost: null }),
+		]);
+	});
+});
+
+describe("verified archive pack structure", () => {
+	const workspaceId = "repo:/review";
+	const goal = "Recover the exact task";
+	const first = { id: "warm:first", kind: "warm_memory", content: "Approved warm fact." };
+	const second = { id: "cold:second", kind: "cold_memory", content: "Approved cold record." };
+	const ids = [first.id, second.id];
+	const decision = { task: "task-A", sources: ids };
+	const base = {
+		workspaceId, goal, fragments: [first, second],
+		recall: { policy: "bounded", sources: ids, decisions: [decision], warnings: [] },
+	};
+	it("accepts a complete warm and cold task", () => {
+		expect(readArchiveRecallSnapshot(base, workspaceId, goal)?.sources).toEqual([first, second]);
+	});
+	it.each([
+		["unlisted fragment", { ...base, fragments: [...base.fragments, { ...first, id: "warm:extra" }] }],
+		["duplicate source", { ...base, fragments: [first, first] }],
+		["ambiguous decisions", { ...base, recall: { ...base.recall, decisions: [decision, { ...decision, task: "task-B" }] } }],
+		["mismatched kind", { ...base, fragments: [{ ...first, kind: "cold_memory" }, second] }],
+		["hosted hot fragment", { ...base, fragments: [...base.fragments, { id: "hot:extra", kind: "hot_memory", content: "extra" }] }],
+		["over-budget source", { ...base, fragments: [{ ...first, content: "x".repeat(4_000) }, second] }],
+		["incomplete task warning", { ...base, recall: { ...base.recall, warnings: ["Archive search was skipped."] } }],
+		["withheld task", { ...base, fragments: [], recall: { ...base.recall, sources: [], decisions: [] } }],
+	])("withholds a pack with a %s", (_label, pack) => {
+		expect(readArchiveRecallSnapshot(pack, workspaceId, goal)).toBeNull();
 	});
 });

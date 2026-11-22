@@ -1,3 +1,4 @@
+import { archiveRecallHost } from "../archive-recall";
 import { workspaceProfileForDirectory } from "../workspace-hooks";
 import { workspaceDirectoryPath } from "../workspace-identity";
 import { importWorkspaceRoot, scopedHandoffBinding } from "./handoff";
@@ -13,7 +14,10 @@ export const contextFromCli = async (argv: string[]): Promise<string> => {
 	if (subcommand === "recall") {
 		const explicitRoot = typeof flags["workspace-root"] === "string" ? flags["workspace-root"] : undefined;
 		const directory = explicitRoot ?? process.cwd();
+		const runtimeHost = archiveRecallHost(flags.host);
+		if (flags.host !== undefined && !runtimeHost) throw new Error("Unknown archive host");
 		const bindings = (["codex", "claude-code"] as const)
+			.filter(host => !runtimeHost || host === runtimeHost)
 			.map(host => scopedHandoffBinding(home, host, directory, undefined, undefined))
 			.filter(binding => binding !== null);
 		if (!profileName && new Set(bindings.map(binding => binding.profileName)).size > 1) {
@@ -25,7 +29,7 @@ export const contextFromCli = async (argv: string[]): Promise<string> => {
 		const action = positionals[1];
 		let result: Record<string, unknown>;
 		if (action === "preview" && typeof flags.goal === "string") {
-			result = await daemon.manageArchiveRecall(workspaceId, { kind: "preview", goal: flags.goal }, archiveProfile);
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "preview", goal: flags.goal, runtimeHost }, archiveProfile);
 		} else if (action === "approve" && typeof flags["pack-id"] === "string" && typeof flags.sha256 === "string") {
 			result = await daemon.manageArchiveRecall(workspaceId, { kind: "approve", packId: flags["pack-id"], sha256: flags.sha256 }, archiveProfile);
 		} else if (action === "list") {
@@ -33,7 +37,7 @@ export const contextFromCli = async (argv: string[]): Promise<string> => {
 		} else if (action === "revoke" && typeof flags.task === "string") {
 			result = await daemon.manageArchiveRecall(workspaceId, { kind: "revoke", taskId: flags.task }, archiveProfile);
 		} else {
-			throw new Error('Use context recall preview --goal "<task>", approve --pack-id <id> --sha256 <digest>, list, or revoke --task <id>');
+			throw new Error('Use context recall preview --goal "<task>" [--host <host>], approve --pack-id <id> --sha256 <digest>, list, or revoke --task <id>');
 		}
 		return JSON.stringify(result, null, 2);
 	}

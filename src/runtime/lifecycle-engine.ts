@@ -38,7 +38,7 @@ import {
   automaticWarmCommitDecision,
 } from "./continuity-policy";
 import type { ContinuityGovernorMemoryScope, ContinuityGovernorState } from "./continuity-governor";
-import { appendPrivateFileLine, writeJsonFile as writeDurableJsonFile } from "./runtime-persistence";
+import { appendPrivateFileLine, isSessionWriteStale, writeJsonFile as writeDurableJsonFile } from "./runtime-persistence";
 
 export type RuntimeLifecycleMemoryMode = "off" | "manual" | "assist" | "auto";
 
@@ -1028,16 +1028,16 @@ const mergeAllowedScopeWithGovernor = (
 ): Record<string, boolean> => {
   const allowedScope =
     requested && typeof requested === "object" && !Array.isArray(requested) ? (requested as Record<string, unknown>) : {};
-  const include = (key: keyof ContinuityGovernorMemoryScope): boolean => {
-    const requestedValue = allowedScope[key];
-    return (typeof requestedValue === "boolean" ? requestedValue : true) && scope[key];
+  const include = (key: keyof ContinuityGovernorMemoryScope, alias: string): boolean => {
+    const value = typeof allowedScope[key] === "boolean" ? allowedScope[key] : allowedScope[alias];
+    return value !== false && scope[key];
   };
 
   return {
-    includeHotMemory: include("includeHotMemory"),
-    includeWarmMemory: include("includeWarmMemory"),
-    includeColdMemory: include("includeColdMemory"),
-    includeLayeredContext: include("includeLayeredContext"),
+    includeHotMemory: include("includeHotMemory", "include_hot_memory"),
+    includeWarmMemory: include("includeWarmMemory", "include_warm_memory"),
+    includeColdMemory: include("includeColdMemory", "include_cold_memory"),
+    includeLayeredContext: include("includeLayeredContext", "include_layered_context"),
   };
 };
 
@@ -2301,61 +2301,79 @@ export class RuntimeLifecycleManager {
 	private async appendVerifiedArchiveRecall(response: RuntimeLifecycleEventResponse, contextPack: Record<string, unknown>): Promise<void> {
 		const { event } = response;
 		const workspaceId = event.workspaceId;
-		const goal = asString(event.payload.goal);
-		if (!workspaceId || !goal) return;
+		if (!workspaceId) return;
 
+		let attempted = false;
+		let packId: string | null = null;
+		let verified = false;
+		let failure: ReturnType<typeof describeHostedFailure> | undefined;
 		try {
 			const { profileName, profile, secret } = this.resolveProfile(event.profileName);
 			if (isLocalOnlyRuntimeProfile(profile)) return;
 			const governor = this.deps.loadContinuityGovernorState();
-			const scope = mergeAllowedScopeWithGovernor(event.payload.allowedScope, governor.memoryScope);
-			if (governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
-			const approval = findArchiveRecallApproval(this.deps.paths.state, profile, workspaceId, goal);
+			const request = buildPackRequest(event, governor.memoryScope);
+			const goal = asString(request?.goal);
+			const scope = asRecord(request?.allowedScope);
+			if (!goal || !scope || governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
+			const approval = findArchiveRecallApproval(this.deps.paths.state, profile, workspaceId, goal, event.runtime);
 			if (!approval) return;
 
 			const client = this.buildClient(profile, secret);
+			attempted = true;
 			const hosted = await client.requestArchiveRecall({
 				goal,
 				workspaceId,
-				sessionId: event.sessionId,
-				runtimeHost: event.runtime,
+				runtimeHost: approval.runtimeHost,
 				allowedScope: { ...scope, includeHotMemory: false, includeLayeredContext: false },
 				includeResumeBrief: false,
 				budget: ARCHIVE_RECALL_BUDGET,
 			}, `context_pack_v1-${createHash("sha256").update(event.eventId).digest("hex").slice(0, 48)}`);
 
-			const packId = archivePackId(hosted.packId);
+			packId = archivePackId(hosted?.packId);
 			const snapshot = readArchiveRecallSnapshot(hosted, workspaceId, goal);
 			// Recheck policy and the local trust anchor after the request.
-			const current = this.resolveProfile(profileName);
+			const currentProfile = this.deps.loadProfile(profileName);
+			const currentSecret = this.deps.loadSecret(profileName);
+			const sameIdentity = currentProfile?.npub === profile.npub && currentProfile.apiBase === profile.apiBase &&
+				currentSecret?.nsec === secret.nsec;
+			if (sameIdentity && !isSessionWriteStale(currentSecret.session, client.session())) {
+				this.persistClientSession(profileName, currentSecret, client);
+			}
 			const currentGovernor = this.deps.loadContinuityGovernorState();
-			const currentScope = mergeAllowedScopeWithGovernor(event.payload.allowedScope, currentGovernor.memoryScope);
-			const currentApproval = findArchiveRecallApproval(this.deps.paths.state, current.profile, workspaceId, goal);
-			if (current.secret.nsec !== secret.nsec || current.profile.apiBase !== profile.apiBase ||
-					(current.profile.memoryMode !== "assist" && current.profile.memoryMode !== "auto") || currentGovernor.paused) return;
-
-			this.persistClientSession(profileName, current.secret, client);
-			const verified = Boolean(packId && snapshot && currentApproval && currentApproval.sha256 === approval.sha256 &&
-				verifyArchiveRecall(current.profile, currentApproval, snapshot) &&
-				snapshot.sources.every(source => source.kind === "warm_memory"
-					? currentScope.includeWarmMemory : currentScope.includeColdMemory));
-			if (verified && snapshot) contextPack.verifiedArchiveContext = renderArchiveRecall(snapshot);
-			if (packId) contextPack.packId = packId;
-			if (!verified) response.warnings.push("Archive recall did not match the current local approval. Only hot context was delivered.");
-			if (packId) {
+			const currentScope = asRecord(buildPackRequest(event, currentGovernor.memoryScope)?.allowedScope);
+			if (sameIdentity && currentScope && !currentGovernor.paused &&
+					(currentProfile.memoryMode === "assist" || currentProfile.memoryMode === "auto")) {
+				const currentApproval = findArchiveRecallApproval(this.deps.paths.state, currentProfile, workspaceId, goal, event.runtime);
+				if (packId && snapshot && currentApproval && currentApproval.sha256 === approval.sha256 &&
+						verifyArchiveRecall(currentProfile, currentApproval, snapshot) &&
+						snapshot.sources.every(source => source.kind === "warm_memory"
+							? currentScope.includeWarmMemory === true : currentScope.includeColdMemory === true)) {
+					contextPack.verifiedArchiveContext = renderArchiveRecall(snapshot);
+					contextPack.packId = packId;
+					verified = true;
+				}
+			}
+			if (!verified) response.warnings.push("Hosted archive recall was withheld. Only hot context was delivered.");
+		} catch (error) {
+			failure = describeHostedFailure(error);
+			response.warnings.push(describeBoundedRecallFallback(error));
+		} finally {
+			if (attempted) {
 				response.actions.push(this.recordAction({
 					eventId: event.eventId,
-					profileName,
+					profileName: event.profileName,
 					type: "context_pack",
-					status: "completed",
-					mode: current.profile.memoryMode,
+					status: failure ? "failed" : "completed",
+					mode: response.mode,
 					reason: verified ? "Verified archive recall against a local approval" : "Hosted archive recall withheld",
 					queueItemId: null,
-					details: { packId, verifiedArchiveRecall: verified },
+					details: {
+						...(packId ? { packId } : {}),
+						verifiedArchiveRecall: verified,
+						...(failure ? { failure } : {}),
+					},
 				}));
 			}
-		} catch (error) {
-			response.warnings.push(describeBoundedRecallFallback(error));
 		}
 	}
 

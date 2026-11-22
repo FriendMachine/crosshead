@@ -54,6 +54,16 @@ describe("OMP project adapter uninstall", () => {
 		expect(existsSync(installed.extensionFile)).toBe(false);
 	});
 
+	it("reinstalls the current recall extension over the previous managed file", async () => {
+		const { runtimeHome, workspaceRoot, ompBinary } = fixture();
+		const options = { home: runtimeHome, workspaceRoot, ompBinary };
+		const { extensionFile } = await installOmpProjectAdapter(options);
+		writeFileSync(extensionFile, hardenOmpExtensionSource(OMP_EXTENSION_SOURCE, runtimeHome, false));
+
+		await installOmpProjectAdapter(options);
+		expect(readFileSync(extensionFile, "utf8")).toBe(hardenOmpExtensionSource(OMP_EXTENSION_SOURCE, runtimeHome));
+	});
+
 	it("preserves unrelated workspace configuration", async () => {
 		const { runtimeHome, workspaceRoot, ompBinary } = fixture();
 		const configFile = path.join(workspaceRoot, ".omp", "config.yml");

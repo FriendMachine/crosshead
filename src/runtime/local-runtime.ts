@@ -1,6 +1,7 @@
 import {
   ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
-  archiveRecallApprovalDigest, listArchiveRecallApprovals, readArchiveRecallSnapshot, revokeArchiveRecall,
+  archiveRecallIsIncomplete, getArchiveRecallPreview, listArchiveRecallApprovals, readArchiveRecallSnapshot,
+  recordArchiveRecallPreview, revokeArchiveRecall, type ArchiveRecallHost,
 } from "./archive-recall";
 import { startTokenUsageSync } from "./token-usage-sync";
 import { parsePrivateMemoryErasureChallenge, signPrivateMemoryErasureChallenge } from "./erasure-proof";
@@ -2677,7 +2678,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 
 	async manageArchiveRecall(
 		workspaceId: string,
-		operation: { kind: "preview"; goal: string } | { kind: "approve"; packId: string; sha256: string } |
+		operation: { kind: "preview"; goal: string; runtimeHost: ArchiveRecallHost | null } | { kind: "approve"; packId: string; sha256: string } |
 			{ kind: "list" } | { kind: "revoke"; taskId: string },
 		profileName?: string,
 	): Promise<Record<string, unknown>> {
@@ -2689,7 +2690,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			return { workspaceId, approvals: listArchiveRecallApprovals(this.paths.state, profile, workspaceId) };
 		}
 		if (operation.kind === "revoke") {
-			revokeArchiveRecall(this.paths.state, profile, workspaceId, operation.taskId);
+			await revokeArchiveRecall(this.paths.state, profile, workspaceId, operation.taskId);
 			return { workspaceId, revoked: operation.taskId };
 		}
 
@@ -2698,41 +2699,48 @@ export class OnlyBotsLocalRuntimeDaemon {
 		if (governorState.paused || (!memoryScope.includeWarmMemory && !memoryScope.includeColdMemory)) {
 			throw new Error("The continuity governor has disabled archive recall");
 		}
-		const { client, secret, profileName: resolved } = await this.withProfileBody({ profileName: profile.name });
-		let pack: Record<string, unknown>;
-		let packId: string | null;
-		if (operation.kind === "preview") {
-			if (!operation.goal.trim() || operation.goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS) {
-				throw new Error("Provide a task description of up to 8192 characters");
-			}
-			pack = await client.requestArchiveRecall({
-				goal: operation.goal,
-				workspaceId,
-				allowedScope: {
-					includeHotMemory: false, includeWarmMemory: memoryScope.includeWarmMemory,
-					includeColdMemory: memoryScope.includeColdMemory, includeLayeredContext: false,
-				},
-				includeResumeBrief: false,
-				budget: ARCHIVE_RECALL_BUDGET,
-			});
-			packId = archivePackId(pack.packId);
-			await this.lifecycleManager.recordContextPackResult(resolved, { packId }, "command");
-		} else {
-			packId = archivePackId(operation.packId);
-			if (!packId) throw new Error("Invalid context pack ID");
-			pack = await client.inspectContextPack(packId);
-			if (archivePackId(pack.packId) !== packId) throw new Error("The hosted pack did not match the requested ID");
+		const preview = operation.kind === "approve"
+			? getArchiveRecallPreview(this.paths.state, profile, workspaceId, operation.packId, operation.sha256)
+			: null;
+		const goal = operation.kind === "preview" ? operation.goal.trim() : preview!.goal;
+		if (!goal || goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS) {
+			throw new Error("Provide a task description of up to 8192 characters");
 		}
-		await this.persistSession(resolved, secret, client);
-		const goal = operation.kind === "preview" ? operation.goal.trim() : pack.goal;
-		const snapshot = readArchiveRecallSnapshot(pack, workspaceId, typeof goal === "string" ? goal : undefined);
-		if (!packId || !snapshot || typeof goal !== "string" || !goal.trim() || goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS ||
-				snapshot.sources.some(source => source.kind === "warm_memory" ? !memoryScope.includeWarmMemory : !memoryScope.includeColdMemory)) {
+		const { client, secret, profileName: resolved } = await this.withProfileBody({ profileName: profile.name });
+		const pack = preview ? await client.inspectContextPack(preview.packId) : await client.requestArchiveRecall({
+			goal,
+			workspaceId,
+			runtimeHost: operation.kind === "preview" ? operation.runtimeHost : null,
+			allowedScope: {
+				includeHotMemory: false, includeWarmMemory: memoryScope.includeWarmMemory,
+				includeColdMemory: memoryScope.includeColdMemory, includeLayeredContext: false,
+			},
+			includeResumeBrief: false,
+			budget: ARCHIVE_RECALL_BUDGET,
+		});
+		const packId = archivePackId(pack?.packId);
+		const currentProfile = loadProfile(this.paths, resolved);
+		const currentSecret = loadSecret(this.paths, resolved);
+		if (currentProfile?.npub !== profile.npub || currentProfile.apiBase !== profile.apiBase || currentSecret?.nsec !== secret.nsec) {
+			throw new Error("The runtime profile changed during archive review. Preview the task again.");
+		}
+		await this.persistSession(resolved, currentSecret, client);
+		if (!preview) await this.lifecycleManager.recordContextPackResult(resolved, { packId }, "command");
+		if (archiveRecallIsIncomplete(pack)) {
+			throw new Error("Onlybots reported incomplete archive retrieval. Retry the preview before approving.");
+		}
+		const snapshot = readArchiveRecallSnapshot(pack, workspaceId, goal);
+		const currentGovernor = loadEffectiveContinuityGovernorState(this.paths).governorState;
+		const currentScope = currentGovernor.memoryScope;
+		if (!packId || (preview && packId !== preview.packId) || !snapshot || currentGovernor.paused ||
+				snapshot.sources.some(source => source.kind === "warm_memory" ? !currentScope.includeWarmMemory : !currentScope.includeColdMemory)) {
 			throw new Error("The hosted pack did not contain a complete, eligible archive task for this workspace");
 		}
-		const sha256 = archiveRecallApprovalDigest(profile, snapshot, goal);
-		if (operation.kind === "preview") return { packId, sha256, goal, ...snapshot };
-		approveArchiveRecall(this.paths.state, profile, snapshot, goal, operation.sha256);
+		if (operation.kind === "preview") {
+			const sha256 = await recordArchiveRecallPreview(this.paths.state, profile, snapshot, goal, operation.runtimeHost, packId);
+			return { packId, sha256, goal, runtimeHost: operation.runtimeHost, ...snapshot };
+		}
+		await approveArchiveRecall(this.paths.state, profile, snapshot, preview!);
 		return { approved: true, workspaceId, taskId: snapshot.taskId, sourceCount: snapshot.sources.length };
 	}
 

@@ -121,8 +121,9 @@ this runtime must observe these rules:
   signature are discarded locally.
 - Native hooks may render warm and cold archive records when the exact task
   snapshot matches a locally approved SHA-256 digest. That digest binds the
-  hosted origin, profile, owner, workspace, task, and ordered source IDs, kinds
-  and text. The client renders the records and uses current local policy.
+  hosted origin, profile, owner, workspace, task, optional host, and ordered
+  source IDs, kinds and text. Approval consumes a receipt generated and stored
+  by the local preview. The client renders the records and uses current local policy.
   Hosted summaries, warnings, manifests, claims, dreams, inbox items and lifecycle
   messages stay outside the archive prompt context. See [archive recall](HOT-SYNC.md#verified-archive-recall).
 - Public-discovery consumers request `include_raw=true` and derive identity,

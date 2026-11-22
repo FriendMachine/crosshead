@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
-import { readdirSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
+import { acquireWorkspaceSetupKernelLock } from "./daemon-kernel-lock";
 import { parseJsonFile, writeJsonFile } from "./runtime-persistence";
 
 const VERSION = "crosshead_archive_recall_v1";
@@ -20,7 +21,18 @@ export type ArchiveRecallSnapshot = {
 	sources: ArchiveSource[];
 };
 export type ArchiveRecallOwner = { name: string; apiBase: string; npub: string };
-type Approval = { version: typeof VERSION; taskId: string; goal: string; sha256: string };
+const HOSTS = ["codex", "claude-code", "agy", "hermes", "opencode", "pi"] as const;
+export type ArchiveRecallHost = (typeof HOSTS)[number];
+type Approval = { taskId: string; goal: string; sha256: string; runtimeHost: ArchiveRecallHost | null };
+type Preview = Approval & { packId: string; receipt: string; expiresAt: number };
+type ApprovalState = { version: typeof VERSION; approvals: Approval[]; previews: Preview[] };
+// Matches the hosted context-pack retention window.
+const PREVIEW_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+
+export function archiveRecallHost(value: unknown): ArchiveRecallHost | null {
+	const host = value === "omp" ? "pi" : value;
+	return HOSTS.find(candidate => candidate === host) ?? null;
+}
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const object = (value: unknown): Record<string, unknown> | null =>
@@ -33,6 +45,11 @@ export function renderArchiveRecall(snapshot: ArchiveRecallSnapshot): string {
 	return [HEADER, ...snapshot.sources.map(({ id, content }) => `[${id}]\n${content}`)].join("\n\n");
 }
 
+export function archiveRecallIsIncomplete(value: unknown): boolean {
+	const warnings = object(object(value)?.recall)?.warnings;
+	return warnings !== undefined && (!Array.isArray(warnings) || warnings.length !== 0);
+}
+
 export function readArchiveRecallSnapshot(
 	value: unknown,
 	workspaceId: string,
@@ -41,14 +58,13 @@ export function readArchiveRecallSnapshot(
 	const pack = object(value);
 	const recall = object(pack?.recall);
 	if (pack?.workspaceId !== workspaceId || (goal !== undefined && pack.goal !== goal.trim()) ||
-			recall?.policy !== "bounded" || !Array.isArray(pack.fragments) ||
-			pack.fragments.length > MAX_FRAGMENTS + 1 || !Array.isArray(recall.sources) || !Array.isArray(recall.decisions)) {
+			recall?.policy !== "bounded" || archiveRecallIsIncomplete(pack) || !Array.isArray(pack.fragments) ||
+			pack.fragments.length > MAX_FRAGMENTS || !Array.isArray(recall.sources) || !Array.isArray(recall.decisions)) {
 		return null;
 	}
 	const sources: ArchiveSource[] = [];
 	for (const item of pack.fragments) {
 		const fragment = object(item);
-		if (fragment?.kind === "hot_memory") continue;
 		const { id, kind, content } = fragment ?? {};
 		if (typeof id !== "string" || !SOURCE_ID.test(id) ||
 				(kind !== "warm_memory" && kind !== "cold_memory") ||
@@ -73,86 +89,139 @@ export function readArchiveRecallSnapshot(
 }
 
 const ownerKey = ({ name, apiBase, npub }: ArchiveRecallOwner) => [name, apiBase, npub];
-export const archiveRecallDigest = (owner: ArchiveRecallOwner, snapshot: ArchiveRecallSnapshot): string =>
-	digest([ownerKey(owner), snapshot]);
-
-export const archiveRecallApprovalDigest = (owner: ArchiveRecallOwner, snapshot: ArchiveRecallSnapshot, goal: string): string =>
-	digest([archiveRecallDigest(owner, snapshot), goal.trim()]);
+const archiveRecallDigest = (
+	owner: ArchiveRecallOwner, snapshot: ArchiveRecallSnapshot, runtimeHost: ArchiveRecallHost | null
+): string => digest(runtimeHost ? [ownerKey(owner), snapshot, runtimeHost] : [ownerKey(owner), snapshot]);
 
 const approvalDirectory = (stateDir: string, owner: ArchiveRecallOwner, workspaceId: string): string =>
 	path.join(stateDir, "archive-recall", digest([ownerKey(owner), workspaceId]));
-const approvalFile = (directory: string, taskId: string): string => path.join(directory, `${digest(taskId)}.json`);
 
-export function approveArchiveRecall(
-	stateDir: string,
-	owner: ArchiveRecallOwner,
-	snapshot: ArchiveRecallSnapshot,
-	goal: string,
-	expectedDigest: string,
-): void {
-	if (expectedDigest !== archiveRecallApprovalDigest(owner, snapshot, goal)) {
-		throw new Error("Archive recall digest changed. Preview the exact records again before approving.");
+const validApproval = (value: unknown): value is Approval => {
+	const approval = object(value);
+	return Boolean(approval && typeof approval.taskId === "string" && approval.taskId.trim() &&
+		typeof approval.goal === "string" && approval.goal.length <= MAX_ARCHIVE_RECALL_GOAL_CHARS && approval.goal.trim() &&
+		typeof approval.sha256 === "string" && SHA256.test(approval.sha256) &&
+		(approval.runtimeHost === null || archiveRecallHost(approval.runtimeHost) === approval.runtimeHost));
+};
+
+function readApprovalState(directory: string): ApprovalState {
+	const statePath = path.join(directory, "approvals.json");
+	try {
+		const state = JSON.parse(readFileSync(statePath, "utf8")) as ApprovalState;
+		if (state?.version !== VERSION || !Array.isArray(state.approvals) || !state.approvals.every(validApproval) ||
+			!Array.isArray(state.previews) || !state.previews.every(preview => validApproval(preview) &&
+				archivePackId(preview.packId) && SHA256.test(preview.receipt) && Number.isFinite(preview.expiresAt))) {
+			throw new Error("Invalid local archive approvals");
+		}
+		return state;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	writeJsonFile(approvalFile(approvalDirectory(stateDir, owner, snapshot.workspaceId), snapshot.taskId), {
-		version: VERSION,
-		taskId: snapshot.taskId,
-		goal: goal.trim(),
-		sha256: archiveRecallDigest(owner, snapshot),
-	} satisfies Approval);
-}
-
-export function revokeArchiveRecall(stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, taskId: string): void {
-	rmSync(approvalFile(approvalDirectory(stateDir, owner, workspaceId), taskId), { force: true });
-}
-
-export function listArchiveRecallApprovals(stateDir: string, owner: ArchiveRecallOwner, workspaceId: string): Approval[] {
-	const directory = approvalDirectory(stateDir, owner, workspaceId);
+	// Preserve approvals made before the per-goal store existed. The next edit migrates them.
 	let filenames: string[];
 	try {
 		filenames = readdirSync(directory);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-		throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		filenames = [];
 	}
-	return filenames.filter(name => /^[a-f0-9]{64}\.json$/.test(name)).sort().flatMap(name => {
+	const approvals = filenames.filter(name => /^[a-f0-9]{64}\.json$/.test(name)).flatMap(name => {
 		const value = object(parseJsonFile(path.join(directory, name), null));
-		if (value?.version !== VERSION || typeof value.taskId !== "string" ||
-				name !== path.basename(approvalFile(directory, value.taskId)) ||
-				typeof value.goal !== "string" || value.goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS || !value.goal.trim() ||
-				typeof value.sha256 !== "string" || !SHA256.test(value.sha256)) return [];
-		return [{ version: VERSION, taskId: value.taskId, goal: value.goal, sha256: value.sha256 }];
+		const approval = { ...value, runtimeHost: null };
+		return value?.version === VERSION && validApproval(approval) && name === `${digest(approval.taskId)}.json`
+			? [{ taskId: approval.taskId, goal: approval.goal, sha256: approval.sha256, runtimeHost: null }]
+			: [];
+	});
+	return { version: VERSION, approvals, previews: [] };
+}
+
+const sameSlot = (left: Approval, right: Approval): boolean =>
+	left.goal === right.goal && left.runtimeHost === right.runtimeHost;
+
+async function editApprovalState<T>(directory: string, edit: (state: ApprovalState) => T): Promise<T> {
+	const lock = await acquireWorkspaceSetupKernelLock(directory);
+	try {
+		const state = readApprovalState(directory);
+		state.previews = state.previews.filter(preview => preview.expiresAt > Date.now());
+		const result = edit(state);
+		writeJsonFile(path.join(directory, "approvals.json"), state);
+		for (const name of readdirSync(directory)) {
+			if (/^[a-f0-9]{64}\.json$/.test(name)) rmSync(path.join(directory, name), { force: true });
+		}
+		return result;
+	} finally { await lock.close(); }
+}
+
+export async function recordArchiveRecallPreview(
+	stateDir: string, owner: ArchiveRecallOwner, snapshot: ArchiveRecallSnapshot,
+	goal: string, runtimeHost: ArchiveRecallHost | null, packId: string
+): Promise<string> {
+	const sha256 = archiveRecallDigest(owner, snapshot, runtimeHost);
+	const preview: Preview = {
+		goal: goal.trim(), runtimeHost, packId, taskId: snapshot.taskId, sha256,
+		receipt: digest([sha256, packId, goal.trim(), randomUUID()]),
+		expiresAt: Date.now() + PREVIEW_TTL_MS,
+	};
+	return editApprovalState(approvalDirectory(stateDir, owner, snapshot.workspaceId), state => {
+		state.previews = [...state.previews.filter(other => !sameSlot(other, preview)), preview];
+		return preview.receipt;
 	});
 }
 
-const STOP_WORDS = new Set("again and can could for from have into look need please recall remember resume should task that the their this use want was were what when where which will with would you your".split(" "));
-const terms = (text: string) =>
-	new Set((text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter(term => !STOP_WORDS.has(term)));
+export function getArchiveRecallPreview(
+	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, packId: string, receipt: string
+): Preview {
+	const preview = readApprovalState(approvalDirectory(stateDir, owner, workspaceId)).previews.find(
+		item => item.packId === packId && item.receipt === receipt && item.expiresAt > Date.now());
+	if (!preview) throw new Error("Archive approval requires a current preview from this runtime. Preview the task again.");
+	return preview;
+}
+
+export async function approveArchiveRecall(
+	stateDir: string, owner: ArchiveRecallOwner, snapshot: ArchiveRecallSnapshot, preview: Preview
+): Promise<void> {
+	const directory = approvalDirectory(stateDir, owner, snapshot.workspaceId);
+	await editApprovalState(directory, state => {
+		if (!state.previews.some(item => item.receipt === preview.receipt)) {
+			throw new Error("The archive preview was superseded or already used. Preview the task again.");
+		}
+		if (archiveRecallDigest(owner, snapshot, preview.runtimeHost) !== preview.sha256) {
+			throw new Error("Archive recall digest changed. Preview the exact records again before approving.");
+		}
+		const { taskId, goal, runtimeHost, sha256 } = preview;
+		state.approvals = [...state.approvals.filter(item => !sameSlot(item, preview)), { taskId, goal, runtimeHost, sha256 }];
+		state.previews = state.previews.filter(item => item.receipt !== preview.receipt);
+	});
+}
+
+export async function revokeArchiveRecall(
+	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, taskId: string
+): Promise<void> {
+	await editApprovalState(approvalDirectory(stateDir, owner, workspaceId), state => {
+		const revoked = state.approvals.filter(item => item.taskId === taskId);
+		state.approvals = state.approvals.filter(item => item.taskId !== taskId);
+		state.previews = state.previews.filter(item => item.taskId !== taskId && !revoked.some(other => sameSlot(item, other)));
+	});
+}
+
+export function listArchiveRecallApprovals(stateDir: string, owner: ArchiveRecallOwner, workspaceId: string): Approval[] {
+	return readApprovalState(approvalDirectory(stateDir, owner, workspaceId)).approvals;
+}
+
 const declinesHistory = (goal: string): boolean =>
 	/\bself[- ]contained\b|\bno (?:saved|historical|prior|earlier) [^.\n]{0,90}\b(?:needed|apply)\b|\bdo not (?:retrieve|load|consult|use) (?:any )?(?:saved|historical|prior|earlier) (?:memory|context|requirements)\b|\busing only the provided specification\b/i.test(goal);
 
 export function findArchiveRecallApproval(
-	stateDir: string,
-	owner: ArchiveRecallOwner,
-	workspaceId: string,
-	goal: string,
+	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, goal: string, runtime: string
 ): Approval | null {
 	if (!goal.trim() || goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS || declinesHistory(goal)) return null;
-	const approvals = listArchiveRecallApprovals(stateDir, owner, workspaceId);
-	const exact = approvals.filter(approval => approval.goal === goal.trim());
-	if (exact.length) return exact.length === 1 ? exact[0]! : null;
-	const requestTerms = terms(goal);
-	const matches = approvals.filter(approval => {
-		const approvedTerms = terms(approval.goal);
-		const overlap = [...approvedTerms].filter(term => requestTerms.has(term)).length;
-		return overlap >= 2 && overlap * 2 >= approvedTerms.size;
-	});
+	const host = archiveRecallHost(runtime);
+	const exact = listArchiveRecallApprovals(stateDir, owner, workspaceId).filter(approval => approval.goal === goal.trim());
+	const hostMatches = host ? exact.filter(approval => approval.runtimeHost === host) : [];
+	const matches = hostMatches.length ? hostMatches : exact.filter(approval => approval.runtimeHost === null);
 	return matches.length === 1 ? matches[0]! : null;
 }
 
-export function verifyArchiveRecall(
-	owner: ArchiveRecallOwner,
-	approval: Approval,
-	snapshot: ArchiveRecallSnapshot,
-): boolean {
-	return approval.taskId === snapshot.taskId && approval.sha256 === archiveRecallDigest(owner, snapshot);
+export function verifyArchiveRecall(owner: ArchiveRecallOwner, approval: Approval, snapshot: ArchiveRecallSnapshot): boolean {
+	return approval.taskId === snapshot.taskId && approval.sha256 === archiveRecallDigest(owner, snapshot, approval.runtimeHost);
 }

@@ -111,6 +111,10 @@ export const hardenOmpExtensionSource = (source: string, pinnedRuntimeHome?: str
 		],
 		...(archiveRecall ? [
 			[
+				"  const match = content.match(/node\\s+[\"']([^\"']+\\/dist\\/runtime)\\/(?:cli|daemon)\\.js[\"']/);",
+				"  const match = content.match(/^(?:node|'[^'\\n]+')\\s+[\"']([^\"'\\n]+\\/dist\\/runtime)\\/(?:cli|daemon)\\.js[\"']\\s+\"\\$@\"$/m);",
+			],
+			[
 				[
 					"          goal: prompt,",
 					"          transcript,",
