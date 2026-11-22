@@ -6,7 +6,7 @@ import { FEATURE_GATE_DEFINITIONS } from "../../src/protocol/features";
 import { peerVerificationClaimDigest, validatePeerVerificationVerdict } from "../../src/protocol/peer-verification";
 import { validateTrustReceipt } from "../../src/protocol/trust";
 import { buildPeerVerificationVerdict, mintPeerVerificationReceipt, verifyPeerVerificationVerdict } from "../../src/runtime/peer-verification";
-import { verifyTrustReceiptSignature } from "../../src/runtime/trust-routing";
+import { inspectTrustGraph, signTrustReceiptPayload, verifyTrustReceiptSignature } from "../../src/runtime/trust-routing";
 
 const agent = (name: string) => {
 	const secret = generateSecretKey();
@@ -62,6 +62,8 @@ describe("peer verification verdicts", () => {
 		expect(() => buildPeerVerificationVerdict({ claim: claimBy(verifier.ref.npub), verifierNpub: verifier.ref.npub, nsec: verifier.nsec, outcome: "upheld", falsificationAttempts: [held], summary: "s" }))
 			.toThrow(/cannot verify its own claim/);
 		expect(validatePeerVerificationVerdict({})).not.toEqual([]);
+		const upper = buildPeerVerificationVerdict({ claim: claimBy(worker.ref.npub), verifierNpub: verifier.ref.npub, nsec: verifier.nsec, outcome: "upheld", falsificationAttempts: [held], summary: "s" });
+		expect(validatePeerVerificationVerdict({ ...upper, claimId: upper.claimId.toUpperCase() })).toContain("claimId must be a lowercase, hyphenated UUID");
 	});
 
 	it("binds the verdict to the claim's content but not to its status or evidence", () => {
@@ -88,6 +90,25 @@ describe("peer verification verdicts", () => {
 		expect(receipt.subject).toMatchObject({ subjectType: "agent", agentRef: { npub: worker.ref.npub } });
 		const inconclusive = buildPeerVerificationVerdict({ claim: claimBy(worker.ref.npub), verifierNpub: verifier.ref.npub, nsec: verifier.nsec, outcome: "inconclusive", falsificationAttempts: [], summary: "Could not reach CI." });
 		await expect(mintPeerVerificationReceipt({ verdict: inconclusive, verifier: verifier.ref as never, nsec: verifier.nsec })).rejects.toThrow(/inconclusive/);
+	});
+
+	it("no longer matches once the claim is marked stale", () => {
+		const claim = claimBy(worker.ref.npub);
+		expect(peerVerificationClaimDigest({ ...claim, staleAt: new Date("2026-11-22T00:00:00Z") })).not.toBe(peerVerificationClaimDigest(claim));
+		expect(peerVerificationClaimDigest({ ...claim, staleAt: "2026-11-22T00:00:00.000Z" })).toBe(peerVerificationClaimDigest({ ...claim, staleAt: new Date("2026-11-22T00:00:00Z") }));
+	});
+
+	it("builds no trust edge from a receipt whose signer is neither end of it", async () => {
+		const bystander = agent("bystander");
+		const verdict = buildPeerVerificationVerdict({ claim: claimBy(worker.ref.npub), verifierNpub: verifier.ref.npub, nsec: verifier.nsec, outcome: "upheld", falsificationAttempts: [held], summary: "ok" });
+		const honest = await mintPeerVerificationReceipt({ verdict, verifier: verifier.ref as never, nsec: verifier.nsec });
+		// Same receipt, re-signed by the verifier but naming a reputable third party as the counterparty.
+		const { payloadHash: _h, signature: _s, ...unsigned } = honest;
+		const forgedUnsigned = { ...unsigned, receiptId: `${honest.receiptId}_x`, counterparty: { subjectType: "agent" as const, agentRef: bystander.ref as never } };
+		const forged = { ...forgedUnsigned, ...(await signTrustReceiptPayload(forgedUnsigned, verifier.nsec)) };
+		const graph = await inspectTrustGraph({ trustReceipts: [honest, forged] });
+		expect(graph.trustEdges).toHaveLength(1);
+		expect(JSON.stringify(graph.trustEdges)).not.toContain(bystander.ref.npub);
 	});
 
 	it("stands in for evidence up to deploy traces, never for prod smoke or operator sign-off", () => {

@@ -239,10 +239,17 @@ const fetchHostedReceipts = async (
 	try {
 		const receipts: unknown[] = [];
 		for (const subjectNpub of subjects) {
-			const result = await session.client.listTrustReceipts({ subjectNpub, limit: 100 });
-			// Only receipts the server tied to a real settlement between the two agents count as history.
-			const stored = Array.isArray(result.stored) ? (result.stored as Array<Record<string, unknown>>) : [];
-			receipts.push(...extractTrustReceipts(stored.filter((row) => row.settlement_verified === true).map((row) => row.receipt)));
+			// Counted as history: receipts the server tied to a real settlement between the two agents, and receipts an
+			// appointed peer verifier signed with a verdict the server accepted. Each kind is fetched on its own, so
+			// one cannot crowd the other out of the window. Signatures are re-checked locally before ranking.
+			const deal = await session.client.listTrustReceipts({ subjectNpub, limit: 100, provenance: "deal" });
+			const dealRows = Array.isArray(deal.stored) ? (deal.stored as Array<Record<string, unknown>>) : [];
+			receipts.push(...extractTrustReceipts(dealRows.filter((row) => row.settlement_verified === true).map((row) => row.receipt)));
+			const peer = await session.client.listTrustReceipts({ subjectNpub, limit: 100, provenance: "peer" }).catch(() => ({ stored: [] }));
+			const peerRows = Array.isArray(peer.stored) ? (peer.stored as Array<Record<string, unknown>>) : [];
+			receipts.push(...extractTrustReceipts(peerRows
+				.filter((row) => row.peer_verified === true && (row.receipt_type === "claim_verified" || row.receipt_type === "claim_refuted"))
+				.map((row) => row.receipt)));
 		}
 		return receipts;
 	} finally {

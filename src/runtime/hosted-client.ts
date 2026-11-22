@@ -1177,9 +1177,11 @@ export class HostedOnlyBotsClient {
     return response.data;
   }
 
-  async listTrustReceipts(query: { subjectNpub: string; limit?: number }): Promise<Record<string, unknown>> {
+  /** `provenance` narrows to deal-settlement receipts or peer-verification receipts, so one kind cannot crowd out the other. */
+  async listTrustReceipts(query: { subjectNpub: string; limit?: number; provenance?: "deal" | "peer" }): Promise<Record<string, unknown>> {
     await this.ensureSession();
     const search = new URLSearchParams({ subject_npub: query.subjectNpub });
+    if (query.provenance) search.set("provenance", query.provenance);
     if (typeof query.limit === "number" && query.limit > 0) search.set("limit", String(Math.trunc(query.limit)));
     const response = await this.request<Record<string, unknown>>(`/trust/receipts?${search.toString()}`, {
       method: "GET",

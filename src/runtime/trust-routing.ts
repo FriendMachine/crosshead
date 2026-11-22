@@ -556,8 +556,16 @@ const relationshipForReceipt = (receipt: TrustReceipt): TrustEdge["relationshipT
 	return receipt.evidence.handoffRef ? "delegated_to" : "worked_with";
 };
 
+const agentNpubOf = (subject: TrustSubjectRef | null): string | null =>
+	subject?.subjectType === "agent" ? subject.agentRef.npub : null;
+
 const selectEdgeDirection = (receipt: TrustReceipt): { source: TrustSubjectRef; target: TrustSubjectRef } | null => {
 	if (!receipt.counterparty) {
+		return null;
+	}
+	// A receipt only speaks for its signer: it must be one end of the edge. Otherwise a signer could name a reputable
+	// third party as the counterparty and have the graph record that party vouching for the subject.
+	if (agentNpubOf(receipt.subject) !== receipt.signedByNpub && agentNpubOf(receipt.counterparty) !== receipt.signedByNpub) {
 		return null;
 	}
 	if (receipt.receiptType === "correction_confirmed") {

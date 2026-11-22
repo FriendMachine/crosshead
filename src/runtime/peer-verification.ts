@@ -48,7 +48,7 @@ export const agentRefForNpub = (npub: string): PersistentAgentReference => {
 
 /** Builds and signs a verdict about `claim` as the verifier holding `nsec`. Throws if the verdict breaks the falsifier rules. */
 export const buildPeerVerificationVerdict = (input: {
-	claim: Pick<ContinuityClaim, "id" | "npub" | "kind" | "subject" | "statement" | "scope" | "verificationPlan">;
+	claim: Pick<ContinuityClaim, "id" | "npub" | "kind" | "subject" | "statement" | "scope" | "verificationPlan"> & { staleAt?: Date | string | null };
 	verifierNpub: string;
 	nsec: string;
 	outcome: PeerVerificationOutcome;

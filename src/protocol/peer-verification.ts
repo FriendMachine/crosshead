@@ -56,6 +56,8 @@ export type PeerVerificationVerdict = UnsignedPeerVerificationVerdict & {
 };
 
 const VERDICT_ID_PATTERN = /^peer_verdict_[a-f0-9]{32}$/;
+/** Claim IDs in canonical form only: Postgres accepts other spellings of one UUID, which would dodge per-claim locks and IDs. */
+export const CANONICAL_CLAIM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const NPUB_PATTERN = /^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$/;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const SIGNATURE_PATTERN = /^[a-f0-9]{128}$/;
@@ -78,11 +80,11 @@ export const peerVerificationReceiptId = (verdictId: string, receiptType: "claim
 
 /**
  * Digest of what a claim asserts. A verdict names it, so a verdict cannot be applied to a claim whose content changed
- * after the verifier looked. Status, authority, timestamps and evidence are excluded: they change as the claim is
- * worked on, and the verifier inspects the evidence it cites itself.
+ * after the verifier looked, or to a claim marked stale since. Status, authority, other timestamps and evidence are
+ * excluded: they change as the claim is worked on, and the verifier inspects the evidence it cites itself.
  */
 export const peerVerificationClaimDigest = (
-	claim: Pick<ContinuityClaim, "id" | "npub" | "kind" | "subject" | "statement" | "scope" | "verificationPlan">
+	claim: Pick<ContinuityClaim, "id" | "npub" | "kind" | "subject" | "statement" | "scope" | "verificationPlan"> & { staleAt?: Date | string | null }
 ): string =>
 	`sha256:${sha256Hex(canonicalJson({
 		id: claim.id,
@@ -99,6 +101,8 @@ export const peerVerificationClaimDigest = (
 			tags: [...(claim.scope?.tags ?? [])].sort(),
 		},
 		requiredEvidence: [...(claim.verificationPlan?.requiredEvidence ?? [])].sort(),
+		// Marking a claim stale (say, after a rollback) changes the digest, so verdicts made before that no longer apply.
+		staleAt: claim.staleAt ? new Date(claim.staleAt).toISOString() : null,
 	}))}`;
 
 /** The bytes a verifier signs: the canonical JSON of every field except the hash and signature. */
@@ -137,7 +141,7 @@ export const validatePeerVerificationVerdict = (value: unknown): string[] => {
 	if (extra.length > 0) errors.push(`unknown verdict fields: ${extra.join(", ")}`);
 	if (value.schemaVersion !== PEER_VERIFICATION_VERDICT_SCHEMA_VERSION) errors.push(`schemaVersion must be ${PEER_VERIFICATION_VERDICT_SCHEMA_VERSION}`);
 	if (typeof value.verdictId !== "string" || !VERDICT_ID_PATTERN.test(value.verdictId)) errors.push("verdictId must be a peer_verdict_ id");
-	text(value.claimId, "claimId", errors, 128);
+	if (typeof value.claimId !== "string" || !CANONICAL_CLAIM_ID_PATTERN.test(value.claimId)) errors.push("claimId must be a lowercase, hyphenated UUID");
 	for (const field of ["claimOwnerNpub", "subjectNpub", "verifierNpub"] as const) {
 		if (typeof value[field] !== "string" || !NPUB_PATTERN.test(value[field] as string)) errors.push(`${field} must be an npub`);
 	}
