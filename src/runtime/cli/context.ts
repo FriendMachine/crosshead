@@ -31,13 +31,14 @@ export const contextFromCli = async (argv: string[]): Promise<string> => {
 		if (action === "preview" && typeof flags.goal === "string") {
 			result = await daemon.manageArchiveRecall(workspaceId, { kind: "preview", goal: flags.goal, runtimeHost }, archiveProfile);
 		} else if (action === "approve" && typeof flags["pack-id"] === "string" && typeof flags.sha256 === "string") {
-			result = await daemon.manageArchiveRecall(workspaceId, { kind: "approve", packId: flags["pack-id"], sha256: flags.sha256 }, archiveProfile);
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "approve", packId: flags["pack-id"], sha256: flags.sha256, runtimeHost: runtimeHost ?? undefined }, archiveProfile);
 		} else if (action === "list") {
 			result = await daemon.manageArchiveRecall(workspaceId, { kind: "list" }, archiveProfile);
-		} else if (action === "revoke" && typeof flags.task === "string") {
-			result = await daemon.manageArchiveRecall(workspaceId, { kind: "revoke", taskId: flags.task }, archiveProfile);
+		} else if (action === "revoke" && (typeof flags.task === "string") !== (flags.all === true)) {
+			const taskId = typeof flags.task === "string" ? flags.task : null;
+			result = await daemon.manageArchiveRecall(workspaceId, { kind: "revoke", taskId }, archiveProfile);
 		} else {
-			throw new Error('Use context recall preview --goal "<task>" [--host <host>], approve --pack-id <id> --sha256 <digest>, list, or revoke --task <id>');
+			throw new Error('Use context recall preview --goal "<task>" [--host <host>], approve --pack-id <id> --sha256 <digest> [--host <host>], list, or revoke (--task <id>|--all)');
 		}
 		return JSON.stringify(result, null, 2);
 	}

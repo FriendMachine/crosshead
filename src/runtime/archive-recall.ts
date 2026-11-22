@@ -23,11 +23,20 @@ export type ArchiveRecallSnapshot = {
 export type ArchiveRecallOwner = { name: string; apiBase: string; npub: string };
 const HOSTS = ["codex", "claude-code", "agy", "hermes", "opencode", "pi"] as const;
 export type ArchiveRecallHost = (typeof HOSTS)[number];
-type Approval = { taskId: string; goal: string; sha256: string; runtimeHost: ArchiveRecallHost | null };
+const SOURCE_KINDS = ["warm_memory", "cold_memory"] as const;
+type Approval = {
+	taskId: string;
+	goal: string;
+	sha256: string;
+	runtimeHost: ArchiveRecallHost | null;
+	sourceKinds?: ArchiveSource["kind"][];
+};
 type Preview = Approval & { packId: string; receipt: string; expiresAt: number };
 type ApprovalState = { version: typeof VERSION; approvals: Approval[]; previews: Preview[] };
 // Matches the hosted context-pack retention window.
 const PREVIEW_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const INVALID_APPROVALS = "Invalid local archive approvals. Run context recall revoke --all for this workspace and profile to clear them.";
+const emptyApprovalState = (): ApprovalState => ({ version: VERSION, approvals: [], previews: [] });
 
 export function archiveRecallHost(value: unknown): ArchiveRecallHost | null {
 	const host = value === "omp" ? "pi" : value;
@@ -101,7 +110,9 @@ const validApproval = (value: unknown): value is Approval => {
 	return Boolean(approval && typeof approval.taskId === "string" && approval.taskId.trim() &&
 		typeof approval.goal === "string" && approval.goal.length <= MAX_ARCHIVE_RECALL_GOAL_CHARS && approval.goal.trim() &&
 		typeof approval.sha256 === "string" && SHA256.test(approval.sha256) &&
-		(approval.runtimeHost === null || archiveRecallHost(approval.runtimeHost) === approval.runtimeHost));
+		(approval.runtimeHost === null || archiveRecallHost(approval.runtimeHost) === approval.runtimeHost) &&
+		(approval.sourceKinds === undefined || (Array.isArray(approval.sourceKinds) && approval.sourceKinds.length > 0 &&
+			approval.sourceKinds.every(kind => SOURCE_KINDS.some(allowed => allowed === kind)))));
 };
 
 function readApprovalState(directory: string): ApprovalState {
@@ -111,10 +122,11 @@ function readApprovalState(directory: string): ApprovalState {
 		if (state?.version !== VERSION || !Array.isArray(state.approvals) || !state.approvals.every(validApproval) ||
 			!Array.isArray(state.previews) || !state.previews.every(preview => validApproval(preview) &&
 				archivePackId(preview.packId) && SHA256.test(preview.receipt) && Number.isFinite(preview.expiresAt))) {
-			throw new Error("Invalid local archive approvals");
+			throw new Error(INVALID_APPROVALS);
 		}
 		return state;
 	} catch (error) {
+		if (error instanceof SyntaxError) throw new Error(INVALID_APPROVALS);
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	// Preserve approvals made before the per-goal store existed. The next edit migrates them.
@@ -138,10 +150,12 @@ function readApprovalState(directory: string): ApprovalState {
 const sameSlot = (left: Approval, right: Approval): boolean =>
 	left.goal === right.goal && left.runtimeHost === right.runtimeHost;
 
-async function editApprovalState<T>(directory: string, edit: (state: ApprovalState) => T): Promise<T> {
+async function editApprovalState<T>(
+	directory: string, edit: (state: ApprovalState) => T, reset = false
+): Promise<T> {
 	const lock = await acquireWorkspaceSetupKernelLock(directory);
 	try {
-		const state = readApprovalState(directory);
+		const state = reset ? emptyApprovalState() : readApprovalState(directory);
 		state.previews = state.previews.filter(preview => preview.expiresAt > Date.now());
 		const result = edit(state);
 		writeJsonFile(path.join(directory, "approvals.json"), state);
@@ -159,6 +173,7 @@ export async function recordArchiveRecallPreview(
 	const sha256 = archiveRecallDigest(owner, snapshot, runtimeHost);
 	const preview: Preview = {
 		goal: goal.trim(), runtimeHost, packId, taskId: snapshot.taskId, sha256,
+		sourceKinds: [...new Set(snapshot.sources.map(source => source.kind))],
 		receipt: digest([sha256, packId, goal.trim(), randomUUID()]),
 		expiresAt: Date.now() + PREVIEW_TTL_MS,
 	};
@@ -188,20 +203,21 @@ export async function approveArchiveRecall(
 		if (archiveRecallDigest(owner, snapshot, preview.runtimeHost) !== preview.sha256) {
 			throw new Error("Archive recall digest changed. Preview the exact records again before approving.");
 		}
-		const { taskId, goal, runtimeHost, sha256 } = preview;
-		state.approvals = [...state.approvals.filter(item => !sameSlot(item, preview)), { taskId, goal, runtimeHost, sha256 }];
+		const { taskId, goal, runtimeHost, sha256, sourceKinds } = preview;
+		state.approvals = [...state.approvals.filter(item => !sameSlot(item, preview)), { taskId, goal, runtimeHost, sha256, sourceKinds }];
 		state.previews = state.previews.filter(item => item.receipt !== preview.receipt);
 	});
 }
 
 export async function revokeArchiveRecall(
-	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, taskId: string
+	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, taskId: string | null
 ): Promise<void> {
 	await editApprovalState(approvalDirectory(stateDir, owner, workspaceId), state => {
+		if (taskId === null) return;
 		const revoked = state.approvals.filter(item => item.taskId === taskId);
 		state.approvals = state.approvals.filter(item => item.taskId !== taskId);
 		state.previews = state.previews.filter(item => item.taskId !== taskId && !revoked.some(other => sameSlot(item, other)));
-	});
+	}, taskId === null);
 }
 
 export function listArchiveRecallApprovals(stateDir: string, owner: ArchiveRecallOwner, workspaceId: string): Approval[] {
@@ -220,6 +236,12 @@ export function findArchiveRecallApproval(
 	const hostMatches = host ? exact.filter(approval => approval.runtimeHost === host) : [];
 	const matches = hostMatches.length ? hostMatches : exact.filter(approval => approval.runtimeHost === null);
 	return matches.length === 1 ? matches[0]! : null;
+}
+
+export function archiveApprovalFitsScope(approval: Approval, scope: Record<string, unknown>): boolean {
+	// Older approvals lack a tier list, so only use them when both tiers are allowed.
+	return (approval.sourceKinds ?? SOURCE_KINDS).every(kind =>
+		(kind === "warm_memory" ? scope.includeWarmMemory : scope.includeColdMemory) === true);
 }
 
 export function verifyArchiveRecall(owner: ArchiveRecallOwner, approval: Approval, snapshot: ArchiveRecallSnapshot): boolean {

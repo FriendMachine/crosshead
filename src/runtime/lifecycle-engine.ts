@@ -1,5 +1,5 @@
 import {
-  ARCHIVE_RECALL_BUDGET, archivePackId, findArchiveRecallApproval, readArchiveRecallSnapshot,
+  ARCHIVE_RECALL_BUDGET, archiveApprovalFitsScope, archivePackId, findArchiveRecallApproval, readArchiveRecallSnapshot,
   renderArchiveRecall, verifyArchiveRecall,
 } from "./archive-recall";
 import { getHotSyncManager, hotSyncEnabled, tickHotSyncManagers } from "./hot-sync-manager";
@@ -2303,7 +2303,7 @@ export class RuntimeLifecycleManager {
 		const workspaceId = event.workspaceId;
 		if (!workspaceId) return;
 
-		let attempted = false;
+		let attemptedProfile: string | null = null;
 		let packId: string | null = null;
 		let verified = false;
 		let failure: ReturnType<typeof describeHostedFailure> | undefined;
@@ -2316,10 +2316,10 @@ export class RuntimeLifecycleManager {
 			const scope = asRecord(request?.allowedScope);
 			if (!goal || !scope || governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
 			const approval = findArchiveRecallApproval(this.deps.paths.state, profile, workspaceId, goal, event.runtime);
-			if (!approval) return;
+			if (!approval || !archiveApprovalFitsScope(approval, scope)) return;
 
 			const client = this.buildClient(profile, secret);
-			attempted = true;
+			attemptedProfile = profileName;
 			const hosted = await client.requestArchiveRecall({
 				goal,
 				workspaceId,
@@ -2358,21 +2358,25 @@ export class RuntimeLifecycleManager {
 			failure = describeHostedFailure(error);
 			response.warnings.push(describeBoundedRecallFallback(error));
 		} finally {
-			if (attempted) {
-				response.actions.push(this.recordAction({
-					eventId: event.eventId,
-					profileName: event.profileName,
-					type: "context_pack",
-					status: failure ? "failed" : "completed",
-					mode: response.mode,
-					reason: verified ? "Verified archive recall against a local approval" : "Hosted archive recall withheld",
-					queueItemId: null,
-					details: {
-						...(packId ? { packId } : {}),
-						verifiedArchiveRecall: verified,
-						...(failure ? { failure } : {}),
-					},
-				}));
+			if (attemptedProfile) {
+				try {
+					response.actions.push(this.recordAction({
+						eventId: event.eventId,
+						profileName: attemptedProfile,
+						type: "context_pack",
+						status: failure ? "failed" : "completed",
+						mode: response.mode,
+						reason: verified ? "Verified archive recall against a local approval" : "Hosted archive recall withheld",
+						queueItemId: null,
+						details: {
+							...(packId ? { packId } : {}),
+							verifiedArchiveRecall: verified,
+							...(failure ? { failure } : {}),
+						},
+					}));
+				} catch {
+					response.warnings.push("Could not record the hosted archive recall result locally.");
+				}
 			}
 		}
 	}

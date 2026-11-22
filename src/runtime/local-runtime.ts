@@ -2678,8 +2678,8 @@ export class OnlyBotsLocalRuntimeDaemon {
 
 	async manageArchiveRecall(
 		workspaceId: string,
-		operation: { kind: "preview"; goal: string; runtimeHost: ArchiveRecallHost | null } | { kind: "approve"; packId: string; sha256: string } |
-			{ kind: "list" } | { kind: "revoke"; taskId: string },
+		operation: { kind: "preview"; goal: string; runtimeHost: ArchiveRecallHost | null } | { kind: "approve"; packId: string; sha256: string; runtimeHost?: ArchiveRecallHost } |
+			{ kind: "list" } | { kind: "revoke"; taskId: string | null },
 		profileName?: string,
 	): Promise<Record<string, unknown>> {
 		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
@@ -2691,7 +2691,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		}
 		if (operation.kind === "revoke") {
 			await revokeArchiveRecall(this.paths.state, profile, workspaceId, operation.taskId);
-			return { workspaceId, revoked: operation.taskId };
+			return { workspaceId, revoked: operation.taskId ?? "all" };
 		}
 
 		const { governorState } = loadEffectiveContinuityGovernorState(this.paths);
@@ -2702,6 +2702,9 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const preview = operation.kind === "approve"
 			? getArchiveRecallPreview(this.paths.state, profile, workspaceId, operation.packId, operation.sha256)
 			: null;
+		if (operation.kind === "approve" && operation.runtimeHost && preview?.runtimeHost !== operation.runtimeHost) {
+			throw new Error("The archive preview belongs to a different host");
+		}
 		const goal = operation.kind === "preview" ? operation.goal.trim() : preview!.goal;
 		if (!goal || goal.length > MAX_ARCHIVE_RECALL_GOAL_CHARS) {
 			throw new Error("Provide a task description of up to 8192 characters");

@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -341,8 +341,8 @@ describe("verified recall through native prompt preparation", () => {
 			"recall", ...argv, "--home", home, "--workspace-root", home,
 		]));
 		const preview = (...args: string[]) => command("preview", "--goal", goal, ...args);
-		const approve = ({ packId, sha256 }: { packId: string; sha256: string }) =>
-			command("approve", "--pack-id", packId, "--sha256", sha256);
+		const approve = ({ packId, sha256 }: { packId: string; sha256: string }, ...args: string[]) =>
+			command("approve", "--pack-id", packId, "--sha256", sha256, ...args);
 
 		const baseline = await prepare("unapproved");
 		expect(baseline.contextText).toContain(hot);
@@ -375,8 +375,7 @@ describe("verified recall through native prompt preparation", () => {
 			runtime, type: "turn.started", workspaceId, sessionId: "session", turnId: "archive-scope-cold-denied",
 			payload: { goal, recallPolicy: "bounded", allowed_scope: { include_cold_memory: false } },
 		});
-		const posted = fetcher.mock.calls.at(-1)?.[1]?.body;
-		expect(JSON.parse(String(posted)).allowedScope.includeColdMemory).toBe(false);
+		expect(fetcher.mock.calls).toHaveLength(beforeDenied);
 		expect(coldDenied.contextPack?.verifiedArchiveContext).toBeUndefined();
 		expect(coldDenied.contextPack?.packId).toBeNull();
 
@@ -388,6 +387,7 @@ describe("verified recall through native prompt preparation", () => {
 		expect(withheld.contextText).toBe(baseline.contextText);
 		expect(withheld.packId).toBeNull();
 		expect((await daemon.readActivity(100)).actions).toContainEqual(expect.objectContaining({
+			profileName: "default",
 			details: expect.objectContaining({ packId: previewPackId, verifiedArchiveRecall: false }),
 		}));
 		sources = [cold, warm];
@@ -413,7 +413,10 @@ describe("verified recall through native prompt preparation", () => {
 		expect((await prepare("foreign", goal, path.join(home, "different-workspace"))).contextText).not.toContain(cold.content);
 		expect(fetcher.mock.calls.length).toBe(calls);
 
-		await approve(await preview("--host", runtime));
+		const hostPreview = await preview("--host", runtime);
+		const otherHost = runtime === "codex" ? "claude-code" : "codex";
+		await expect(approve(hostPreview, "--host", otherHost)).rejects.toThrow("belongs to a different host");
+		await approve(hostPreview, "--host", runtime);
 		expect((await prepare("host-scoped")).contextText).toContain(warm.content);
 		expect(requestHosts.slice(-2)).toEqual([runtime, runtime]);
 		let release!: () => void;
@@ -431,9 +434,26 @@ describe("verified recall through native prompt preparation", () => {
 			release?.();
 		}
 		expect((await inFlight).contextText).toBe(baseline.contextText);
+		whenRequested = undefined;
 		expect((await command("list")).approvals).toEqual([
 			expect.objectContaining({ taskId: "recall-task:payment-retry-v2", runtimeHost: null }),
 		]);
+
+		if (runtime === "codex") {
+			const store = path.join(resolveRuntimePaths(home).state, "archive-recall");
+			const [directory] = readdirSync(store);
+			writeFileSync(path.join(store, directory!, "approvals.json"), "{bad");
+			await expect(command("list")).rejects.toThrow("revoke --all");
+			expect(await command("revoke", "--all")).toMatchObject({ revoked: "all" });
+			expect((await command("list")).approvals).toEqual([]);
+			sources = [warm];
+			await approve(await preview());
+			const warmOnly = await daemon.submitLifecycleEvent({
+				runtime, type: "turn.started", workspaceId, sessionId: "session", turnId: "archive-scope-warm-only",
+				payload: { goal, recallPolicy: "bounded", allowed_scope: { include_cold_memory: false } },
+			});
+			expect(warmOnly.contextPack?.verifiedArchiveContext).toContain(warm.content);
+		}
 	});
 });
 
