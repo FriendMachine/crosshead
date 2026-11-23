@@ -115,11 +115,25 @@ export const DEFAULT_CONTINUITY_CLAIM_REQUIRED_EVIDENCE: Record<
 	blocker: ["operator_signoff"],
 };
 
+/**
+ * The exact tree a claim is about. When a claim declares one, evidence of a kind that names a revision (commit,
+ * pipeline, deploy trace) counts only if it names the same commit (or the same tree). Without it, evidence for
+ * different commits could together verify a claim that no single tree satisfies.
+ */
+export type ContinuityClaimRevision = {
+	repo?: string | null;
+	commitSha: string;
+	treeSha?: string | null;
+	targetRef?: string | null;
+	targetTipSha?: string | null;
+};
+
 export type ContinuityClaimSubject = {
 	type: "task" | "commitment" | "implementation" | "deployment" | "verification" | "blocker" | "memory" | "other";
 	ref: string;
 	title?: string | null;
 	metadata?: Record<string, unknown> | null;
+	revision?: ContinuityClaimRevision | null;
 };
 
 export type ContinuityClaimScope = {
@@ -250,6 +264,8 @@ export type ContinuityClaimVerificationResult = {
 	verified: boolean;
 	missingEvidence: ContinuityClaimEvidenceKind[];
 	nonVerifyingEvidence: ContinuityClaimEvidenceKind[];
+	/** Evidence not counted because it names a different revision than the claim declares. */
+	revisionMismatches?: Array<{ evidenceId: Uuid; kind: ContinuityClaimEvidenceKind; reason: string }>;
 };
 
 /**
@@ -260,3 +276,58 @@ export type ContinuityClaimVerificationResult = {
 export const peerVerificationSatisfiesEvidence = (kind: ContinuityClaimEvidenceKind): boolean =>
 	kind === "peer_verification" ||
 	CONTINUITY_CLAIM_AUTHORITY_RANK[CONTINUITY_CLAIM_EVIDENCE_AUTHORITY[kind]] <= CONTINUITY_CLAIM_AUTHORITY_RANK.deploy;
+
+/** Evidence kinds that are about one revision and must match a claim's declared revision. */
+export const CONTINUITY_CLAIM_REVISION_EVIDENCE_KINDS: ContinuityClaimEvidenceKind[] = ["git_commit", "ci_pipeline", "deploy_trace"];
+
+const GIT_OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const gitObject = (value: unknown): string | null =>
+	typeof value === "string" && GIT_OBJECT.test(value.trim().toLowerCase()) ? value.trim().toLowerCase() : null;
+const shortText = (value: unknown, max: number): string | null =>
+	typeof value === "string" && value.trim() && value.trim().length <= max ? value.trim() : null;
+
+/**
+ * A claim revision in canonical form, `null` when absent, or an error message when present but invalid. Commit and
+ * tree IDs are full SHA-1 or SHA-256 hex, so abbreviations cannot match the wrong object.
+ */
+export const normalizeContinuityClaimRevision = (value: unknown): ContinuityClaimRevision | null | { error: string } => {
+	if (value === undefined || value === null) return null;
+	if (typeof value !== "object" || Array.isArray(value)) return { error: "subject.revision must be an object" };
+	const item = value as Record<string, unknown>;
+	const commitSha = gitObject(item.commitSha);
+	if (!commitSha) return { error: "subject.revision.commitSha must be a full 40- or 64-character hex commit ID" };
+	for (const key of ["treeSha", "targetTipSha"] as const) {
+		if (item[key] !== undefined && item[key] !== null && !gitObject(item[key])) return { error: `subject.revision.${key} must be a full hex object ID` };
+	}
+	for (const [key, max] of [["repo", 500], ["targetRef", 255]] as const) {
+		if (item[key] !== undefined && item[key] !== null && !shortText(item[key], max)) return { error: `subject.revision.${key} must be a non-empty string of at most ${max} characters` };
+	}
+	const known = new Set(["repo", "commitSha", "treeSha", "targetRef", "targetTipSha"]);
+	const unknown = Object.keys(item).find(key => !known.has(key));
+	if (unknown) return { error: `subject.revision.${unknown} is not a known field` };
+	return {
+		commitSha,
+		...(shortText(item.repo, 500) ? { repo: shortText(item.repo, 500) } : {}),
+		...(gitObject(item.treeSha) ? { treeSha: gitObject(item.treeSha) } : {}),
+		...(shortText(item.targetRef, 255) ? { targetRef: shortText(item.targetRef, 255) } : {}),
+		...(gitObject(item.targetTipSha) ? { targetTipSha: gitObject(item.targetTipSha) } : {}),
+	};
+};
+
+/**
+ * Whether one piece of evidence counts toward a claim with this revision. Evidence of other kinds always counts.
+ * Revision-bearing evidence must carry `metadata.commitSha` equal to the claim's commit, or `metadata.treeSha` equal to
+ * the claim's tree when the claim names one (a rebuilt or re-merged commit with the same tree).
+ */
+export const continuityClaimEvidenceMatchesRevision = (
+	revision: ContinuityClaimRevision | null | undefined,
+	evidence: Pick<ContinuityClaimEvidence, "kind" | "metadata">,
+): { matches: true } | { matches: false; reason: string } => {
+	if (!revision || !(CONTINUITY_CLAIM_REVISION_EVIDENCE_KINDS as readonly string[]).includes(evidence.kind)) return { matches: true };
+	const commit = gitObject(evidence.metadata?.commitSha);
+	const tree = gitObject(evidence.metadata?.treeSha);
+	if (commit === revision.commitSha) return { matches: true };
+	if (revision.treeSha && tree === revision.treeSha) return { matches: true };
+	if (!commit && !tree) return { matches: false, reason: `${evidence.kind} evidence names no commit; the claim is about ${revision.commitSha}` };
+	return { matches: false, reason: `${evidence.kind} evidence is for ${commit ?? `tree ${tree}`}, not the claim's ${revision.commitSha}` };
+};

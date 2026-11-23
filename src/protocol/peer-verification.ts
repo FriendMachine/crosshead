@@ -90,7 +90,8 @@ export const peerVerificationClaimDigest = (
 		id: claim.id,
 		npub: claim.npub,
 		kind: claim.kind,
-		subject: { type: claim.subject.type, ref: claim.subject.ref },
+		// A revision is included only when declared, so digests of claims without one (and verdicts on them) are unchanged.
+		subject: { type: claim.subject.type, ref: claim.subject.ref, ...(claim.subject.revision ? { revision: claim.subject.revision } : {}) },
 		statement: claim.statement,
 		scope: {
 			workspaceId: claim.scope?.workspaceId ?? null,

@@ -52,6 +52,18 @@ For `upheld` and `refuted`, the verifier also signs a trust receipt about the su
 `claim_refuted`, minted by `mintPeerVerificationReceipt`). The server stores it with the verdict. Trust routing weighs
 `claim_verified` at +16 and `claim_refuted` at −26.
 
+## Claims about one revision
+
+A claim may declare `subject.revision`: the full commit ID it is about, and
+optionally its tree ID, repository and target ref. For such a claim, evidence of
+kind `git_commit`, `ci_pipeline` or `deploy_trace` counts only if its
+`metadata.commitSha` is that commit, or its `metadata.treeSha` is the declared
+tree. A commit on one SHA and a passing pipeline on another no longer verify the
+claim together; the mismatch is reported with the missing evidence. The revision
+is part of the verdict digest only when declared, so digests of claims without
+one, and verdicts already given on them, are unchanged. Claims without a
+revision are checked as before.
+
 ## What "independent" means here
 
 The server checks that:
