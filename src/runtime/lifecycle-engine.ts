@@ -16,7 +16,8 @@ import { COLLABORATION_EVENT_PRIORITIES } from "../protocol/collaboration";
 import { DURABLE_INBOX_STATUSES, DURABLE_INBOX_TERMINAL_STATUSES } from "../protocol/inbox";
 import { HOT_SCOPE_ALL } from "../protocol/memory";
 import { HANDOFF_IMPORT_COMMAND, IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
-import { captureHotFinding, HOT_TURN_IN_PROGRESS, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
+import { hotCheckpointUseKey, readHotUse } from "./hot-use";
+import { captureHotFinding, type HotCheckpointLastUsed, HOT_TURN_IN_PROGRESS, renderHotCheckpoints, selectHotCheckpoints, updateHotCheckpoints } from "./hot-continuity";
 import { normalizeTaskEvidence } from "./task-evidence";
 import {
   buildHotContextActionCue,
@@ -893,7 +894,8 @@ const boundedRecentEvents = (value: unknown, nextEntry: Record<string, unknown>)
 
 const buildHotState = (
   currentHot: Record<string, unknown>,
-  event: RuntimeLifecycleEvent
+  event: RuntimeLifecycleEvent,
+  lastUsed?: HotCheckpointLastUsed
 ): Record<string, unknown> => {
   const currentWorkspaceId = asString(currentHot.workspaceId) ?? asString(currentHot.workspace_id);
   const baseHot = event.workspaceId && currentWorkspaceId !== event.workspaceId ? {} : currentHot;
@@ -1015,7 +1017,7 @@ const buildHotState = (
 	...(explicitMemory ? { origin: "remember" as const } : {}),
 	summary: captureHotFinding(finding), occurredAt: event.occurredAt,
 	...(evidence ? { evidence } : {}),
-      });
+      }, lastUsed);
     }
   }
 
@@ -1607,6 +1609,12 @@ export class RuntimeLifecycleManager {
     }, this.workerIntervalMs);
   }
 
+  /** Local delivery times rank which history this machine keeps (see hot-use.ts). */
+  private hotCheckpointLastUsed(): HotCheckpointLastUsed {
+    const uses = readHotUse(this.deps.paths.state);
+    return entry => uses.get(hotCheckpointUseKey(entry)) ?? 0;
+  }
+
   async stop(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
@@ -1999,7 +2007,7 @@ export class RuntimeLifecycleManager {
 						const manager=getHotSyncManager({stateDir:this.deps.paths.state,origin:profile.apiBase,npub:profile.npub,nsec:secret.nsec,profileName});
 						const scope=workspaceHotScope(event.runtime,event.workspaceId) ?? "shared";
 						const current=parseStructuredHotState(String(manager.readWorkspace(event.runtime,event.workspaceId ?? "").content ?? ""));
-						const hot=buildHotState(current,event);
+						const hot=buildHotState(current,event,this.hotCheckpointLastUsed());
 						const checkpoints=Array.isArray(hot.continuityCheckpoints)?hot.continuityCheckpoints:[];
 						const last=checkpoints[checkpoints.length-1] as Record<string,unknown>|undefined;
 						// Each capture is a new synced record. One host Stop reports the same turn
@@ -2044,7 +2052,7 @@ export class RuntimeLifecycleManager {
 						(item): item is Extract<RuntimeQueueItem, { kind: "hot_write" }> =>
 							item.kind === "hot_write" && item.profileName === event.profileName && item.payload.scope === scope && item.workspaceId === event.workspaceId
 					);
-					const hotState = buildHotState(pending?.payload.hotState ?? currentHot, event);
+					const hotState = buildHotState(pending?.payload.hotState ?? currentHot, event, this.hotCheckpointLastUsed());
 					const queued = this.enqueueHotWrite(state, event, hotState, {
 						immediate: event.type === "compact.started" || event.type === "compact.completed",
 					});

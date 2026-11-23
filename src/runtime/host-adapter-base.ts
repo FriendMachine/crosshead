@@ -9,7 +9,8 @@ import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, hotCheckpointDigest, type Hot
 import { readSessionDelivery, recordSessionDelivery } from "./hook-session-context";
 import { readWorkspaceGitState } from "./workspace-state";
 import { CHECKPOINT_PAGE_CHARS, inlineCheckpointPages, paginateCheckpoint, saveCheckpointPages } from "./checkpoint-pages";
-import { resolveRuntimeHome } from "./local-runtime";
+import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
+import { hotCheckpointUseKey, recordHotUse } from "./hot-use";
 import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, withWorkspaceState, type TaskEvidence } from "./task-evidence";
 import type { LocalRuntimeClient } from "./local-client";
 import {
@@ -278,6 +279,8 @@ export abstract class HostRuntimeAdapterBase {
     record(items.map(item => item.mode === "full" ? item.full : item.pointer));
     if (!items.length) return { text: selected.length ? "" : undefined, refresh };
     const full = items.filter(item => item.mode === "full").map(item => item.entry);
+    // Delivered checkpoints count as used, so local retention keeps them ahead of idle history.
+    recordHotUse(ensureRuntimeHomeLayout(home!).state, full.map(hotCheckpointUseKey));
     const pointers = items.filter(item => item.mode === "pointer").map(item => {
       let read: string | null = null;
       if (command) {
