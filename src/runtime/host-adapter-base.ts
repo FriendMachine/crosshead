@@ -5,11 +5,12 @@ export { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { existsSync } from "fs";
 import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
 import path from "path";
-import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, hotCheckpointDigest, renderHotCheckpointPointer, renderHotCheckpoints, selectHotCheckpoints, type SelectedHotCheckpoint } from "./hot-continuity";
+import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, hotCheckpointDigest, type HotRenderWorkspace, renderHotCheckpointPointer, renderHotCheckpoints, selectHotCheckpoints, type SelectedHotCheckpoint } from "./hot-continuity";
 import { readSessionDelivery, recordSessionDelivery } from "./hook-session-context";
+import { readWorkspaceGitState } from "./workspace-state";
 import { CHECKPOINT_PAGE_CHARS, inlineCheckpointPages, paginateCheckpoint, saveCheckpointPages } from "./checkpoint-pages";
 import { resolveRuntimeHome } from "./local-runtime";
-import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
+import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, withWorkspaceState, type TaskEvidence } from "./task-evidence";
 import type { LocalRuntimeClient } from "./local-client";
 import {
   appendVerifiedArchiveContext,
@@ -209,7 +210,7 @@ export abstract class HostRuntimeAdapterBase {
     // this turn. Never inspect tool output when automatic memory is disabled.
     const status = await this.client.status(this.config.profileName).catch(() => null);
     if (status?.profile?.memoryMode !== "auto" && status?.profile?.memoryMode !== "assist") return undefined;
-    return readTaskEvidence(file, sessionId, workspaceRoot, since, goal ?? "");
+    return withWorkspaceState(readTaskEvidence(file, sessionId, workspaceRoot, since, goal ?? ""), readWorkspaceGitState(workspaceRoot));
   }
 
   /** This host's Crosshead command, or null when no wrapper is installed (other hosts). */
@@ -243,7 +244,7 @@ export abstract class HostRuntimeAdapterBase {
    * reduced to a one-line pointer. `refresh` is true when the session holds no
    * earlier delivery: its first prompt, or the first after compaction.
    */
-  protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean, sessionId?: string): { text: string | undefined; refresh: boolean } {
+  protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean, sessionId?: string, workspaceRoot?: string): { text: string | undefined; refresh: boolean } {
     const home = this.config.runtimeHome;
     const host = this.identity.runtimeId as string;
     const tracked = Boolean(home && sessionId && (host === "claude-code" || host === "codex"));
@@ -254,9 +255,16 @@ export abstract class HostRuntimeAdapterBase {
     };
     const command = this.bridgeCommand();
     const selected = selectHotCheckpoints(snapshot, prompt, this.config.workspaceOnly ? workspaceId : undefined);
+    // Compare saved git state with this tree only when a checkpoint carries some, and only once.
+    let here: HotRenderWorkspace | undefined | null = null;
+    const where = (): HotRenderWorkspace | undefined => {
+      if (here === null) here = workspaceRoot && selected.some(entry => entry.evidence?.workspace || entry.evidence?.sources.length)
+        ? { root: workspaceRoot, git: readWorkspaceGitState(workspaceRoot) } : undefined;
+      return here;
+    };
     if (!tracked) {
       if (!command || !home || !selected.length) return { text: undefined, refresh };
-      return { text: this.renderSelectedHotContext(selected, workspaceId, sessionStart, command, home), refresh };
+      return { text: this.renderSelectedHotContext(selected, workspaceId, sessionStart, command, home, where()), refresh };
     }
     const delivered = refresh ? new Set<string>() : delivery!.delivered;
     const items = selected.map(entry => {
@@ -273,19 +281,19 @@ export abstract class HostRuntimeAdapterBase {
     const pointers = items.filter(item => item.mode === "pointer").map(item => {
       let read: string | null = null;
       if (command) {
-        const pages = paginateCheckpoint(renderHotCheckpoints([item.entry], HOT_FULL_RENDER_LIMIT));
+        const pages = paginateCheckpoint(renderHotCheckpoints([item.entry], HOT_FULL_RENDER_LIMIT, where()));
         read = `${command.replace("%PAGE%", " 1")} --key ${saveCheckpointPages(home!, host, workspaceId, pages)}`;
       }
       return renderHotCheckpointPointer(item.entry, read);
     });
     const body = !full.length ? "" : command
-      ? this.renderSelectedHotContext(full, workspaceId, sessionStart, command, home!)
-      : renderHotCheckpoints(full, HOT_CONTEXT_LIMIT);
+      ? this.renderSelectedHotContext(full, workspaceId, sessionStart, command, home!, where())
+      : renderHotCheckpoints(full, HOT_CONTEXT_LIMIT, where());
     return { text: [body, ...pointers].filter(Boolean).join("\n"), refresh };
   }
 
-  private renderSelectedHotContext(selected: SelectedHotCheckpoint[], workspaceId: string, sessionStart: boolean, command: string, home: string): string {
-    const full = renderHotCheckpoints(selected, HOT_FULL_RENDER_LIMIT);
+  private renderSelectedHotContext(selected: SelectedHotCheckpoint[], workspaceId: string, sessionStart: boolean, command: string, home: string, here?: HotRenderWorkspace): string {
+    const full = renderHotCheckpoints(selected, HOT_FULL_RENDER_LIMIT, here);
     const inline = sessionStart ? inlineCheckpointPages(this.identity.runtimeId) : 0;
     if (full.length <= (sessionStart ? CHECKPOINT_PAGE_CHARS * inline : HOT_CONTEXT_LIMIT)) return full;
     const pages = paginateCheckpoint(full);
@@ -296,7 +304,7 @@ export abstract class HostRuntimeAdapterBase {
     const remaining = pages.length - inline === 1 ? `page ${pages.length}` : `pages ${inline + 1} to ${pages.length}, one page number per call`;
     return sessionStart
       ? `${pages.slice(0, inline).join("\n")}\n[Crosshead: ${shown} of ${pages.length} of the saved checkpoint shown. The rest holds further saved findings and observed sources. Before relying on partial values, read ${remaining}, with this Crosshead command: ${read(inline + 1)}]`
-      : `${renderHotCheckpoints(selected, HOT_CONTEXT_LIMIT)}\n[Crosshead: excerpt only. The saved checkpoint has ${pages.length} page${pages.length === 1 ? "" : "s"}; read from the start with: ${read(1)}]`;
+      : `${renderHotCheckpoints(selected, HOT_CONTEXT_LIMIT, here)}\n[Crosshead: excerpt only. The saved checkpoint has ${pages.length} page${pages.length === 1 ? "" : "s"}; read from the start with: ${read(1)}]`;
   }
 
   /**
@@ -306,11 +314,13 @@ export abstract class HostRuntimeAdapterBase {
    */
   async recordToolEvidence(input: HostAdapterToolEvidenceRequest): Promise<boolean> {
     if (!(this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled())) return false;
-    const taskEvidence = evidenceFromToolCall(input.toolName, input.toolInput, input.toolResponse, input.workspaceRoot, nowIso(), input.failed === true);
-    if (!taskEvidence.sources.length) return false;
+    const observed = evidenceFromToolCall(input.toolName, input.toolInput, input.toolResponse, input.workspaceRoot, nowIso(), input.failed === true);
+    if (!observed.sources.length) return false;
     const profileName = input.profileName ?? this.config.profileName;
     const status = await this.client.status(profileName).catch(() => null);
     if (status?.profile?.memoryMode !== "auto" && status?.profile?.memoryMode !== "assist") return false;
+    // Command output is stamped with the commit it ran at.
+    const taskEvidence = withWorkspaceState(observed, readWorkspaceGitState(input.workspaceRoot));
     await this.client.emitEvent({
       runtime: this.identity.runtimeId,
       profileName,
@@ -415,7 +425,7 @@ export abstract class HostRuntimeAdapterBase {
     // The daemon supplies verified archive excerpts through a dedicated field.
     // The hosted pack's context text, metadata and diagnostics stay outside the prompt.
     const hot = input.prompt.trim()
-      ? this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true, input.sessionId)
+      ? this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true, input.sessionId, input.workspaceRoot)
       : { text: undefined, refresh: true };
     let contextText = input.prompt.trim() ? renderRuntimeStartupContext({
       runtime: this.identity.runtimeId,
