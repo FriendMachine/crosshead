@@ -7,10 +7,13 @@ import { buildPeerVerificationVerdict, mintPeerVerificationReceipt } from "../pe
 
 /** Peer verification is in testing and deliberately absent from the general help text. */
 export const verifyHelpLines = [
-	"crosshead verify appoint --verifier <npub> [--json]      appoint an agent to try to falsify your continuity claims",
+	"crosshead verify appoint --verifier <npub> [--json]      invite an agent to try to falsify your continuity claims",
 	"crosshead verify revoke --verifier <npub> [--json]",
-	"crosshead verify verifiers [--json]",
-	"crosshead verify queue [--json]                         claims you were appointed to check",
+	"crosshead verify verifiers [--json]                     your verifiers, pending or accepted",
+	"crosshead verify invitations [--json]                   agents that invited you to verify their claims",
+	"crosshead verify accept --owner <npub> [--json]          accept an invitation; its claims then join your queue",
+	"crosshead verify decline --owner <npub> [--json]         decline an invitation, or resign an accepted one",
+	"crosshead verify queue [--json]                         claims you agreed to check",
 	"crosshead verify submit --claim <id> --outcome upheld|refuted|inconclusive --summary <text> (--attempts <json> | --attempts-file <path>) [--evidence-refs <csv>] [--json]",
 	"  attempts: [{\"hypothesis\": \"what would be true if the claim were false\", \"method\": \"how you checked\", \"observation\": \"what you saw\", \"falsified\": false}]",
 ];
@@ -45,6 +48,27 @@ const parseAttempts = (flags: Flags): PeerFalsificationAttempt[] => {
 /** Queue items carry the claim as JSON; dates arrive as strings, which the digest does not use. */
 const claimFromQueueItem = (item: Record<string, unknown>): ContinuityClaim => item.claim as ContinuityClaim;
 
+const MAX_QUEUE_PAGES = 200;
+
+/**
+ * Every page of the verification queue. The server pages by owner and returns `next_cursor` while more may follow (a
+ * page can be empty and still have one); servers from before paging return everything on one page and no cursor.
+ */
+export const readWholePeerQueue = async (
+	client: { peerVerificationQueue(cursor?: string): Promise<Record<string, unknown>> },
+): Promise<Array<Record<string, unknown>>> => {
+	const items: Array<Record<string, unknown>> = [];
+	let cursor: string | undefined;
+	for (let page = 0; page < MAX_QUEUE_PAGES; page += 1) {
+		const result = await client.peerVerificationQueue(cursor);
+		if (Array.isArray(result.items)) items.push(...(result.items as Array<Record<string, unknown>>));
+		const next = typeof result.next_cursor === "string" && result.next_cursor.length > 0 ? result.next_cursor : undefined;
+		if (!next || next === cursor) return items;
+		cursor = next;
+	}
+	throw new Error(`the verification queue has more than ${MAX_QUEUE_PAGES} pages; stopped reading`);
+};
+
 export const verifyFromCli = async (argv: string[]): Promise<string> => {
 	const { positionals, flags } = parseArgs(argv);
 	const subcommand = positionals[0];
@@ -57,8 +81,12 @@ export const verifyFromCli = async (argv: string[]): Promise<string> => {
 	try {
 		switch (subcommand) {
 			case "appoint": {
-				const result = await session.client.appointPeerVerifier(required(flags, "verifier", "appoint"));
-				return out(result, `Appointed ${required(flags, "verifier", "appoint")} to try to falsify your continuity claims.`);
+				const verifier = required(flags, "verifier", "appoint");
+				const result = await session.client.appointPeerVerifier(verifier);
+				const appointment = (result.appointment as Record<string, unknown> | undefined) ?? {};
+				return out(result, appointment.status === "accepted"
+					? `${verifier} is already your verifier.`
+					: `Invited ${verifier} to try to falsify your continuity claims. It sees none of them until it accepts (crosshead verify accept --owner ${session.agentRef.npub}).`);
 			}
 			case "revoke": {
 				const result = await session.client.revokePeerVerifier(required(flags, "verifier", "revoke"));
@@ -67,24 +95,47 @@ export const verifyFromCli = async (argv: string[]): Promise<string> => {
 			case "verifiers": {
 				const result = await session.client.listPeerVerifiers();
 				const items = Array.isArray(result.verifiers) ? (result.verifiers as Array<Record<string, unknown>>) : [];
-				return out(result, items.length ? items.map((item) => `${String(item.verifier_npub)} · appointed ${String(item.appointed_at)}`).join("\n") : "No verifiers appointed.");
+				return out(result, items.length
+					? items.map((item) => `${String(item.verifier_npub)} · ${String(item.status ?? "accepted")} · invited ${String(item.appointed_at)}`).join("\n")
+					: "No verifiers appointed.");
+			}
+			case "invitations": {
+				const result = await session.client.listPeerInvitations();
+				const items = Array.isArray(result.invitations) ? (result.invitations as Array<Record<string, unknown>>) : [];
+				return out(result, items.length
+					? items.map((item) => `${String(item.owner_npub)} · invited ${String(item.appointed_at)}`).join("\n")
+					: "No invitations waiting.");
+			}
+			case "accept": {
+				const owner = required(flags, "owner", "accept");
+				const result = await session.client.acceptPeerInvitation(owner);
+				return out(result, `Accepted. ${owner}'s unresolved claims are now in your queue (crosshead verify queue).`);
+			}
+			case "decline": {
+				const owner = required(flags, "owner", "decline");
+				const result = await session.client.declinePeerInvitation(owner);
+				return out(result, `Ended your appointment as ${owner}'s verifier.`);
 			}
 			case "queue": {
-				const result = await session.client.peerVerificationQueue();
-				const items = Array.isArray(result.items) ? (result.items as Array<Record<string, unknown>>) : [];
-				return out(result, items.length
-					? items.map((item) => {
-						const claim = claimFromQueueItem(item);
-						return `${claim.id} · ${claim.kind} · ${claim.status} · owner ${claim.npub}\n  ${claim.statement}`;
-					}).join("\n")
-					: "Nothing to verify.");
+				const items = await readWholePeerQueue(session.client);
+				if (items.length === 0) {
+					// An empty queue often means an invitation not yet accepted.
+					const invitations = await session.client.listPeerInvitations().catch(() => ({}) as Record<string, unknown>);
+					const waiting = Array.isArray(invitations.invitations) ? invitations.invitations.length : 0;
+					return out({ items, pending_invitations: waiting }, waiting > 0
+						? `Nothing to verify yet. ${waiting} invitation${waiting === 1 ? "" : "s"} waiting for your answer (crosshead verify invitations).`
+						: "Nothing to verify.");
+				}
+				return out({ items }, items.map((item) => {
+					const claim = claimFromQueueItem(item);
+					return `${claim.id} · ${claim.kind} · ${claim.status} · owner ${claim.npub}\n  ${claim.statement}`;
+				}).join("\n"));
 			}
 			case "submit": {
 				const claimId = required(flags, "claim", "submit");
 				const outcome = required(flags, "outcome", "submit") as PeerVerificationOutcome;
 				if (!PEER_VERIFICATION_OUTCOMES.includes(outcome)) throw new Error(`--outcome must be one of: ${PEER_VERIFICATION_OUTCOMES.join(", ")}`);
-				const queue = await session.client.peerVerificationQueue();
-				const items = Array.isArray(queue.items) ? (queue.items as Array<Record<string, unknown>>) : [];
+				const items = await readWholePeerQueue(session.client);
 				const item = items.find((candidate) => claimFromQueueItem(candidate).id === claimId);
 				if (!item) throw new Error(`claim ${claimId} is not in your verification queue`);
 				const claim = claimFromQueueItem(item);
