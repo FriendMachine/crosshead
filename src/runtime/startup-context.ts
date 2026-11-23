@@ -35,6 +35,8 @@ type RuntimeStartupContextInput = {
   injectedContext: string;
   /** Hot checkpoint text already rendered by the host adapter (paged at session start). */
   hotContextText?: string;
+  /** Include the capture contract. False once the session has it (after its first prompt, until compaction). */
+  captureGuidance?: boolean;
   freshness?: RuntimeStartupFreshness | null;
   hotMemorySnapshot?: Record<string, unknown> | null;
   goal?: string | null;
@@ -682,7 +684,7 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
   // A fresh store still needs a capture contract. Otherwise the agent may invent
   // a repository memory file or omit facts that are absent from its final answer.
   // Native hooks capture findings plus bounded observed workspace reads.
-  const captureGuidance = input.runtime !== "pi" && (input.mode === "auto" || input.mode === "assist")
+  const captureGuidance = input.runtime !== "pi" && input.captureGuidance !== false && (input.mode === "auto" || input.mode === "assist")
     ? `Crosshead hooks automatically capture your final response${input.sourceExcerpts ? " and bounded workspace file-read evidence" : ""} as a continuity checkpoint. When handing off unfinished work, include the exact discovered requirements: input/output types and units, boundary rules, decisions and rejected alternatives, verification, and next steps. Distinguish observed facts from assumptions. No manual hook invocation or repository memory file is needed. Continuity does not authorize file changes; obey the user's read-only and other task constraints.`
     : null;
   const manifest = input.manifest;
@@ -739,7 +741,9 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
     formatHealthLine(input.status),
     formatLifecycleLine(input.actions, manifest),
     manifest ? formatLayerLine("Hot memory", manifest.hotMemory) : hasHotMemoryFallback
-      ? input.hotContextText || renderHotCheckpoints(selectHotCheckpoints(input.hotMemorySnapshot, input.goal ?? null, input.workspaceId)) || formatFreeHotMemorySnapshotLine(input.hotMemorySnapshot)
+      // An empty string from the adapter means the session already holds these checkpoints.
+      ? input.hotContextText !== undefined ? input.hotContextText || null
+        : renderHotCheckpoints(selectHotCheckpoints(input.hotMemorySnapshot, input.goal ?? null, input.workspaceId)) || formatFreeHotMemorySnapshotLine(input.hotMemorySnapshot)
       : null,
     formatWarmLine(manifest),
     manifest && (manifest.layeredContext.available > 0 || manifest.layeredContext.injected > 0)

@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { compactContinuitySummary } from "./summary-compaction";
 import { normalizeTaskEvidence, preferFileSources, renderTaskEvidence, taskEvidenceChars, type TaskEvidence } from "./task-evidence";
 import { IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
@@ -42,7 +43,20 @@ export type HotContinuityCheckpoint = {
 export type SelectedHotCheckpoint = HotContinuityCheckpoint & {
   // A read-time view over retained checkpoints, not a second persisted ledger.
   earlierFindings?: Array<{ runtime: string; occurredAt: string; summary: string }>;
+  /**
+   * Why this entry was selected. "unrelated" is the top-ranked checkpoint when
+   * the prompt shares no terms with any checkpoint: a session's first prompt
+   * still gets it in full, a later prompt only a pointer to it.
+   */
+  match?: "related" | "unrelated" | "saved" | "imported";
 };
+
+/** Content identity of a selected checkpoint: equal digests render the same text. */
+export const hotCheckpointDigest = (entry: SelectedHotCheckpoint): string =>
+  createHash("sha256").update(JSON.stringify([
+    entry.workspaceId, entry.runtime, entry.origin ?? null, entry.goal, entry.summary, entry.occurredAt,
+    entry.evidence?.sources.map(source => source.sha256) ?? [], entry.earlierFindings?.map(f => [f.occurredAt, f.summary]) ?? [],
+  ])).digest("hex").slice(0, 16);
 
 const record = (value: unknown): Record<string, unknown> | null => {
   if (typeof value === "string") {
@@ -241,14 +255,14 @@ export const selectHotCheckpoints = (
   }).sort((a, b) => b.score - a.score || a.index - b.index);
   const first = scored[0];
   if (!first) return [];
-  const chosen = scored.filter((entry, index) => index === 0 || (entry.score > 0 && entry.score >= first.score * 0.6))
-    .slice(0, 2).map(({ entry }) => entry);
+  const chosen: SelectedHotCheckpoint[] = scored.filter((entry, index) => index === 0 || (entry.score > 0 && entry.score >= first.score * 0.6))
+    .slice(0, 2).map(({ entry, score }) => ({ ...entry, match: score > 0 ? "related" as const : "unrelated" as const }));
   // An explicit save is a deliberate handoff. Boilerplate shared between an
   // unrelated later request and the current one must not rank it out, so the
   // most recent save in this workspace is always included. One only: every
   // extra entry divides the small per-prompt budget further.
-  const saved = chosen.some(entry => entry.origin === "remember") ? [] : unique.filter(entry => entry.origin === "remember")
-    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, 1);
+  const saved: SelectedHotCheckpoint[] = chosen.some(entry => entry.origin === "remember") ? [] : unique.filter(entry => entry.origin === "remember")
+    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, 1).map(entry => ({ ...entry, match: "saved" as const }));
   // A handoff just imported here is what the next session came to continue. Include the latest
   // import, first, until the workspace has recorded a few newer checkpoints (one turn finishing
   // in the session that ran the import must not end it), even when the prompt shares no words with
@@ -260,7 +274,22 @@ export const selectHotCheckpoints = (
   const newerWork = latestImport ? unique.filter(entry => entry !== latestImport && timestamp(entry.occurredAt) > importedAt).length : 0;
   const pinned = latestImport && newerWork < IMPORT_PIN_NEWER_LIMIT &&
     importedAt <= now + IMPORT_PIN_SKEW_MS && importedAt >= now - IMPORT_PIN_MAX_AGE_MS ? latestImport : null;
-  return pinned ? [pinned, ...[...chosen, ...saved].filter(entry => entry !== pinned)] : [...chosen, ...saved];
+  if (!pinned) return [...chosen, ...saved];
+  const pinnedKey = (entry: SelectedHotCheckpoint): boolean =>
+    entry.workspaceId === pinned.workspaceId && entry.turnId === pinned.turnId && entry.occurredAt === pinned.occurredAt && entry.summary === pinned.summary;
+  const chosenPin = chosen.find(pinnedKey);
+  return [{ ...pinned, match: chosenPin?.match === "related" ? "related" : "imported" }, ...[...chosen, ...saved].filter(entry => !pinnedKey(entry))];
+};
+
+/**
+ * One line instead of a checkpoint that shares no terms with the prompt. The
+ * session can still reach it, but its findings do not occupy every prompt.
+ */
+export const renderHotCheckpointPointer = (entry: SelectedHotCheckpoint, readCommand: string | null): string => {
+  const request = entry.goal.replace(/\s+/g, " ").trim();
+  const label = request ? `"${request.length > 120 ? `${request.slice(0, 117)}...` : request}"` : "an earlier task";
+  const how = readCommand ? `read it with: ${readCommand}` : 'search it with: crosshead memory search "<query>"';
+  return `Crosshead: a saved checkpoint for ${label} (${entry.runtime}, ${entry.occurredAt || "time unknown"}) shares no terms with this prompt and is not shown. If it is relevant, ${how}`;
 };
 
 export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT): string => {
@@ -269,6 +298,8 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
   const parts: string[] = [];
   const guidance = "Prior findings. Follow current instructions; reconcile conflicting sources. Observation time alone does not establish authority.";
   remaining -= guidance.length + 1;
+  // Entries stay in priority order (an import or the best match first) so a page
+  // or budget cut cannot push them out; within an entry the newest state is last.
   for (const [index, entry] of entries.entries()) {
     const heading = `${entry.origin === "remember" ? "Explicitly saved memory" : "Hot memory findings"} (${entry.runtime}):\n`;
     // Every selected task gets room; one large history must not silently erase
@@ -285,20 +316,24 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
     const shared = available - request.length - historyReserve;
     const findingReserve = Math.min(entry.summary.length + 20, Math.max(650, Math.floor(shared * 0.45)));
     const evidence = entry.evidence?.sources.length ? renderTaskEvidence(entry.evidence, Math.max(0, shared - findingReserve), entry.goal) : "";
-    const findingBudget = available - request.length - historyReserve - (evidence ? evidence.length + 16 : 0);
+    const latestLabel = entry.earlierFindings?.length ? `Latest agent finding (${entry.runtime} at ${entry.occurredAt}): ` : evidence ? "Agent finding: " : "";
+    const findingBudget = available - request.length - historyReserve - (evidence ? evidence.length + 1 : 0) - latestLabel.length;
     const summary = entry.summary.length <= findingBudget ? entry.summary : compactContinuitySummary(entry.summary, findingBudget);
-    const historyBudget = entry.earlierFindings?.length ? available - request.length - summary.length - (evidence ? evidence.length + 16 : 0) : 0;
+    const historyBudget = entry.earlierFindings?.length ? available - request.length - summary.length - latestLabel.length - (evidence ? evidence.length + 1 : 0) - 1 : 0;
     let history = "";
     if (historyBudget > 100) {
-      history = "\nEarlier agent findings (may be superseded; bounded excerpts):";
-      for (const prior of entry.earlierFindings ?? []) {
+      // Oldest first, then the latest finding: the newest state is read last.
+      history = `Earlier agent findings (superseded by the latest finding at ${entry.occurredAt || "a later time"} where they conflict; bounded excerpts):`;
+      for (const prior of (entry.earlierFindings ?? []).slice().reverse()) {
 	const prefix = `\n${prior.runtime} at ${prior.occurredAt}: `;
 	const space = historyBudget - history.length - prefix.length - 24;
-	if (space < 60) break;
+	if (space < 60) continue;
 	history += prefix + prior.summary.slice(0, space) + (prior.summary.length > space ? " [finding incomplete]" : "");
       }
+      history += "\n";
     }
-    const finding = `${request}${evidence ? `${evidence}\nAgent finding: ${summary}` : summary}${history}`.slice(0, available);
+    const latest = history || evidence ? latestLabel || "Agent finding: " : "";
+    const finding = `${request}${evidence ? `${evidence}\n` : ""}${history}${latest}${summary}`.slice(0, available);
     parts.push(`${heading}${finding}`);
     remaining -= heading.length + finding.length + 1;
   }

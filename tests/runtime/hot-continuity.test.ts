@@ -71,8 +71,10 @@ describe("hot continuity findings", () => {
     expect(selected[0]?.summary).toBe(corrected.summary);
     const delivered = renderHotCheckpoints(selected);
     expect(delivered).toContain("43 items, replacing 37");
-    expect(delivered).toContain("Earlier agent findings (may be superseded");
+    expect(delivered).toContain("Earlier agent findings (superseded by the latest finding at 2026-10-17T02:00:00.000Z");
     expect(delivered).toContain("37 items");
+    // The newest state is read last, after the superseded history.
+    expect(delivered.indexOf("43 items, replacing 37")).toBeGreaterThan(delivered.indexOf("37 items."));
   });
 
   it("preserves sources and prior decisions across host updates, duplicated scopes and source conflicts", () => {
