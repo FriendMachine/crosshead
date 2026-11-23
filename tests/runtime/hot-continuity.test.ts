@@ -80,6 +80,17 @@ describe("hot continuity findings", () => {
     expect(delivered).toContain("trust what you see now and say so");
   });
 
+  it("keeps the latest finding whole when there is no room for earlier ones", () => {
+    const latest = "Correction: parcel batches hold 43 items. ".repeat(8).trim();
+    for (const budget of [700, 800, 900, 1000, 1100]) {
+      const rendered = renderHotCheckpoints([{ ...checkpoint({ summary: latest, occurredAt: "2026-10-17T02:00:00.000Z" }),
+        earlierFindings: [{ runtime: "codex", occurredAt: "2026-10-17T01:00:00.000Z", summary: "Earlier observation. ".repeat(40) }] }], budget);
+      expect(rendered.length).toBeLessThanOrEqual(budget);
+      expect(rendered.endsWith("43 items.")).toBe(true);
+      if (rendered.includes("Earlier agent findings")) expect(rendered).toMatch(/Earlier agent findings[^\n]*\ncodex at /);
+    }
+  });
+
   it("preserves sources and prior decisions across host updates, duplicated scopes and source conflicts", () => {
     for (const source of ["codex", "claude-code"]) for (const receiver of ["codex", "claude-code"]) {
       for (const conflict of [false, true]) for (const reversed of [false, true]) {

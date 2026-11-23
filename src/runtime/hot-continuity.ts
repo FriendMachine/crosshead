@@ -288,7 +288,7 @@ export const selectHotCheckpoints = (
 export const renderHotCheckpointPointer = (entry: SelectedHotCheckpoint, readCommand: string | null): string => {
   const request = entry.goal.replace(/\s+/g, " ").trim();
   const label = request ? `"${request.length > 120 ? `${request.slice(0, 117)}...` : request}"` : "an earlier task";
-  const how = readCommand ? `read it with: ${readCommand}` : 'search it with: crosshead memory search "<query>"';
+  const how = readCommand ? `read it with: ${readCommand} (or search: crosshead memory search "<query>")` : 'search it with: crosshead memory search "<query>"';
   return `Crosshead: a saved checkpoint for ${label} (${entry.runtime}, ${entry.occurredAt || "time unknown"}) shares no terms with this prompt and is not shown. If it is relevant, ${how}`;
 };
 
@@ -322,16 +322,18 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
     const summary = entry.summary.length <= findingBudget ? entry.summary : compactContinuitySummary(entry.summary, findingBudget);
     const historyBudget = entry.earlierFindings?.length ? available - request.length - summary.length - latestLabel.length - (evidence ? evidence.length + 1 : 0) - 1 : 0;
     let history = "";
-    if (historyBudget > 100) {
+    const historyHeader = `Earlier agent findings (superseded by the latest finding at ${entry.occurredAt || "a later time"} where they conflict; bounded excerpts):`;
+    if (historyBudget - historyHeader.length - 1 > 100) {
       // Oldest first, then the latest finding: the newest state is read last.
-      history = `Earlier agent findings (superseded by the latest finding at ${entry.occurredAt || "a later time"} where they conflict; bounded excerpts):`;
+      let body = "";
       for (const prior of (entry.earlierFindings ?? []).slice().reverse()) {
 	const prefix = `\n${prior.runtime} at ${prior.occurredAt}: `;
-	const space = historyBudget - history.length - prefix.length - 24;
+	const space = historyBudget - historyHeader.length - 1 - body.length - prefix.length - 24;
 	if (space < 60) continue;
-	history += prefix + prior.summary.slice(0, space) + (prior.summary.length > space ? " [finding incomplete]" : "");
+	body += prefix + prior.summary.slice(0, space) + (prior.summary.length > space ? " [finding incomplete]" : "");
       }
-      history += "\n";
+      // A header with no finding under it is noise.
+      if (body) history = `${historyHeader}${body}\n`;
     }
     const latest = history || evidence ? latestLabel || "Agent finding: " : "";
     const finding = `${request}${evidence ? `${evidence}\n` : ""}${history}${latest}${summary}`.slice(0, available);

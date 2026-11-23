@@ -69,7 +69,9 @@ describe("hot checkpoint delivery per session", () => {
   });
 
   it("reduces an unrelated checkpoint to a one-line pointer after the first prompt, once", async () => {
-    const h = harness([checkpoint()]);
+    const h = harness([checkpoint(), checkpoint({ goal: "Tune the retry backoff", summary: "Backoff doubles from 200 ms.", turnId: "retry", occurredAt: "2026-10-17T00:30:00.000Z" })]);
+    // The session's first prompt receives what it selects in full.
+    await h.prompt("Tune the retry backoff", { sessionId: "s2", sessionStart: true });
     const first = await h.prompt("Rename the logging helper in utils", { sessionId: "s2" });
     expect(first).not.toContain("37 items");
     const pointer = first.split("\n").filter(line => line.includes("saved checkpoint for"));
@@ -119,11 +121,46 @@ describe("hot checkpoint delivery per session", () => {
     const plain = harness([checkpoint()], "codex", false);
     expect(await plain.prompt("Resume parcel batching", { sessionStart: true })).toContain("37 items");
     expect(await plain.prompt("Resume parcel batching")).not.toContain("37 items");
-    const pointer = await plain.prompt("Rename the logging helper", { sessionId: "s3" });
-    expect(pointer).toContain('crosshead memory search "<query>"');
+    const two = harness([checkpoint(), checkpoint({ goal: "Tune the retry backoff", summary: "Backoff doubles from 200 ms.", turnId: "retry", occurredAt: "2026-10-17T00:30:00.000Z" })], "codex", false);
+    await two.prompt("Tune the retry backoff", { sessionId: "s3", sessionStart: true });
+    const pointer = await two.prompt("Rename the logging helper", { sessionId: "s3" });
+    expect(pointer).toContain("saved checkpoint for");
+    expect(pointer).toContain('search it with: crosshead memory search "<query>"');
     const pi = harness([checkpoint()], "pi");
     expect(await pi.prompt("Resume parcel batching")).toContain("37 items");
     expect(await pi.prompt("Resume parcel batching")).toContain("37 items");
+  });
+});
+
+describe("delivery edge cases from review", () => {
+  it("gives a session that holds nothing the full checkpoint even when the start claim was lost", async () => {
+    const h = harness([checkpoint()]);
+    // sessionStart false (failed claim, auto-compaction, racing hook) but no record yet.
+    const text = await h.prompt("continue", { sessionId: "fresh" });
+    expect(text).toContain("37 items");
+    expect(text).not.toContain("saved checkpoint for");
+    await h.prompt("continue", { sessionId: "fresh" });
+    resetSessionDelivery(h.home, "codex", { sessionId: "fresh" });
+    expect(await h.prompt("continue", { sessionId: "fresh" })).toContain("37 items");
+  });
+
+  it("does not let another session's write undo a compaction reset", async () => {
+    const h = harness([checkpoint()]);
+    await h.prompt("Resume parcel batching", { sessionStart: true, sessionId: "a" });
+    await h.prompt("Resume parcel batching", { sessionStart: true, sessionId: "b" });
+    resetSessionDelivery(h.home, "codex", { sessionId: "a" });
+    await h.prompt("Resume parcel batching", { sessionId: "b" });
+    expect(await h.prompt("Resume parcel batching", { sessionId: "a" })).toContain("37 items");
+  });
+
+  it("does not send a session its own checkpoints until compaction", async () => {
+    const own = checkpoint({ sessionId: "s1", turnId: "own", summary: "Own finding: parcel weights are grams.", occurredAt: "2026-10-17T05:00:00.000Z" });
+    const h = harness([own]);
+    await h.prompt("Resume parcel batching", { sessionStart: true });
+    h.setEntries([{ ...own, summary: "Own finding: parcel weights are kilograms.", occurredAt: "2026-10-17T06:00:00.000Z" }]);
+    expect(await h.prompt("Resume parcel batching")).not.toContain("kilograms");
+    resetSessionDelivery(h.home, "codex", { sessionId: "s1" });
+    expect(await h.prompt("Resume parcel batching")).toContain("kilograms");
   });
 });
 

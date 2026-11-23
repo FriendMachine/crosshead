@@ -261,9 +261,12 @@ export abstract class HostRuntimeAdapterBase {
     const delivered = refresh ? new Set<string>() : delivery!.delivered;
     const items = selected.map(entry => {
       const digest = hotCheckpointDigest(entry);
-      const mode: "full" | "pointer" = !sessionStart && entry.match === "unrelated" ? "pointer" : "full";
+      // A session that holds nothing yet (first prompt, after compaction) gets every selected checkpoint in full.
+      const mode: "full" | "pointer" = !refresh && entry.match === "unrelated" ? "pointer" : "full";
       return { entry, mode, full: `${digest}:full`, pointer: `${digest}:pointer` };
-    }).filter(item => !delivered.has(item.full) && !(item.mode === "pointer" && delivered.has(item.pointer)));
+    }).filter(item => !delivered.has(item.full) && !(item.mode === "pointer" && delivered.has(item.pointer)) &&
+      // The session wrote its own checkpoints; until compaction it still holds that work.
+      (refresh || !item.entry.sessionId || item.entry.sessionId !== sessionId));
     record(items.map(item => item.mode === "full" ? item.full : item.pointer));
     if (!items.length) return { text: selected.length ? "" : undefined, refresh };
     const full = items.filter(item => item.mode === "full").map(item => item.entry);
