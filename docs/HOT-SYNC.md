@@ -24,7 +24,7 @@ store fails the new capture explicitly and preserves existing pending captures.
 
 A checkpoint's evidence may carry the git state of the workspace it was
 captured in (`evidence.workspace`: HEAD, branch, uncommitted changes, and up to
-20 untracked files with content hashes), and command output may carry the
+10 untracked files with content hashes; names that look private are left out), and command output may carry the
 commit it ran at. The field is optional and travels inside the opaque evidence,
 so older clients ignore it, and it counts toward the same 30,000-character
 budget. When the checkpoint is shown in a tree that differs, the prompt gets one

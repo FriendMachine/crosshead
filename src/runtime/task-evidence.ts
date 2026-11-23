@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { closeSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync, readFileSync } from "fs";
 import path from "path";
-import { normalizeWorkspaceGitState, type WorkspaceGitState } from "./workspace-state";
+import { normalizeWorkspaceGitState, sourceFilePath, type WorkspaceGitState } from "./workspace-state";
 
 // Evidence is a quote of an observed source, never a verified claim or a new
 // instruction. Keep it separate from the assistant's (possibly lossy) finding.
@@ -25,7 +25,7 @@ export type TaskEvidence = {
   /** Git state of the workspace when this evidence was captured. */
   workspace?: WorkspaceGitState;
 };
-const MAX_OMITTED_SOURCES = 20;
+const MAX_OMITTED_SOURCES = 8;
 
 const MAX_BYTES = 4 * 1024 * 1024;
 // A checkpoint's request, finding and serialized evidence must together stay
@@ -247,7 +247,7 @@ export const normalizeTaskEvidence = (value: unknown): TaskEvidence | undefined 
     remaining -= kept.length;
   }
   const omittedSources = [...(Array.isArray(item.omittedSources) ? item.omittedSources : []), ...dropped].flatMap(raw => {
-    const entry = object(raw), source = text(entry?.source).slice(0, 1000), sha256 = text(entry?.sha256);
+    const entry = object(raw), source = text(entry?.source).slice(0, 160), sha256 = text(entry?.sha256);
     return source && !sensitive.test(source) && /^[a-f0-9]{64}$/.test(sha256) && !sources.some(kept => kept.sha256 === sha256) ? [{ source, sha256 }] : [];
   }).filter((entry, index, all) => all.findIndex(other => other.sha256 === entry.sha256) === index).slice(-MAX_OMITTED_SOURCES);
   const workspace = normalizeWorkspaceGitState(item.workspace);
@@ -400,8 +400,8 @@ export const renderTaskEvidence = (evidence: TaskEvidence, maxChars: number, goa
     let mark = "";
     if (context && source.source.startsWith("$ ")) {
       if (source.head && context.head && source.head !== context.head) mark = ` [ran at ${source.head.slice(0, 10)}${source.dirty ? " with uncommitted changes" : ""}; HEAD here is ${context.head.slice(0, 10)}]`;
-    } else if (context) {
-      const state = context.fileState(source.source, source.text);
+    } else if (context && sourceFilePath(source.source)) {
+      const state = context.fileState(sourceFilePath(source.source)!, source.text);
       mark = state === "missing" ? " [not present here]" : state === "changed" ? " [changed on disk since observed; reread]" : "";
     }
     const heading = `Source ${JSON.stringify(source.source)}${conflict ? " [multiple observed versions; reconcile]" : ""}${mark}:\n`;

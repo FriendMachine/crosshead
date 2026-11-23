@@ -95,10 +95,16 @@ const checkpointSize = (entry: Pick<HotContinuityCheckpoint, "goal" | "summary" 
 /** Drop the lowest-priority sources (the last ones) until the checkpoint fits the sync budget. */
 const fitCheckpoint = <T extends Pick<HotContinuityCheckpoint, "goal" | "summary" | "evidence">>(entry: T): T => {
   let evidence = entry.evidence;
+  // Names of dropped sources and untracked files are worth less than any excerpt: they go first.
+  if (evidence && checkpointSize({ ...entry, evidence }) > HOT_CHECKPOINT_BUDGET && (evidence.omittedSources || evidence.workspace?.untracked.length)) {
+    const { omittedSources: _names, ...rest } = evidence;
+    evidence = { ...rest, ...(rest.workspace ? { workspace: { ...rest.workspace, untracked: [], untrackedOmitted: (rest.workspace.untrackedOmitted ?? 0) + rest.workspace.untracked.length } } : {}) };
+  }
   while (evidence?.sources.length && checkpointSize({ ...entry, evidence }) > HOT_CHECKPOINT_BUDGET) {
     const last = evidence.sources[evidence.sources.length - 1]!;
-    evidence = { ...evidence, sources: evidence.sources.slice(0, -1), omitted: evidence.omitted + 1,
-      omittedSources: [...(evidence.omittedSources ?? []), { source: last.source, sha256: last.sha256 }].slice(-20) };
+    const next = { ...evidence, sources: evidence.sources.slice(0, -1), omitted: evidence.omitted + 1 };
+    const named = { ...next, omittedSources: [...(evidence.omittedSources ?? []), { source: last.source.slice(0, 160), sha256: last.sha256 }].slice(-8) };
+    evidence = checkpointSize({ ...entry, evidence: named }) <= HOT_CHECKPOINT_BUDGET ? named : next;
   }
   return evidence === entry.evidence ? entry : { ...entry, evidence };
 };
@@ -302,7 +308,12 @@ export const renderHotCheckpointPointer = (entry: SelectedHotCheckpoint, readCom
 };
 
 /** Where the reader is now, so saved state can be compared with it. */
-export type HotRenderWorkspace = { root: string; git: WorkspaceGitState | null };
+export type HotRenderWorkspace = { root: string; git: WorkspaceGitState | null; memo?: Map<string, string> };
+const memoized = (here: HotRenderWorkspace, key: string, compute: () => string): string => {
+  here.memo ??= new Map();
+  if (!here.memo.has(key)) here.memo.set(key, compute());
+  return here.memo.get(key)!;
+};
 
 export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT, here?: HotRenderWorkspace): string => {
   if (entries.length === 0) return "";
@@ -314,7 +325,7 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
   // Entries stay in priority order (an import or the best match first) so a page
   // or budget cut cannot push them out; within an entry the newest state is last.
   for (const [index, entry] of entries.entries()) {
-    const drift = here ? describeWorkspaceDrift(entry.evidence?.workspace, here.git, here.root) : "";
+    const drift = here ? memoized(here, `drift:${JSON.stringify(entry.evidence?.workspace ?? null)}`, () => describeWorkspaceDrift(entry.evidence?.workspace, here.git, here.root)) : "";
     const heading = `${entry.origin === "remember" ? "Explicitly saved memory" : "Hot memory findings"} (${entry.runtime}):\n${drift ? `${drift}\n` : ""}`;
     // Every selected task gets room; one large history must not silently erase
     // another selected amendment or task. Unused space flows to later entries.
@@ -330,7 +341,7 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
     const shared = available - request.length - historyReserve;
     const findingReserve = Math.min(entry.summary.length + 20, Math.max(650, Math.floor(shared * 0.45)));
     const evidence = entry.evidence?.sources.length ? renderTaskEvidence(entry.evidence, Math.max(0, shared - findingReserve), entry.goal,
-      here ? { workspaceRoot: here.root, head: here.git?.head ?? null, fileState: (file, excerpt) => fileExcerptState(here.root, file, excerpt) } : undefined) : "";
+      here ? { workspaceRoot: here.root, head: here.git?.head ?? null, fileState: (file, excerpt) => memoized(here, `file:${file}\0${excerpt.slice(0, 1500)}`, () => fileExcerptState(here.root, file, excerpt)) as "missing" | "changed" | "same" } : undefined) : "";
     const latestLabel = entry.earlierFindings?.length ? `Latest agent finding (${entry.runtime} at ${entry.occurredAt}): ` : evidence ? "Agent finding: " : "";
     const findingBudget = available - request.length - historyReserve - (evidence ? evidence.length + 1 : 0) - latestLabel.length;
     const summary = entry.summary.length <= findingBudget ? entry.summary : compactContinuitySummary(entry.summary, findingBudget);
