@@ -296,7 +296,8 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
   if (entries.length === 0) return "";
   let remaining = maxLength;
   const parts: string[] = [];
-  const guidance = "Prior findings. Follow current instructions; reconcile conflicting sources. Observation time alone does not establish authority.";
+  // Conditional sentences, one case each: they are easier to apply than a ranking rule.
+  const guidance = "Prior findings, observed earlier; not current truth. If one conflicts with the user's current message, follow the message. If one conflicts with a file or command output you see now, trust what you see now and say so. If saved findings conflict with each other, the later time does not settle it; check the source.";
   remaining -= guidance.length + 1;
   // Entries stay in priority order (an import or the best match first) so a page
   // or budget cut cannot push them out; within an entry the newest state is last.

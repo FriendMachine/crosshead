@@ -29,6 +29,15 @@ const IMPORTANT_SUMMARY_PATTERNS = [
   /\bhidden\b/i,
   /\berror\b/i,
   /\bwarning\b/i,
+  // What is still open is what the next session needs most.
+  /\bunresolved\b/i,
+  /\bblocked\b/i,
+  /\bblocker\b/i,
+  /\bremaining\b/i,
+  /\bremains\b/i,
+  /\bnot (?:yet )?(?:done|finished|verified|fixed)\b/i,
+  /\bstill (?:open|failing|pending)\b/i,
+  /\bTODO\b/,
   /`[^`]+`/,
 ];
 

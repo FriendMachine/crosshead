@@ -75,6 +75,9 @@ describe("hot continuity findings", () => {
     expect(delivered).toContain("37 items");
     // The newest state is read last, after the superseded history.
     expect(delivered.indexOf("43 items, replacing 37")).toBeGreaterThan(delivered.indexOf("37 items."));
+    // The precedence rule is stated as conditions, one case each.
+    expect(delivered).toContain("If one conflicts with the user's current message, follow the message.");
+    expect(delivered).toContain("trust what you see now and say so");
   });
 
   it("preserves sources and prior decisions across host updates, duplicated scopes and source conflicts", () => {
