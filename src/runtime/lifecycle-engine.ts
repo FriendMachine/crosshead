@@ -1611,8 +1611,10 @@ export class RuntimeLifecycleManager {
 
   /** Local delivery times rank which history this machine keeps (see hot-use.ts). */
   private hotCheckpointLastUsed(): HotCheckpointLastUsed {
-    const uses = readHotUse(this.deps.paths.state);
-    return entry => uses.get(hotCheckpointUseKey(entry)) ?? 0;
+    // Read only when retention actually has to choose. Synced profiles retain
+    // through the replica, which does not use local delivery times.
+    let uses: Map<string, number> | null = null;
+    return entry => (uses ??= readHotUse(this.deps.paths.state)).get(hotCheckpointUseKey(entry)) ?? 0;
   }
 
   async stop(): Promise<void> {

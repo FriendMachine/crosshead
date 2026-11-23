@@ -158,8 +158,16 @@ export const updateHotCheckpoints = (
     const key = entry.workspaceId ?? "";
     savesByWorkspace.set(key, [...(savesByWorkspace.get(key) ?? []), entry]);
   }
-  const saves = new Set([...savesByWorkspace.values()].flatMap(list => list.slice(0, PROTECTED_SAVES))
-    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, PROTECTED_SAVES_TOTAL));
+  const saves = new Set<HotContinuityCheckpoint>();
+  let savedChars = 0;
+  for (const entry of [...savesByWorkspace.values()].flatMap(list => list.slice(0, PROTECTED_SAVES))
+    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, PROTECTED_SAVES_TOTAL)) {
+    // Saves may take at most half the history budget.
+    const chars = entry.goal.length + entry.summary.length + taskEvidenceChars(entry.evidence);
+    if (savedChars + chars > MAX_HISTORY_CHARS / 2) continue;
+    savedChars += chars;
+    saves.add(entry);
+  }
   const recency = (entry: HotContinuityCheckpoint): number => Math.max(timestamp(entry.occurredAt), lastUsed?.(entry) ?? 0);
   const rest = history.filter(entry => !saves.has(entry)).map((entry, index) => ({ entry, index }))
     .sort((a, b) => recency(b.entry) - recency(a.entry) || b.index - a.index).map(({ entry }) => entry);

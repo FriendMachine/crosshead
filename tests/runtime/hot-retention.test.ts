@@ -69,4 +69,20 @@ describe("replica retention", () => {
     expect(kept.checkpoints.filter(c => c.origin === "remember").map(c => c.id)).toEqual(["c002", "c003", "c004"]);
     expect(retainHotSync({ ...document, checkpoints: [...checkpoints].reverse() }).checkpoints.map(c => c.id)).toEqual(kept.checkpoints.map(c => c.id));
   });
+
+  it("never drops the newest capture for protected saves", () => {
+    const big = "x".repeat(9000);
+    const checkpoints = [1, 2, 3].map(i => sync(i, { origin: "remember", summary: big })).concat([sync(50, { summary: "y".repeat(5000) })]);
+    const kept = retainHotSync({ version: HOT_SYNC_VERSION, namespace: "n", scope: "s", epoch: 0, checkpoints });
+    expect(kept.checkpoints.map(c => c.id)).toContain("c050");
+    // Saves are held to half the budget; the rest of history still fits by recency.
+    expect(kept.checkpoints.filter(c => c.origin === "remember").length).toBeLessThanOrEqual(2);
+  });
+
+  it("does not protect a save that is disputed or superseded", () => {
+    const checkpoints = [sync(1, { origin: "remember" }), sync(2, { origin: "remember", supersedes: ["c001"] }), ...Array.from({ length: 12 }, (_, i) => sync(100 + i))];
+    const kept = retainHotSync({ version: HOT_SYNC_VERSION, namespace: "n", scope: "s", epoch: 0, checkpoints });
+    expect(kept.checkpoints.map(c => c.id)).toContain("c002");
+    expect(kept.checkpoints.map(c => c.id)).not.toContain("c001");
+  });
 });
