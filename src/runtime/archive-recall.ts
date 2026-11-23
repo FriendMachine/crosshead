@@ -255,10 +255,15 @@ export function verifyArchiveRecall(owner: ArchiveRecallOwner, approval: Approva
 // cached snapshot is used only while it still matches the current approval.
 // The hosted call still runs for every served turn (billing and supersession
 // are decided there); if it does not verify, the entry is dropped and the next
-// turn waits for a live answer.
+// turn waits for a live answer. A turn served from the cache whose own request
+// then fails (payment, network, superseded record) was delivered without a
+// billed pack: at most one such turn per approval, within an hour of the last
+// live verification.
 const CACHE_FILE = "recall-cache.json";
 const CACHE_VERSION = "crosshead_archive_recall_cache_v1";
 const MAX_CACHED = 16;
+const CACHE_MAX_AGE_MS = 60 * 60 * 1_000;
+const CACHE_SKEW_MS = 5 * 60 * 1_000;
 type CachedRecall = { sha256: string; packId: string; snapshot: ArchiveRecallSnapshot; verifiedAt: number };
 
 const readCache = (directory: string): CachedRecall[] => {
@@ -283,7 +288,9 @@ export function readCachedArchiveRecall(
 	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, approval: Approval
 ): { packId: string; snapshot: ArchiveRecallSnapshot } | null {
 	const entry = readCache(approvalDirectory(stateDir, owner, workspaceId)).find(item => item.sha256 === approval.sha256);
-	if (!entry || entry.snapshot.workspaceId !== workspaceId || Date.now() - entry.verifiedAt > PREVIEW_TTL_MS) return null;
+	// Served only shortly after a live verification; a clock far ahead is not trusted.
+	const age = Date.now() - (entry?.verifiedAt ?? 0);
+	if (!entry || entry.snapshot.workspaceId !== workspaceId || age > CACHE_MAX_AGE_MS || age < -CACHE_SKEW_MS) return null;
 	return verifyArchiveRecall(owner, approval, entry.snapshot) ? { packId: entry.packId, snapshot: entry.snapshot } : null;
 }
 

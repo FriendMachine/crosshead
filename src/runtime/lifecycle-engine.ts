@@ -4,7 +4,7 @@ import {
   renderArchiveRecall, verifyArchiveRecall,
 } from "./archive-recall";
 import { getHotSyncManager, hotSyncEnabled, tickHotSyncManagers } from "./hot-sync-manager";
-import { encodeArchivedTurn } from "./continuity-recall";
+import { encodeArchivedTurn, RECALL_TIMEOUT_MS } from "./continuity-recall";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 import { createHash, randomUUID } from "crypto";
@@ -1568,8 +1568,8 @@ export class RuntimeLifecycleManager {
   private readonly maxQueueAttempts: number;
   private timer: NodeJS.Timeout | null = null;
   private backgroundOperation: Promise<void> | null = null;
-  /** Background revalidations of cached archive recall; stop() waits for them. */
-  private readonly pendingRecalls = new Set<Promise<void>>();
+  /** Background revalidations of cached archive recall, by approval digest; stop() waits for them. */
+  private readonly recallRevalidations = new Map<string, Promise<void>>();
   private mutation: Promise<void> = Promise.resolve();
   private detachedFlush: Promise<void> | null = null;
   private readonly claimedQueueItems = new Set<string>();
@@ -1620,7 +1620,7 @@ export class RuntimeLifecycleManager {
     finally {
       if (this.backgroundOperation === operation) this.backgroundOperation = null;
       await this.detachedFlush;
-      await Promise.allSettled([...this.pendingRecalls]);
+      await Promise.allSettled([...this.recallRevalidations.values()]);
       await this.mutation;
     }
   }
@@ -2320,9 +2320,15 @@ export class RuntimeLifecycleManager {
 			if (!goal || !scope || governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
 			approval = findArchiveRecallApproval(this.deps.paths.state, resolved.profile, workspaceId, goal, event.runtime);
 			if (!approval || !archiveApprovalFitsScope(approval, scope)) return;
+			// A turn that overlaps the previous turn's revalidation waits for its outcome
+			// (within the normal deadline), so a refused snapshot is never served twice.
+			const pending = this.recallRevalidations.get(approval.sha256);
+			if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, RECALL_TIMEOUT_MS).unref?.())]);
 			// A snapshot verified on an earlier turn is served now; the hosted call
 			// (which bills and reports superseded records) runs off the critical path.
-			cached = readCachedArchiveRecall(this.deps.paths.state, resolved.profile, workspaceId, approval);
+			cached = this.recallRevalidations.has(approval.sha256) ||
+				(resolved.profile.memoryMode !== "assist" && resolved.profile.memoryMode !== "auto")
+				? null : readCachedArchiveRecall(this.deps.paths.state, resolved.profile, workspaceId, approval);
 		} catch (error) {
 			response.warnings.push(describeBoundedRecallFallback(error));
 			return;
@@ -2330,20 +2336,22 @@ export class RuntimeLifecycleManager {
 		const { profileName } = resolved;
 		if (cached && cached.snapshot.sources.every(source => source.kind === "warm_memory"
 				? scope.includeWarmMemory === true : scope.includeColdMemory === true)) {
+			// The pack billed for this turn is created by the background request; outcomes
+			// must not be attributed to the earlier pack, so this turn carries no pack id.
 			contextPack.verifiedArchiveContext = renderArchiveRecall(cached.snapshot);
-			contextPack.packId = cached.packId;
 			try {
 				response.actions.push(this.recordAction({
 					eventId: event.eventId, profileName, type: "context_pack", status: "completed", mode: response.mode,
 					reason: "Served verified archive recall from the local cache; revalidating", queueItemId: null,
-					details: { packId: cached.packId, verifiedArchiveRecall: true, cachedArchiveRecall: true },
+					details: { cachedPackId: cached.packId, verifiedArchiveRecall: true, cachedArchiveRecall: true },
 				}));
 			} catch {
 				response.warnings.push("Could not record the hosted archive recall result locally.");
 			}
-			const revalidation = this.liveArchiveRecall(response, null, resolved, goal, scope, approval)
-				.catch(() => undefined).finally(() => { this.pendingRecalls.delete(revalidation); });
-			this.pendingRecalls.add(revalidation);
+			const key = approval.sha256;
+			const revalidation: Promise<void> = this.liveArchiveRecall(response, null, resolved, goal!, scope!, approval)
+				.catch(() => undefined).finally(() => { if (this.recallRevalidations.get(key) === revalidation) this.recallRevalidations.delete(key); });
+			this.recallRevalidations.set(key, revalidation);
 			return;
 		}
 		await this.liveArchiveRecall(response, contextPack, resolved, goal, scope, approval);

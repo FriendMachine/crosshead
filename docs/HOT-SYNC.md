@@ -65,12 +65,15 @@ a request deadline leaves the turn with its ordinary hot context.
 
 After a turn verifies, the snapshot is kept locally (`recall-cache.json` in the
 approval directory). The next matching turn is served from it at once if it
-still matches the approval digest and is under seven days old, and the paid
-recall request runs in the background, so billing is unchanged. If that request
-does not verify (a superseded or missing record, payment failure, deadline), the
-cached snapshot is dropped and the following turn waits for a live answer, as
-before. A changed record can therefore be served once more before it is
-withheld. Revoking an approval discards the cache.
+still matches the approval digest and was verified live within the last hour,
+and the paid recall request runs in the background, so each served turn still
+makes one billed request. If that request does not verify (a superseded or
+missing record, payment failure, deadline), the cached snapshot is dropped and
+the following turn waits for a live answer, as before; a turn that overlaps a
+pending revalidation waits for it. So a changed record, or a failed payment,
+can let one cached turn through before it is withheld. A cached turn carries no
+pack id; the background pack is recorded in the activity log. Revoking an
+approval discards the cache.
 
 ## Multiple machines and commands
 

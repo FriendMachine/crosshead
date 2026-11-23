@@ -387,7 +387,8 @@ describe("verified recall through native prompt preparation", () => {
 		warnings = ["Archive search was skipped."];
 		let before = (await revalidations()).length;
 		const fromCache = await prepare("incomplete");
-		expect(fromCache.packId).toBe(previewPackId);
+		// Served from the cache; the turn carries no pack id (the billed pack is the background one).
+		expect(fromCache.packId).toBeNull();
 		expect(fromCache.contextText).toContain(warm.content);
 		await settled(before);
 		expect((await revalidations()).at(-1)?.details).toMatchObject({ verifiedArchiveRecall: false, cachedArchiveRecall: true });
@@ -439,10 +440,20 @@ describe("verified recall through native prompt preparation", () => {
 		before = (await revalidations()).length;
 		let release: (() => void) | undefined;
 		whenRequested = () => new Promise<void>(resolve => { release = resolve; });
+		sources = [cold]; // The server now omits the correction; the cached turn is answered before it knows.
 		const cachedTurn = await Promise.race([prepare("cached-in-flight"), new Promise<null>(resolve => setTimeout(() => resolve(null), 2000))]);
 		expect(cachedTurn?.contextText).toContain(warm.content);
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+		// An overlapping turn waits for that revalidation instead of serving the cache again.
+		const firstRelease = release!;
+		release = undefined;
+		const overlapping = prepare("overlapping");
+		await new Promise(resolve => setTimeout(resolve, 100));
+		firstRelease();
+		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
 		release!();
+		expect((await overlapping).contextText).toBe(baseline.contextText);
+		sources = [cold, warm];
 		await settled(before);
 		// Revocation discards the cache, so the next approved turn waits for the live call again.
 		whenRequested = undefined;
