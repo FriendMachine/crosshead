@@ -98,7 +98,7 @@ export function readArchiveRecallSnapshot(
 }
 
 const ownerKey = ({ name, apiBase, npub }: ArchiveRecallOwner) => [name, apiBase, npub];
-const archiveRecallDigest = (
+export const archiveRecallDigest = (
 	owner: ArchiveRecallOwner, snapshot: ArchiveRecallSnapshot, runtimeHost: ArchiveRecallHost | null
 ): string => digest(runtimeHost ? [ownerKey(owner), snapshot, runtimeHost] : [ownerKey(owner), snapshot]);
 
@@ -213,6 +213,8 @@ export async function revokeArchiveRecall(
 	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, taskId: string | null
 ): Promise<void> {
 	await editApprovalState(approvalDirectory(stateDir, owner, workspaceId), state => {
+		// Revocation also discards cached snapshots; a later approval caches again.
+		rmSync(path.join(approvalDirectory(stateDir, owner, workspaceId), CACHE_FILE), { force: true });
 		if (taskId === null) return;
 		const revoked = state.approvals.filter(item => item.taskId === taskId);
 		state.approvals = state.approvals.filter(item => item.taskId !== taskId);
@@ -246,4 +248,58 @@ export function archiveApprovalFitsScope(approval: Approval, scope: Record<strin
 
 export function verifyArchiveRecall(owner: ArchiveRecallOwner, approval: Approval, snapshot: ArchiveRecallSnapshot): boolean {
 	return approval.taskId === snapshot.taskId && approval.sha256 === archiveRecallDigest(owner, snapshot, approval.runtimeHost);
+}
+
+// A verified snapshot kept locally so an approved turn can be served without
+// waiting on the hosted call. The approval digest pins the exact bytes, so a
+// cached snapshot is used only while it still matches the current approval.
+// The hosted call still runs for every served turn (billing and supersession
+// are decided there); if it does not verify, the entry is dropped and the next
+// turn waits for a live answer.
+const CACHE_FILE = "recall-cache.json";
+const CACHE_VERSION = "crosshead_archive_recall_cache_v1";
+const MAX_CACHED = 16;
+type CachedRecall = { sha256: string; packId: string; snapshot: ArchiveRecallSnapshot; verifiedAt: number };
+
+const readCache = (directory: string): CachedRecall[] => {
+	try {
+		const value = object(JSON.parse(readFileSync(path.join(directory, CACHE_FILE), "utf8")));
+		if (value?.version !== CACHE_VERSION || !Array.isArray(value.entries)) return [];
+		return value.entries.flatMap((raw: unknown) => {
+			const entry = object(raw), snapshot = object(entry?.snapshot);
+			return entry && snapshot && typeof entry.sha256 === "string" && SHA256.test(entry.sha256) && archivePackId(entry.packId) &&
+				Number.isFinite(entry.verifiedAt) && snapshot.version === VERSION && typeof snapshot.workspaceId === "string" &&
+				typeof snapshot.taskId === "string" && Array.isArray(snapshot.sources) && snapshot.sources.every((source: unknown) => {
+					const item = object(source);
+					return item && typeof item.id === "string" && SOURCE_ID.test(item.id) && typeof item.content === "string" &&
+						(item.kind === "warm_memory" || item.kind === "cold_memory");
+				}) ? [entry as unknown as CachedRecall] : [];
+		});
+	} catch { return []; }
+};
+
+/** The cached snapshot for an approval, if it still verifies against it and is within the preview window. */
+export function readCachedArchiveRecall(
+	stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, approval: Approval
+): { packId: string; snapshot: ArchiveRecallSnapshot } | null {
+	const entry = readCache(approvalDirectory(stateDir, owner, workspaceId)).find(item => item.sha256 === approval.sha256);
+	if (!entry || entry.snapshot.workspaceId !== workspaceId || Date.now() - entry.verifiedAt > PREVIEW_TTL_MS) return null;
+	return verifyArchiveRecall(owner, approval, entry.snapshot) ? { packId: entry.packId, snapshot: entry.snapshot } : null;
+}
+
+export function writeCachedArchiveRecall(
+	stateDir: string, owner: ArchiveRecallOwner, approval: Approval, snapshot: ArchiveRecallSnapshot, packId: string
+): void {
+	const directory = approvalDirectory(stateDir, owner, snapshot.workspaceId);
+	const entries = [...readCache(directory).filter(item => item.sha256 !== approval.sha256),
+		{ sha256: approval.sha256, packId, snapshot, verifiedAt: Date.now() }].slice(-MAX_CACHED);
+	writeJsonFile(path.join(directory, CACHE_FILE), { version: CACHE_VERSION, entries });
+}
+
+export function dropCachedArchiveRecall(stateDir: string, owner: ArchiveRecallOwner, workspaceId: string, sha256: string): void {
+	const directory = approvalDirectory(stateDir, owner, workspaceId);
+	const entries = readCache(directory);
+	if (entries.some(item => item.sha256 === sha256)) {
+		writeJsonFile(path.join(directory, CACHE_FILE), { version: CACHE_VERSION, entries: entries.filter(item => item.sha256 !== sha256) });
+	}
 }
