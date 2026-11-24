@@ -441,6 +441,7 @@ describe("verified recall through native prompt preparation", () => {
 		let release: (() => void) | undefined;
 		whenRequested = () => new Promise<void>(resolve => { release = resolve; });
 		sources = [cold]; // The server now omits the correction; the cached turn is answered before it knows.
+		const requestsBefore = fetcher.mock.calls.length;
 		const cachedTurn = await Promise.race([prepare("cached-in-flight"), new Promise<null>(resolve => setTimeout(() => resolve(null), 2000))]);
 		expect(cachedTurn?.contextText).toContain(warm.content);
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
@@ -455,6 +456,8 @@ describe("verified recall through native prompt preparation", () => {
 		expect((await overlapping).contextText).toBe(baseline.contextText);
 		sources = [cold, warm];
 		await settled(before);
+		// Billing: each served turn made exactly one hosted request (the cached turn in the background, the overlapping one live).
+		expect(fetcher.mock.calls.length - requestsBefore).toBe(2);
 		// Revocation discards the cache, so the next approved turn waits for the live call again.
 		whenRequested = undefined;
 		await command("revoke", "--task", taskId);

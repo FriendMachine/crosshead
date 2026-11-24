@@ -1570,6 +1570,8 @@ export class RuntimeLifecycleManager {
   private backgroundOperation: Promise<void> | null = null;
   /** Background revalidations of cached archive recall, by approval digest; stop() waits for them. */
   private readonly recallRevalidations = new Map<string, Promise<void>>();
+  /** Bumped whenever a cached snapshot is dropped; a recall started before that may not restore it. */
+  private readonly recallCacheGenerations = new Map<string, number>();
   private mutation: Promise<void> = Promise.resolve();
   private detachedFlush: Promise<void> | null = null;
   private readonly claimedQueueItems = new Set<string>();
@@ -2370,6 +2372,7 @@ export class RuntimeLifecycleManager {
 		const { event } = response;
 		const workspaceId = event.workspaceId!;
 		const warnings = target ? response.warnings : [];
+		const generation = this.recallCacheGenerations.get(approval.sha256) ?? 0;
 		let attemptedProfile: string | null = null;
 		let packId: string | null = null;
 		let verified = false;
@@ -2411,7 +2414,8 @@ export class RuntimeLifecycleManager {
 						target.packId = packId;
 					}
 					verified = true;
-					try { writeCachedArchiveRecall(this.deps.paths.state, currentProfile, currentApproval, snapshot, packId); }
+					// A concurrent recall that dropped the entry since this one started wins.
+					try { if ((this.recallCacheGenerations.get(approval.sha256) ?? 0) === generation) writeCachedArchiveRecall(this.deps.paths.state, currentProfile, currentApproval, snapshot, packId); }
 					catch { /* Without a cache entry the next turn waits for the live call, as before. */ }
 				}
 			}
@@ -2422,6 +2426,7 @@ export class RuntimeLifecycleManager {
 		} finally {
 			// A cached snapshot that did not verify live is not served again.
 			if (!verified) {
+				this.recallCacheGenerations.set(approval.sha256, (this.recallCacheGenerations.get(approval.sha256) ?? 0) + 1);
 				try { dropCachedArchiveRecall(this.deps.paths.state, resolved.profile, workspaceId, approval.sha256); }
 				catch { /* The approval digest still guards any later use. */ }
 			}
