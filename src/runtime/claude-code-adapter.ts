@@ -1308,6 +1308,7 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
       hostVersion: input.hostVersion,
       ...ids,
       goal: importedHandoffGoal({ sourceRuntime: capsule.sourceRuntime, objective: capsule.continuityIr.task.objective, createdAt: capsule.createdAt }),
+      sourceWorkspace: capsule.continuityIr.provenance?.workspace,
       content: renderImportedHandoffMemory({
         sourceRuntime: capsule.sourceRuntime,
         signedBy: verification.signedBy,

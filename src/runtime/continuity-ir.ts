@@ -2,6 +2,19 @@ import path from "path";
 
 import { buildEngineAttachment, type EngineAttachment, validateEngineAttachment } from "../protocol/engine-attachments";
 import { sanitizePersistentAgentToken } from "./persistent-agent-utils";
+import { readWorkspaceGitState, type WorkspaceGitState } from "./workspace-state";
+
+const exportedStates = new Map<string, WorkspaceGitState | null>();
+/** Read once per export; an unreadable or non-git root yields nothing. */
+const exportWorkspaceState = (root: string): WorkspaceGitState | null => {
+  if (!exportedStates.has(root)) {
+    let state: WorkspaceGitState | null = null;
+    try { state = root ? readWorkspaceGitState(root) : null; } catch { state = null; }
+    exportedStates.set(root, state);
+    setTimeout(() => exportedStates.delete(root), 1000).unref?.();
+  }
+  return exportedStates.get(root) ?? null;
+};
 
 export const CONTINUITY_IR_VERSION = "continuity_ir_v1";
 
@@ -150,6 +163,8 @@ export type ContinuityIr = {
     createdAt: string;
     captureKind: "session" | "turn";
     workspaceRootRedacted: boolean;
+    /** Git state of the exporting workspace (relative names only), so an import elsewhere can warn on drift. */
+    workspace?: WorkspaceGitState;
   };
 };
 
@@ -639,6 +654,7 @@ export const normalizeCapturedContextToContinuityIr = (
       createdAt: new Date().toISOString(),
       captureKind: captured.turnId ? "turn" : "session",
       workspaceRootRedacted: true,
+      ...(exportWorkspaceState(captured.workspaceRoot) ? { workspace: exportWorkspaceState(captured.workspaceRoot)! } : {}),
     },
   };
 
