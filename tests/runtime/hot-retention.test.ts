@@ -6,7 +6,7 @@ import path from "node:path";
 import { updateHotCheckpoints, type HotContinuityCheckpoint } from "../../src/runtime/hot-continuity";
 import { hotCheckpointUseKey, readHotUse, recordHotUse } from "../../src/runtime/hot-use";
 import { retainHotSync } from "../../src/runtime/hot-sync-replica";
-import { HOT_SYNC_VERSION, type HotSyncCheckpoint } from "../../src/protocol/hot-sync";
+import { HOT_SYNC_VERSION, validHotSyncDocument, type HotSyncCheckpoint } from "../../src/protocol/hot-sync";
 
 const at = (minute: number): string => new Date(Date.UTC(2026, 10, 1, 0, minute)).toISOString();
 const entry = (i: number, overrides: Partial<HotContinuityCheckpoint> = {}): HotContinuityCheckpoint => ({
@@ -84,5 +84,18 @@ describe("replica retention", () => {
     const kept = retainHotSync({ version: HOT_SYNC_VERSION, namespace: "n", scope: "s", epoch: 0, checkpoints });
     expect(kept.checkpoints.map(c => c.id)).toContain("c002");
     expect(kept.checkpoints.map(c => c.id)).not.toContain("c001");
+  });
+
+  it("interoperates with an older client that retains by recency only", () => {
+    const checkpoints = [...[1, 2, 3].map(i => sync(i, { origin: "remember" })), ...Array.from({ length: 12 }, (_, i) => sync(100 + i))];
+    const document = { version: HOT_SYNC_VERSION, namespace: "n", scope: "s", epoch: 0, checkpoints };
+    const ours = retainHotSync(document);
+    expect(validHotSyncDocument(ours)).toBe(true);
+    // An older client keeps the newest 12 by time; its document is valid for us, and we keep what is left stable.
+    const older = { ...ours, checkpoints: [...ours.checkpoints].sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt)).slice(0, 12) };
+    expect(validHotSyncDocument(older)).toBe(true);
+    const again = retainHotSync(older);
+    expect(again.checkpoints.map(c => c.id).sort()).toEqual(older.checkpoints.map(c => c.id).sort());
+    expect(retainHotSync(again).checkpoints).toEqual(again.checkpoints);
   });
 });
