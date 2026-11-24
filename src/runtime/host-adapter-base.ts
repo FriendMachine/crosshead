@@ -267,8 +267,10 @@ export abstract class HostRuntimeAdapterBase {
     }).filter(item => !delivered.has(item.full) && !(item.mode === "pointer" && delivered.has(item.pointer)) &&
       // The session wrote its own checkpoints; until compaction it still holds that work.
       (refresh || !item.entry.sessionId || item.entry.sessionId !== sessionId));
-    record(items.map(item => item.mode === "full" ? item.full : item.pointer));
-    if (!items.length) return { text: selected.length ? "" : undefined, refresh };
+    if (!items.length) {
+      record([]);
+      return { text: selected.length ? "" : undefined, refresh };
+    }
     const full = items.filter(item => item.mode === "full").map(item => item.entry);
     const pointers = items.filter(item => item.mode === "pointer").map(item => {
       let read: string | null = null;
@@ -281,7 +283,10 @@ export abstract class HostRuntimeAdapterBase {
     const body = !full.length ? "" : command
       ? this.renderSelectedHotContext(full, workspaceId, sessionStart, command, home!)
       : renderHotCheckpoints(full, HOT_CONTEXT_LIMIT);
-    return { text: [body, ...pointers].filter(Boolean).join("\n"), refresh };
+    const text = [body, ...pointers].filter(Boolean).join("\n");
+    // Recorded only once the text exists, so a failure above never marks an unsent checkpoint as delivered.
+    record(items.map(item => item.mode === "full" ? item.full : item.pointer));
+    return { text, refresh };
   }
 
   private renderSelectedHotContext(selected: SelectedHotCheckpoint[], workspaceId: string, sessionStart: boolean, command: string, home: string): string {

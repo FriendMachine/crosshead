@@ -80,6 +80,16 @@ describe("hot continuity findings", () => {
     expect(delivered).toContain("trust what you see now and say so");
   });
 
+  it("gives the most recent earlier finding the history budget and prints history oldest first", () => {
+    const rendered = renderHotCheckpoints([{ ...checkpoint({ summary: "Latest: 43 items.", occurredAt: "2026-10-17T03:00:00.000Z" }), earlierFindings: [
+      { runtime: "codex", occurredAt: "2026-10-17T02:00:00.000Z", summary: "Second finding, 40 items. " + "detail ".repeat(200) },
+      { runtime: "codex", occurredAt: "2026-10-17T01:00:00.000Z", summary: "First finding, 37 items. " + "detail ".repeat(200) },
+    ] }], 2000);
+    expect(rendered).toContain("Second finding, 40 items.");
+    if (rendered.includes("First finding")) expect(rendered.indexOf("First finding")).toBeLessThan(rendered.indexOf("Second finding"));
+    expect(rendered.trimEnd().endsWith("Latest: 43 items.")).toBe(true);
+  });
+
   it("keeps the latest finding whole when there is no room for earlier ones", () => {
     const latest = "Correction: parcel batches hold 43 items. ".repeat(8).trim();
     for (const budget of [700, 800, 900, 1000, 1100]) {
