@@ -1,9 +1,10 @@
 import {
-  ARCHIVE_RECALL_BUDGET, archiveApprovalFitsScope, archivePackId, findArchiveRecallApproval, readArchiveRecallSnapshot,
+  ARCHIVE_RECALL_BUDGET, archiveApprovalFitsScope, archivePackId, dropCachedArchiveRecall, findArchiveRecallApproval, readArchiveRecallSnapshot,
+  readCachedArchiveRecall, writeCachedArchiveRecall,
   renderArchiveRecall, verifyArchiveRecall,
 } from "./archive-recall";
 import { getHotSyncManager, hotSyncEnabled, tickHotSyncManagers } from "./hot-sync-manager";
-import { encodeArchivedTurn } from "./continuity-recall";
+import { encodeArchivedTurn, RECALL_TIMEOUT_MS } from "./continuity-recall";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 import { createHash, randomUUID } from "crypto";
@@ -1567,6 +1568,10 @@ export class RuntimeLifecycleManager {
   private readonly maxQueueAttempts: number;
   private timer: NodeJS.Timeout | null = null;
   private backgroundOperation: Promise<void> | null = null;
+  /** Background revalidations of cached archive recall, by approval digest; stop() waits for them. */
+  private readonly recallRevalidations = new Map<string, Promise<void>>();
+  /** Bumped whenever a cached snapshot is dropped; a recall started before that may not restore it. */
+  private readonly recallCacheGenerations = new Map<string, number>();
   private mutation: Promise<void> = Promise.resolve();
   private detachedFlush: Promise<void> | null = null;
   private readonly claimedQueueItems = new Set<string>();
@@ -1617,6 +1622,7 @@ export class RuntimeLifecycleManager {
     finally {
       if (this.backgroundOperation === operation) this.backgroundOperation = null;
       await this.detachedFlush;
+      await Promise.allSettled([...this.recallRevalidations.values()]);
       await this.mutation;
     }
   }
@@ -2302,22 +2308,77 @@ export class RuntimeLifecycleManager {
 		const { event } = response;
 		const workspaceId = event.workspaceId;
 		if (!workspaceId) return;
+		let resolved: ReturnType<RuntimeLifecycleManager["resolveProfile"]>;
+		let goal: string | null, scope: Record<string, unknown> | null;
+		let approval: ReturnType<typeof findArchiveRecallApproval>;
+		let cached: ReturnType<typeof readCachedArchiveRecall> = null;
+		try {
+			resolved = this.resolveProfile(event.profileName);
+			if (isLocalOnlyRuntimeProfile(resolved.profile)) return;
+			const governor = this.deps.loadContinuityGovernorState();
+			const request = buildPackRequest(event, governor.memoryScope);
+			goal = asString(request?.goal);
+			scope = asRecord(request?.allowedScope);
+			if (!goal || !scope || governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
+			approval = findArchiveRecallApproval(this.deps.paths.state, resolved.profile, workspaceId, goal, event.runtime);
+			if (!approval || !archiveApprovalFitsScope(approval, scope)) return;
+			// A turn that overlaps the previous turn's revalidation waits for its outcome
+			// (within the normal deadline), so a refused snapshot is never served twice.
+			const pending = this.recallRevalidations.get(approval.sha256);
+			if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, RECALL_TIMEOUT_MS).unref?.())]);
+			// A snapshot verified on an earlier turn is served now; the hosted call
+			// (which bills and reports superseded records) runs off the critical path.
+			cached = this.recallRevalidations.has(approval.sha256) ||
+				(resolved.profile.memoryMode !== "assist" && resolved.profile.memoryMode !== "auto")
+				? null : readCachedArchiveRecall(this.deps.paths.state, resolved.profile, workspaceId, approval);
+		} catch (error) {
+			response.warnings.push(describeBoundedRecallFallback(error));
+			return;
+		}
+		const { profileName } = resolved;
+		if (cached && cached.snapshot.sources.every(source => source.kind === "warm_memory"
+				? scope.includeWarmMemory === true : scope.includeColdMemory === true)) {
+			// The pack billed for this turn is created by the background request; outcomes
+			// must not be attributed to the earlier pack, so this turn carries no pack id.
+			contextPack.verifiedArchiveContext = renderArchiveRecall(cached.snapshot);
+			try {
+				response.actions.push(this.recordAction({
+					eventId: event.eventId, profileName, type: "context_pack", status: "completed", mode: response.mode,
+					reason: "Served verified archive recall from the local cache; revalidating", queueItemId: null,
+					details: { cachedPackId: cached.packId, verifiedArchiveRecall: true, cachedArchiveRecall: true },
+				}));
+			} catch {
+				response.warnings.push("Could not record the hosted archive recall result locally.");
+			}
+			const key = approval.sha256;
+			const revalidation: Promise<void> = this.liveArchiveRecall(response, null, resolved, goal!, scope!, approval)
+				.catch(() => undefined).finally(() => { if (this.recallRevalidations.get(key) === revalidation) this.recallRevalidations.delete(key); });
+			this.recallRevalidations.set(key, revalidation);
+			return;
+		}
+		await this.liveArchiveRecall(response, contextPack, resolved, goal, scope, approval);
+	}
 
+	/**
+	 * The hosted recall call and its verification. With a target pack, the
+	 * verified snapshot is delivered on this turn; without one (background
+	 * revalidation) it only refreshes or drops the local cache.
+	 */
+	private async liveArchiveRecall(
+		response: RuntimeLifecycleEventResponse, target: Record<string, unknown> | null,
+		resolved: ReturnType<RuntimeLifecycleManager["resolveProfile"]>, goal: string, scope: Record<string, unknown>,
+		approval: NonNullable<ReturnType<typeof findArchiveRecallApproval>>,
+	): Promise<void> {
+		const { event } = response;
+		const workspaceId = event.workspaceId!;
+		const warnings = target ? response.warnings : [];
+		const generation = this.recallCacheGenerations.get(approval.sha256) ?? 0;
 		let attemptedProfile: string | null = null;
 		let packId: string | null = null;
 		let verified = false;
 		let failure: ReturnType<typeof describeHostedFailure> | undefined;
 		try {
-			const { profileName, profile, secret } = this.resolveProfile(event.profileName);
-			if (isLocalOnlyRuntimeProfile(profile)) return;
-			const governor = this.deps.loadContinuityGovernorState();
-			const request = buildPackRequest(event, governor.memoryScope);
-			const goal = asString(request?.goal);
-			const scope = asRecord(request?.allowedScope);
-			if (!goal || !scope || governor.paused || (!scope.includeWarmMemory && !scope.includeColdMemory)) return;
-			const approval = findArchiveRecallApproval(this.deps.paths.state, profile, workspaceId, goal, event.runtime);
-			if (!approval || !archiveApprovalFitsScope(approval, scope)) return;
-
+			const { profileName, profile, secret } = resolved;
 			const client = this.buildClient(profile, secret);
 			attemptedProfile = profileName;
 			const hosted = await client.requestArchiveRecall({
@@ -2348,34 +2409,47 @@ export class RuntimeLifecycleManager {
 						verifyArchiveRecall(currentProfile, currentApproval, snapshot) &&
 						snapshot.sources.every(source => source.kind === "warm_memory"
 							? currentScope.includeWarmMemory === true : currentScope.includeColdMemory === true)) {
-					contextPack.verifiedArchiveContext = renderArchiveRecall(snapshot);
-					contextPack.packId = packId;
+					if (target) {
+						target.verifiedArchiveContext = renderArchiveRecall(snapshot);
+						target.packId = packId;
+					}
 					verified = true;
+					// A concurrent recall that dropped the entry since this one started wins.
+					try { if ((this.recallCacheGenerations.get(approval.sha256) ?? 0) === generation) writeCachedArchiveRecall(this.deps.paths.state, currentProfile, currentApproval, snapshot, packId); }
+					catch { /* Without a cache entry the next turn waits for the live call, as before. */ }
 				}
 			}
-			if (!verified) response.warnings.push("Hosted archive recall was withheld. Only hot context was delivered.");
+			if (!verified) warnings.push("Hosted archive recall was withheld. Only hot context was delivered.");
 		} catch (error) {
 			failure = describeHostedFailure(error);
-			response.warnings.push(describeBoundedRecallFallback(error));
+			warnings.push(describeBoundedRecallFallback(error));
 		} finally {
+			// A cached snapshot that did not verify live is not served again.
+			if (!verified) {
+				this.recallCacheGenerations.set(approval.sha256, (this.recallCacheGenerations.get(approval.sha256) ?? 0) + 1);
+				try { dropCachedArchiveRecall(this.deps.paths.state, resolved.profile, workspaceId, approval.sha256); }
+				catch { /* The approval digest still guards any later use. */ }
+			}
 			if (attemptedProfile) {
 				try {
-					response.actions.push(this.recordAction({
+					const action = this.recordAction({
 						eventId: event.eventId,
 						profileName: attemptedProfile,
 						type: "context_pack",
 						status: failure ? "failed" : "completed",
 						mode: response.mode,
-						reason: verified ? "Verified archive recall against a local approval" : "Hosted archive recall withheld",
+						reason: verified ? (target ? "Verified archive recall against a local approval" : "Revalidated cached archive recall") : (target ? "Hosted archive recall withheld" : "Cached archive recall failed revalidation; withheld from later turns"),
 						queueItemId: null,
 						details: {
 							...(packId ? { packId } : {}),
 							verifiedArchiveRecall: verified,
 							...(failure ? { failure } : {}),
+							...(target ? {} : { cachedArchiveRecall: true, revalidation: true }),
 						},
-					}));
+					});
+					if (target) response.actions.push(action);
 				} catch {
-					response.warnings.push("Could not record the hosted archive recall result locally.");
+					warnings.push("Could not record the hosted archive recall result locally.");
 				}
 			}
 		}

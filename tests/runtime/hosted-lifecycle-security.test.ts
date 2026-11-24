@@ -343,6 +343,11 @@ describe("verified recall through native prompt preparation", () => {
 		const preview = (...args: string[]) => command("preview", "--goal", goal, ...args);
 		const approve = ({ packId, sha256 }: { packId: string; sha256: string }, ...args: string[]) =>
 			command("approve", "--pack-id", packId, "--sha256", sha256, ...args);
+		// A verified snapshot is cached; the next approved turn is served from it while the
+		// hosted call revalidates in the background. Wait for that revalidation to be recorded.
+		const revalidations = async () => (await daemon.readActivity(500)).actions.filter(action =>
+			(action.details as Record<string, unknown> | undefined)?.revalidation === true);
+		const settled = async (before: number) => vi.waitFor(async () => expect((await revalidations()).length).toBeGreaterThan(before));
 
 		const baseline = await prepare("unapproved");
 		expect(baseline.contextText).toContain(hot);
@@ -380,7 +385,15 @@ describe("verified recall through native prompt preparation", () => {
 		expect(coldDenied.contextPack?.packId).toBeNull();
 
 		warnings = ["Archive search was skipped."];
-		expect((await prepare("incomplete")).packId).toBeNull();
+		let before = (await revalidations()).length;
+		const fromCache = await prepare("incomplete");
+		// Served from the cache; the turn carries no pack id (the billed pack is the background one).
+		expect(fromCache.packId).toBeNull();
+		expect(fromCache.contextText).toContain(warm.content);
+		await settled(before);
+		expect((await revalidations()).at(-1)?.details).toMatchObject({ verifiedArchiveRecall: false, cachedArchiveRecall: true });
+		// The failed revalidation withholds from the following turn.
+		expect((await prepare("incomplete-next")).packId).toBeNull();
 		warnings = [];
 		sources = [cold]; // An internally consistent response that omits the approved correction.
 		const withheld = await prepare("omits-correction");
@@ -402,7 +415,11 @@ describe("verified recall through native prompt preparation", () => {
 		expect((await prepare("new-revision")).contextText).toContain(sources[1]!.content);
 		taskId = previousTaskId;
 		sources = [cold, warm];
-		expect((await prepare("replayed-revision")).contextText).toBe(baseline.contextText);
+		before = (await revalidations()).length;
+		// Served from the v2 snapshot cached on the previous turn; the replayed v1 answer fails revalidation.
+		expect((await prepare("replayed-revision")).contextText).toContain("Check the receipt and verify that the payer matches.");
+		await settled(before);
+		expect((await prepare("replayed-revision-next")).contextText).toBe(baseline.contextText);
 
 		responseStatus = 402;
 		expect((await prepare("unfunded")).contextText).toBe(baseline.contextText);
@@ -419,7 +436,33 @@ describe("verified recall through native prompt preparation", () => {
 		await approve(hostPreview, "--host", runtime);
 		expect((await prepare("host-scoped")).contextText).toContain(warm.content);
 		expect(requestHosts.slice(-2)).toEqual([runtime, runtime]);
-		let release!: () => void;
+		// With a cached snapshot the turn does not wait for the hosted call.
+		before = (await revalidations()).length;
+		let release: (() => void) | undefined;
+		whenRequested = () => new Promise<void>(resolve => { release = resolve; });
+		sources = [cold]; // The server now omits the correction; the cached turn is answered before it knows.
+		const requestsBefore = fetcher.mock.calls.length;
+		const cachedTurn = await Promise.race([prepare("cached-in-flight"), new Promise<null>(resolve => setTimeout(() => resolve(null), 2000))]);
+		expect(cachedTurn?.contextText).toContain(warm.content);
+		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+		// An overlapping turn waits for that revalidation instead of serving the cache again.
+		const firstRelease = release!;
+		release = undefined;
+		const overlapping = prepare("overlapping");
+		await new Promise(resolve => setTimeout(resolve, 100));
+		firstRelease();
+		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+		release!();
+		expect((await overlapping).contextText).toBe(baseline.contextText);
+		sources = [cold, warm];
+		await settled(before);
+		// Billing: each served turn made exactly one hosted request (the cached turn in the background, the overlapping one live).
+		expect(fetcher.mock.calls.length - requestsBefore).toBe(2);
+		// Revocation discards the cache, so the next approved turn waits for the live call again.
+		whenRequested = undefined;
+		await command("revoke", "--task", taskId);
+		await approve(await preview("--host", runtime), "--host", runtime);
+		release = undefined;
 		whenRequested = () => new Promise<void>(resolve => { release = resolve; });
 		const inFlight = prepare("in-flight");
 		try {
