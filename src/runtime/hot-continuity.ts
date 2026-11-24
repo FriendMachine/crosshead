@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { compactContinuitySummary } from "./summary-compaction";
 import { normalizeTaskEvidence, preferFileSources, renderTaskEvidence, taskEvidenceChars, type TaskEvidence } from "./task-evidence";
+import { describeWorkspaceDrift, fileExcerptState, type WorkspaceGitState } from "./workspace-state";
 import { IMPORTED_HANDOFF_TURN_PREFIX } from "./handoff-import";
 
 // Capture and delivery have separate bounds. Keep exact findings, including list/code
@@ -94,8 +95,16 @@ const checkpointSize = (entry: Pick<HotContinuityCheckpoint, "goal" | "summary" 
 /** Drop the lowest-priority sources (the last ones) until the checkpoint fits the sync budget. */
 const fitCheckpoint = <T extends Pick<HotContinuityCheckpoint, "goal" | "summary" | "evidence">>(entry: T): T => {
   let evidence = entry.evidence;
+  // Names of dropped sources and untracked files are worth less than any excerpt: they go first.
+  if (evidence && checkpointSize({ ...entry, evidence }) > HOT_CHECKPOINT_BUDGET && (evidence.omittedSources || evidence.workspace?.untracked.length)) {
+    const { omittedSources: _names, ...rest } = evidence;
+    evidence = { ...rest, ...(rest.workspace ? { workspace: { ...rest.workspace, untracked: [], untrackedOmitted: (rest.workspace.untrackedOmitted ?? 0) + rest.workspace.untracked.length } } : {}) };
+  }
   while (evidence?.sources.length && checkpointSize({ ...entry, evidence }) > HOT_CHECKPOINT_BUDGET) {
-    evidence = { ...evidence, sources: evidence.sources.slice(0, -1), omitted: evidence.omitted + 1 };
+    const last = evidence.sources[evidence.sources.length - 1]!;
+    const next = { ...evidence, sources: evidence.sources.slice(0, -1), omitted: evidence.omitted + 1 };
+    const named = { ...next, omittedSources: [...(evidence.omittedSources ?? []), { source: last.source.slice(0, 160), sha256: last.sha256 }].slice(-8) };
+    evidence = checkpointSize({ ...entry, evidence: named }) <= HOT_CHECKPOINT_BUDGET ? named : next;
   }
   return evidence === entry.evidence ? entry : { ...entry, evidence };
 };
@@ -118,13 +127,17 @@ export const updateHotCheckpoints = (
   // Stop may follow compaction, after the source has left the host transcript.
   // Keep earlier evidence; repeated quotes dedupe by bytes, while conflicting
   // versions remain visible. Observation recency alone cannot establish authority.
-  const evidence = freshEvidence?.sources.length ? normalizeTaskEvidence({ ...freshEvidence,
+  const merged = freshEvidence?.sources.length ? normalizeTaskEvidence({ ...freshEvidence,
+    omittedSources: [...(prior?.evidence?.omittedSources ?? []), ...(freshEvidence.omittedSources ?? [])],
     // Two captures of one command (the per-call hook and the end-of-turn
     // transcript, or a rerun) are one observation: the newest replaces the older.
     // Differing versions of a file are kept so they can be reconciled.
     sources: preferFileSources([...freshEvidence.sources, ...(prior?.evidence?.sources ?? []).filter(s =>
       !freshEvidence.sources.some(n => n.sha256 === s.sha256 || (s.source.startsWith("$ ") && commandOf(n.source) === commandOf(s.source))))]),
   }) : prior?.evidence ?? freshEvidence;
+  // The newest capture's git state describes the tree this checkpoint now reflects.
+  const workspace = freshEvidence?.workspace ?? prior?.evidence?.workspace;
+  const evidence = merged && workspace && merged.workspace !== workspace ? { ...merged, workspace } : merged;
   const entries = old.filter((entry) => !sameTurn(entry));
   entries.push(fitCheckpoint({ ...next, goal: next.goal.slice(0, HOT_REQUEST_LIMIT),
     ...(next.goalTruncated || next.goal.length > HOT_REQUEST_LIMIT ? { goalTruncated: true } : {}),
@@ -233,6 +246,8 @@ export const selectHotCheckpoints = (
     const evidence = evidenceEntries.length ? normalizeTaskEvidence({ version: 1,
       coverage: evidenceEntries.some(e => e.coverage === "bounded") ? "bounded" : "unavailable",
       omitted: Math.max(...evidenceEntries.map(e => e.omitted)), sources: evidenceEntries.flatMap(e => e.sources),
+      omittedSources: evidenceEntries.flatMap(e => e.omittedSources ?? []).reverse(),
+      workspace: evidenceEntries.find(e => e.workspace)?.workspace,
     }) : undefined;
     const seen = new Set([latest.summary]);
     const earlierFindings = entries.slice(1).filter(entry => {
@@ -292,7 +307,15 @@ export const renderHotCheckpointPointer = (entry: SelectedHotCheckpoint, readCom
   return `Crosshead: a saved checkpoint for ${label} (${entry.runtime}, ${entry.occurredAt || "time unknown"}) shares no terms with this prompt and is not shown. If it is relevant, ${how}`;
 };
 
-export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT): string => {
+/** Where the reader is now, so saved state can be compared with it. */
+export type HotRenderWorkspace = { root: string; git: WorkspaceGitState | null; memo?: Map<string, string> };
+const memoized = (here: HotRenderWorkspace, key: string, compute: () => string): string => {
+  here.memo ??= new Map();
+  if (!here.memo.has(key)) here.memo.set(key, compute());
+  return here.memo.get(key)!;
+};
+
+export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength = HOT_CONTEXT_LIMIT, here?: HotRenderWorkspace): string => {
   if (entries.length === 0) return "";
   let remaining = maxLength;
   const parts: string[] = [];
@@ -302,7 +325,8 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
   // Entries stay in priority order (an import or the best match first) so a page
   // or budget cut cannot push them out; within an entry the newest state is last.
   for (const [index, entry] of entries.entries()) {
-    const heading = `${entry.origin === "remember" ? "Explicitly saved memory" : "Hot memory findings"} (${entry.runtime}):\n`;
+    const drift = here ? memoized(here, `drift:${JSON.stringify(entry.evidence?.workspace ?? null)}`, () => describeWorkspaceDrift(entry.evidence?.workspace, here.git, here.root)) : "";
+    const heading = `${entry.origin === "remember" ? "Explicitly saved memory" : "Hot memory findings"} (${entry.runtime}):\n${drift ? `${drift}\n` : ""}`;
     // Every selected task gets room; one large history must not silently erase
     // another selected amendment or task. Unused space flows to later entries.
     const available = Math.floor(remaining / (entries.length - index)) - heading.length - 1;
@@ -316,7 +340,8 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
     // may crowd the other out: the finding keeps up to 45% when both are large.
     const shared = available - request.length - historyReserve;
     const findingReserve = Math.min(entry.summary.length + 20, Math.max(650, Math.floor(shared * 0.45)));
-    const evidence = entry.evidence?.sources.length ? renderTaskEvidence(entry.evidence, Math.max(0, shared - findingReserve), entry.goal) : "";
+    const evidence = entry.evidence?.sources.length ? renderTaskEvidence(entry.evidence, Math.max(0, shared - findingReserve), entry.goal,
+      here ? { workspaceRoot: here.root, head: here.git?.head ?? null, fileState: (file, excerpt) => memoized(here, `file:${file}\0${excerpt.slice(0, 1500)}`, () => fileExcerptState(here.root, file, excerpt)) as "missing" | "changed" | "same" } : undefined) : "";
     const latestLabel = entry.earlierFindings?.length ? `Latest agent finding (${entry.runtime} at ${entry.occurredAt}): ` : evidence ? "Agent finding: " : "";
     const findingBudget = available - request.length - historyReserve - (evidence ? evidence.length + 1 : 0) - latestLabel.length;
     const summary = entry.summary.length <= findingBudget ? entry.summary : compactContinuitySummary(entry.summary, findingBudget);

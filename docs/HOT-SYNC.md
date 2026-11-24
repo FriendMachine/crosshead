@@ -22,6 +22,15 @@ checkpoints and 30,000 characters, with the existing 4,200-character prompt
 budget. The store allows 64 MiB per identity and API origin. A full or unwritable
 store fails the new capture explicitly and preserves existing pending captures.
 
+A checkpoint's evidence may carry the git state of the workspace it was
+captured in (`evidence.workspace`: HEAD, branch, uncommitted changes, and up to
+10 untracked files with content hashes; names that look private are left out), and command output may carry the
+commit it ran at. The field is optional and travels inside the opaque evidence,
+so older clients ignore it, and it counts toward the same 30,000-character
+budget. When the checkpoint is shown in a tree that differs, the prompt gets one
+warning line and marks on the affected excerpts. Nothing is restored or
+rewritten. Handoff capsules do not carry it yet.
+
 The daemon is the only writer. Its worker discovers cloud scopes, verifies
 signatures, uses conditional reads and writes, and reconciles conflicts. It
 prioritizes active workspaces and pending writes while rotating through recovery
