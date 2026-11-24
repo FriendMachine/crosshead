@@ -379,13 +379,18 @@ export const renderHotCheckpoints = (entries: SelectedHotCheckpoint[], maxLength
     const historyHeader = `Earlier agent findings (superseded by the latest finding at ${entry.occurredAt || "a later time"} where they conflict; bounded excerpts):`;
     if (historyBudget - historyHeader.length - 1 > 100) {
       // Oldest first, then the latest finding: the newest state is read last.
-      let body = "";
-      for (const prior of (entry.earlierFindings ?? []).slice().reverse()) {
+      // Budget goes to the most recent earlier finding first; the text then reads oldest to newest.
+      const pieces: string[] = [];
+      let used = 0;
+      for (const prior of entry.earlierFindings ?? []) {
 	const prefix = `\n${prior.runtime} at ${prior.occurredAt}: `;
-	const space = historyBudget - historyHeader.length - 1 - body.length - prefix.length - 24;
-	if (space < 60) continue;
-	body += prefix + prior.summary.slice(0, space) + (prior.summary.length > space ? " [finding incomplete]" : "");
+	const space = historyBudget - historyHeader.length - 1 - used - prefix.length - 24;
+	if (space < 60) break;
+	const piece = prefix + prior.summary.slice(0, space) + (prior.summary.length > space ? " [finding incomplete]" : "");
+	pieces.push(piece);
+	used += piece.length;
       }
+      const body = pieces.reverse().join("");
       // A header with no finding under it is noise.
       if (body) history = `${historyHeader}${body}\n`;
     }
