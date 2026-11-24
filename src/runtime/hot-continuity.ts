@@ -21,6 +21,9 @@ export const HOT_CONTEXT_LIMIT = 4200;
 // back to the small budget. This bounds the complete rendering that is paged.
 export const HOT_FULL_RENDER_LIMIT = 80000;
 const MAX_CHECKPOINTS = 12;
+// Explicit saves per workspace kept ahead of other history (the user chose them).
+export const PROTECTED_SAVES = 3;
+export const PROTECTED_SAVES_TOTAL = 6;
 // The hot-sync replica (hot-sync-replica.ts) refuses a checkpoint whose request,
 // finding and serialized evidence exceed 30,000 characters. Every stored
 // checkpoint is kept under that with the same measure, so a checkpoint that is
@@ -110,8 +113,11 @@ const fitCheckpoint = <T extends Pick<HotContinuityCheckpoint, "goal" | "summary
 };
 const commandOf = (source: string): string => source.replace(/ \(exited non-zero\)$/, "");
 
+/** Epoch ms when a checkpoint was last delivered on this machine, or 0. */
+export type HotCheckpointLastUsed = (entry: HotContinuityCheckpoint) => number;
+
 export const updateHotCheckpoints = (
-  previous: unknown, next: HotContinuityCheckpoint
+  previous: unknown, next: HotContinuityCheckpoint, lastUsed?: HotCheckpointLastUsed
 ): HotContinuityCheckpoint[] => {
   const sameTurn = (entry: HotContinuityCheckpoint): boolean =>
     entry.runtime === next.runtime && entry.workspaceId === next.workspaceId &&
@@ -142,16 +148,39 @@ export const updateHotCheckpoints = (
   entries.push(fitCheckpoint({ ...next, goal: next.goal.slice(0, HOT_REQUEST_LIMIT),
     ...(next.goalTruncated || next.goal.length > HOT_REQUEST_LIMIT ? { goalTruncated: true } : {}),
     summary: captureHotFinding(next.summary), ...(evidence ? { evidence } : {}) }));
-  const bounded: HotContinuityCheckpoint[] = [];
-  let size = 0;
-  for (const entry of entries.reverse()) {
+  // Retention order: the newest checkpoint (the present), then the latest explicit
+  // saves of each workspace, then the rest by most recent use or capture. An entry
+  // that does not fit is skipped, so a smaller one behind it can still be kept.
+  const newest = entries[entries.length - 1]!;
+  const history = entries.slice(0, -1);
+  const savesByWorkspace = new Map<string, HotContinuityCheckpoint[]>();
+  for (const entry of history.filter(entry => entry.origin === "remember").sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt))) {
+    const key = entry.workspaceId ?? "";
+    savesByWorkspace.set(key, [...(savesByWorkspace.get(key) ?? []), entry]);
+  }
+  const saves = new Set<HotContinuityCheckpoint>();
+  let savedChars = 0;
+  for (const entry of [...savesByWorkspace.values()].flatMap(list => list.slice(0, PROTECTED_SAVES))
+    .sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)).slice(0, PROTECTED_SAVES_TOTAL)) {
+    // Saves may take at most half the history budget.
     const chars = entry.goal.length + entry.summary.length + taskEvidenceChars(entry.evidence);
-    // The newest checkpoint is always kept; the bound trims history, not the present.
-    if (bounded.length > 0 && (bounded.length >= MAX_CHECKPOINTS || size + chars > MAX_HISTORY_CHARS)) break;
-    bounded.push(entry);
+    if (savedChars + chars > MAX_HISTORY_CHARS / 2) continue;
+    savedChars += chars;
+    saves.add(entry);
+  }
+  const recency = (entry: HotContinuityCheckpoint): number => Math.max(timestamp(entry.occurredAt), lastUsed?.(entry) ?? 0);
+  const rest = history.filter(entry => !saves.has(entry)).map((entry, index) => ({ entry, index }))
+    .sort((a, b) => recency(b.entry) - recency(a.entry) || b.index - a.index).map(({ entry }) => entry);
+  const kept = new Set<HotContinuityCheckpoint>([newest]);
+  let size = newest.goal.length + newest.summary.length + taskEvidenceChars(newest.evidence);
+  for (const entry of [...[...saves].sort((a, b) => timestamp(b.occurredAt) - timestamp(a.occurredAt)), ...rest]) {
+    const chars = entry.goal.length + entry.summary.length + taskEvidenceChars(entry.evidence);
+    if (kept.size >= MAX_CHECKPOINTS || size + chars > MAX_HISTORY_CHARS) continue;
+    kept.add(entry);
     size += chars;
   }
-  return bounded.reverse();
+  // Stored order stays chronological by capture.
+  return entries.filter(entry => kept.has(entry));
 };
 
 const STOP_WORDS = new Set(("a an and are as at be been but by can do for from had has have i if in into is it its may of on or our should that the their then there these they this to was we were will with would you your").split(" "));

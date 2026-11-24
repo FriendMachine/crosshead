@@ -1,3 +1,4 @@
+import { PROTECTED_SAVES, PROTECTED_SAVES_TOTAL } from "./hot-continuity";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
@@ -45,10 +46,29 @@ export function retainHotSync(document: HotSyncDocument, requiredIds: Set<string
 	const mandatory = document.checkpoints.filter(required);
 	if (mandatory.length > 12 || mandatory.reduce((sum, c) => sum + size(c), 0) > 30000)
 		throw new Error("Pending conflict group exceeds the hot-memory budget; captures remain pending");
+	// The newest visible checkpoint (the present) comes first; then the latest explicit
+	// saves of each workspace, within half the character budget, ahead of other history.
+	// Deterministic (no device-local use), so every device retains the same set.
+	const visible = (c: HotSyncCheckpoint) => !supersededIds.has(c.id) && !conflictIds.has(c.id) && !c.conflictOf;
+	const byRecency = (a: HotSyncCheckpoint, b: HotSyncCheckpoint) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt) || a.id.localeCompare(b.id);
+	const newestId = document.checkpoints.filter(visible).sort(byRecency)[0]?.id;
+	const savesByWorkspace = new Map<string, HotSyncCheckpoint[]>();
+	for (const c of document.checkpoints.filter(c => c.origin === "remember" && visible(c))
+		.sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt) || a.id.localeCompare(b.id)))
+		savesByWorkspace.set(c.workspaceId, [...(savesByWorkspace.get(c.workspaceId) ?? []), c]);
+	const protectedIds = new Set<string>();
+	let protectedChars = 0;
+	for (const c of [...savesByWorkspace.values()].flatMap(list => list.slice(0, PROTECTED_SAVES)).sort(byRecency).slice(0, PROTECTED_SAVES_TOTAL)) {
+		if (protectedChars + size(c) > 15000) continue;
+		protectedChars += size(c);
+		protectedIds.add(c.id);
+	}
 	let chars = 0;
 	const checkpoints: HotSyncCheckpoint[] = [];
 	for (const c of [...document.checkpoints].sort((a, b) => Number(required(b)) - Number(required(a)) ||
-		Number(supersededIds.has(a.id)) - Number(supersededIds.has(b.id)) || Date.parse(b.occurredAt) - Date.parse(a.occurredAt) || a.id.localeCompare(b.id))) {
+		Number(supersededIds.has(a.id)) - Number(supersededIds.has(b.id)) || Number(b.id === newestId) - Number(a.id === newestId) ||
+		Number(protectedIds.has(b.id)) - Number(protectedIds.has(a.id)) ||
+		Date.parse(b.occurredAt) - Date.parse(a.occurredAt) || a.id.localeCompare(b.id))) {
 		if (checkpoints.length === 12 || chars + size(c) > 30000)
 			continue;
 		chars += size(c);

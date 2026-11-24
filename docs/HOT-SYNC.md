@@ -19,7 +19,13 @@ Pending checkpoints have a separate durable outbox. They survive restart,
 network failure, and retry exhaustion, even when they no longer fit the recent
 context view. Each upload is at most 128 KiB; recent context retains at most 12
 checkpoints and 30,000 characters, with the existing 4,200-character prompt
-budget. The store allows 64 MiB per identity and API origin. A full or unwritable
+budget. After the newest checkpoint, the latest three explicit saves of each
+workspace (six in all, within half the character budget) are kept ahead of
+other history, so newer turns do not evict them. Devices still on an older
+client retain by recency and can drop them until they upgrade. Local-only
+profiles (no hot sync) also keep history that is still being delivered to
+sessions ahead of idle, merely recent history; synced profiles do not, so that
+every device retains the same set. The store allows 64 MiB per identity and API origin. A full or unwritable
 store fails the new capture explicitly and preserves existing pending captures.
 
 A checkpoint's evidence may carry the git state of the workspace it was
