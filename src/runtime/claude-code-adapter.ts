@@ -610,7 +610,7 @@ export const claudeCodeContinuityTranslationContract: ContinuityTranslationContr
     });
   },
   normalizeToContinuityIr: (captured, targetRuntime = null) =>
-    normalizeCapturedContextToContinuityIr(captured, targetRuntime),
+    normalizeCapturedContextToContinuityIr(captured, targetRuntime, { workspaceState: true }),
   materializeFromContinuityIr: (translation, targetRuntime = "claude-code") =>
     materializeContinuityIrForRuntime(translation, targetRuntime),
   reportFidelity: (translation) => translation.fidelity,

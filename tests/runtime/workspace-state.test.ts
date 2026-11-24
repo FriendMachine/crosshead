@@ -209,9 +209,16 @@ describe("checkpoint git state", () => {
     const root = repo();
     const captured = buildCapturedContinuityContext({ runtime: "codex", workspaceRoot: root, workspaceId: "repo:w", sessionId: "s", turnId: "t",
       prompt: "Continue", transcript: [{ role: "user", content: "Continue" }], task: { objective: "Continue", openLoops: [] } });
-    const ir = normalizeCapturedContextToContinuityIr(captured, "claude-code").ir;
+    writeFileSync(path.join(root, "customer-export.csv"), "private\n");
+    // Not carried unless the caller opts in (deal handoffs to another party never do).
+    expect(normalizeCapturedContextToContinuityIr(captured, "claude-code").ir.provenance.workspace).toBeUndefined();
+    const ir = normalizeCapturedContextToContinuityIr(captured, "claude-code", { workspaceState: true }).ir;
     expect(validateContinuityIr(ir)).toEqual([]);
     expect(ir.provenance.workspace?.head).toBe(git(root, "rev-parse", "HEAD"));
+    expect(ir.provenance.workspace?.dirty).toBe(true);
+    // A capsule leaves the machine: no untracked names or hashes.
+    expect(ir.provenance.workspace?.untracked).toEqual([]);
+    expect(JSON.stringify(ir)).not.toContain("customer-export");
 
     const state = mkdtempSync(path.join(tmpdir(), "crosshead-import-state-"));
     dirs.push(state);
