@@ -520,6 +520,8 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
       state.sessionId ??
       buildSyntheticSessionId();
+    // A (re)started session holds none of the checkpoints a reused session id recorded.
+    resetSessionDelivery(runtimeHome, "claude-code", { sessionId });
     await adapter.sessionStarted({
       workspaceRoot,
       workspaceId,
