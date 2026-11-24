@@ -14,6 +14,14 @@ describe("native hook capture contract", () => {
     expect(context).toContain("Distinguish observed facts from assumptions");
     expect(context).toContain("No manual hook invocation or repository memory file is needed");
     expect(context).toContain("does not authorize file changes");
+    // A saved "tests passed" is only useful with what was run, where and on which tree.
+    expect(context).toContain("give the command, working directory, commit and whether the tree had uncommitted changes");
+    expect(context).toContain("check it again live");
+  });
+
+  it("omits the capture contract once the session holds it", () => {
+    expect(renderRuntimeStartupContext({ ...empty, actions: [], warnings: [], runtime: "codex", mode: "assist", captureGuidance: false }))
+      .not.toContain("capture your final response");
   });
 
   it.each(["off", "manual"] as const)("does not promise automatic capture in %s mode", mode => {

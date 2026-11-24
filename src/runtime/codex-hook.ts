@@ -17,7 +17,7 @@ import {
 import { ensureRuntimeHomeLayout } from "./local-runtime";
 import { compactContinuitySummary } from "./summary-compaction";
 import { captureHotFinding } from "./hot-continuity";
-import { claimSessionStartContext, releaseSessionStartContext } from "./hook-session-context";
+import { claimSessionStartContext, releaseSessionStartContext, resetSessionDelivery } from "./hook-session-context";
 import { readLastAssistantMessage } from "./hook-transcript";
 import { recordTokenUsageHook, tokenUsagePhase } from "./token-usage";
 import { loadProfile, writeJsonFile } from "./runtime-persistence";
@@ -496,6 +496,8 @@ export const runOnlyBotsCodexHookCli = async (
       pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
       state.sessionId ??
       buildSyntheticSessionId();
+    // A (re)started session holds none of the checkpoints a reused session id recorded.
+    resetSessionDelivery(runtimeHome, "codex", { sessionId });
     await adapter.sessionStarted({
       workspaceRoot,
       workspaceId,
@@ -528,6 +530,8 @@ export const runOnlyBotsCodexHookCli = async (
 			pickString(payload, ["turn_id", "turnId", "event_id", "eventId", "id", "message_id", "messageId"]) ??
 			state.turnId ??
 			null;
+		// Compaction drops what the session held; its checkpoints are sent again.
+		if (requestedSessionId) resetSessionDelivery(runtimeHome, "codex", { sessionId: requestedSessionId });
 		const turnState = selectHookTurnState(state, requestedSessionId, requestedTurnId);
 		const sessionId = turnState.sessionId ?? requestedSessionId ?? buildSyntheticSessionId();
 		const turnId = turnState.turnId ?? requestedTurnId ?? null;

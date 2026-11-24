@@ -71,8 +71,34 @@ describe("hot continuity findings", () => {
     expect(selected[0]?.summary).toBe(corrected.summary);
     const delivered = renderHotCheckpoints(selected);
     expect(delivered).toContain("43 items, replacing 37");
-    expect(delivered).toContain("Earlier agent findings (may be superseded");
+    expect(delivered).toContain("Earlier agent findings (superseded by the latest finding at 2026-10-17T02:00:00.000Z");
     expect(delivered).toContain("37 items");
+    // The newest state is read last, after the superseded history.
+    expect(delivered.indexOf("43 items, replacing 37")).toBeGreaterThan(delivered.indexOf("37 items."));
+    // The precedence rule is stated as conditions, one case each.
+    expect(delivered).toContain("If one conflicts with the user's current message, follow the message.");
+    expect(delivered).toContain("trust what you see now and say so");
+  });
+
+  it("gives the most recent earlier finding the history budget and prints history oldest first", () => {
+    const rendered = renderHotCheckpoints([{ ...checkpoint({ summary: "Latest: 43 items.", occurredAt: "2026-10-17T03:00:00.000Z" }), earlierFindings: [
+      { runtime: "codex", occurredAt: "2026-10-17T02:00:00.000Z", summary: "Second finding, 40 items. " + "detail ".repeat(200) },
+      { runtime: "codex", occurredAt: "2026-10-17T01:00:00.000Z", summary: "First finding, 37 items. " + "detail ".repeat(200) },
+    ] }], 2000);
+    expect(rendered).toContain("Second finding, 40 items.");
+    if (rendered.includes("First finding")) expect(rendered.indexOf("First finding")).toBeLessThan(rendered.indexOf("Second finding"));
+    expect(rendered.trimEnd().endsWith("Latest: 43 items.")).toBe(true);
+  });
+
+  it("keeps the latest finding whole when there is no room for earlier ones", () => {
+    const latest = "Correction: parcel batches hold 43 items. ".repeat(8).trim();
+    for (const budget of [700, 800, 900, 1000, 1100]) {
+      const rendered = renderHotCheckpoints([{ ...checkpoint({ summary: latest, occurredAt: "2026-10-17T02:00:00.000Z" }),
+        earlierFindings: [{ runtime: "codex", occurredAt: "2026-10-17T01:00:00.000Z", summary: "Earlier observation. ".repeat(40) }] }], budget);
+      expect(rendered.length).toBeLessThanOrEqual(budget);
+      expect(rendered.endsWith("43 items.")).toBe(true);
+      if (rendered.includes("Earlier agent findings")) expect(rendered).toMatch(/Earlier agent findings[^\n]*\ncodex at /);
+    }
   });
 
   it("preserves sources and prior decisions across host updates, duplicated scopes and source conflicts", () => {

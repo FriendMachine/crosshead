@@ -42,4 +42,21 @@ describe("Codex hook turn summary compaction", () => {
     expect(compacted).toContain("Public API constraint");
     expect(compacted).not.toContain(tempPath);
   });
+
+  it("keeps what is still unresolved or blocked when compacting", () => {
+    const summary = [
+      "I read the parser and the three fixtures in detail and summarised each of them for the record.",
+      "The tokenizer handles quoted strings and escapes the same way in every fixture I looked at today.",
+      "Formatting of the output table was adjusted to align the columns more neatly than before.",
+      "Unresolved: the negative-offset case still returns the wrong row.",
+      "Deploy is blocked on the staging credentials, which only the operator can rotate.",
+      "Remaining work is the migration for the archived rows.",
+      "Overall the session went smoothly and the code is in a reasonable state now.",
+    ].join(" ");
+    const compacted = compactContinuitySummary(summary, 260);
+    expect(compacted.length).toBeLessThanOrEqual(260);
+    expect(compacted).toContain("negative-offset case");
+    expect(compacted).toContain("blocked on the staging credentials");
+    expect(compacted).toContain("migration for the archived rows");
+  });
 });

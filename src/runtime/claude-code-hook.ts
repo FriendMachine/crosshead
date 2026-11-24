@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "fs";
 import path from "path";
 
 import { captureHotFinding } from "./hot-continuity";
-import { claimSessionStartContext, releaseSessionStartContext } from "./hook-session-context";
+import { claimSessionStartContext, releaseSessionStartContext, resetSessionDelivery } from "./hook-session-context";
 import { readLastAssistantMessage } from "./hook-transcript";
 import { recordTokenUsageHook, tokenUsagePhase } from "./token-usage";
 
@@ -402,6 +402,13 @@ export const runOnlyBotsClaudeCodeHookCli = async (
   const event = normalizedEventName.replace(/_/g, "");
   // Older Claude Code releases send child auto-compactions with the exact
   // parent payload. Only the manual trigger identifies a parent compaction.
+  const compactSessionId = pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]);
+  if (event === "precompact" || event === "postcompact" || (event === "sessionstart" && pickString(payload, ["source", "payload.source"]) === "compact")) {
+    // Any compaction, including the automatic ones skipped below, drops what the
+    // session held, so its checkpoints are sent again. A child compaction that
+    // reuses the parent's id only costs the parent one repeat.
+    if (compactSessionId) resetSessionDelivery(runtimeHome, "claude-code", { sessionId: compactSessionId });
+  }
   if ((event === "precompact" || event === "postcompact") && pickCompactionTrigger(payload) !== "manual") return;
   if (event === "sessionstart" && pickString(payload, ["source", "payload.source"]) === "compact") return;
   const viaPlugin = isPluginHookInvocation(flags);
@@ -513,6 +520,8 @@ export const runOnlyBotsClaudeCodeHookCli = async (
       pickString(payload, ["session_id", "sessionId", "session.id", "conversation_id", "conversationId"]) ??
       state.sessionId ??
       buildSyntheticSessionId();
+    // A (re)started session holds none of the checkpoints a reused session id recorded.
+    resetSessionDelivery(runtimeHome, "claude-code", { sessionId });
     await adapter.sessionStarted({
       workspaceRoot,
       workspaceId,

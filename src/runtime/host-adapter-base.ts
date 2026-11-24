@@ -5,7 +5,8 @@ export { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { existsSync } from "fs";
 import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
 import path from "path";
-import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
+import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, hotCheckpointDigest, renderHotCheckpointPointer, renderHotCheckpoints, selectHotCheckpoints, type SelectedHotCheckpoint } from "./hot-continuity";
+import { readSessionDelivery, recordSessionDelivery } from "./hook-session-context";
 import { CHECKPOINT_PAGE_CHARS, inlineCheckpointPages, paginateCheckpoint, saveCheckpointPages } from "./checkpoint-pages";
 import { resolveRuntimeHome } from "./local-runtime";
 import { evidenceFromToolCall, readTaskEvidence, taskEvidenceCaptureEnabled, type TaskEvidence } from "./task-evidence";
@@ -235,18 +236,66 @@ export abstract class HostRuntimeAdapterBase {
    * Whenever more is saved than is shown, the pages are stored and the text ends
    * with the exact command that prints them, so an agent never has to stop or
    * guess because a note was cut off.
+   *
+   * On Claude Code and Codex, a checkpoint the session already received is not
+   * sent again (compaction or a changed checkpoint sends it again), and after
+   * the first prompt a checkpoint that shares no terms with the prompt is
+   * reduced to a one-line pointer. `refresh` is true when the session holds no
+   * earlier delivery: its first prompt, or the first after compaction.
    */
-  protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean): string | undefined {
+  protected renderHotContext(snapshot: unknown, prompt: string, workspaceId: string, sessionStart: boolean, sessionId?: string): { text: string | undefined; refresh: boolean } {
+    const home = this.config.runtimeHome;
+    const host = this.identity.runtimeId as string;
+    const tracked = Boolean(home && sessionId && (host === "claude-code" || host === "codex"));
+    const delivery = tracked ? readSessionDelivery(home!, host, sessionId!) : null;
+    const refresh = sessionStart || !delivery || delivery.refresh;
+    const record = (digests: string[]): void => {
+      if (tracked) recordSessionDelivery(home!, host, workspaceId, sessionId!, digests, refresh);
+    };
     const command = this.bridgeCommand();
-    if (!command || !this.config.runtimeHome) return undefined;
     const selected = selectHotCheckpoints(snapshot, prompt, this.config.workspaceOnly ? workspaceId : undefined);
-    if (!selected.length) return undefined;
+    if (!tracked) {
+      if (!command || !home || !selected.length) return { text: undefined, refresh };
+      return { text: this.renderSelectedHotContext(selected, workspaceId, sessionStart, command, home), refresh };
+    }
+    const delivered = refresh ? new Set<string>() : delivery!.delivered;
+    const items = selected.map(entry => {
+      const digest = hotCheckpointDigest(entry);
+      // A session that holds nothing yet (first prompt, after compaction) gets every selected checkpoint in full.
+      const mode: "full" | "pointer" = !refresh && entry.match === "unrelated" ? "pointer" : "full";
+      return { entry, mode, full: `${digest}:full`, pointer: `${digest}:pointer` };
+    }).filter(item => !delivered.has(item.full) && !(item.mode === "pointer" && delivered.has(item.pointer)) &&
+      // The session wrote its own checkpoints; until compaction it still holds that work.
+      (refresh || !item.entry.sessionId || item.entry.sessionId !== sessionId));
+    if (!items.length) {
+      record([]);
+      return { text: selected.length ? "" : undefined, refresh };
+    }
+    const full = items.filter(item => item.mode === "full").map(item => item.entry);
+    const pointers = items.filter(item => item.mode === "pointer").map(item => {
+      let read: string | null = null;
+      if (command) {
+        const pages = paginateCheckpoint(renderHotCheckpoints([item.entry], HOT_FULL_RENDER_LIMIT));
+        read = `${command.replace("%PAGE%", " 1")} --key ${saveCheckpointPages(home!, host, workspaceId, pages)}`;
+      }
+      return renderHotCheckpointPointer(item.entry, read);
+    });
+    const body = !full.length ? "" : command
+      ? this.renderSelectedHotContext(full, workspaceId, sessionStart, command, home!)
+      : renderHotCheckpoints(full, HOT_CONTEXT_LIMIT);
+    const text = [body, ...pointers].filter(Boolean).join("\n");
+    // Recorded only once the text exists, so a failure above never marks an unsent checkpoint as delivered.
+    record(items.map(item => item.mode === "full" ? item.full : item.pointer));
+    return { text, refresh };
+  }
+
+  private renderSelectedHotContext(selected: SelectedHotCheckpoint[], workspaceId: string, sessionStart: boolean, command: string, home: string): string {
     const full = renderHotCheckpoints(selected, HOT_FULL_RENDER_LIMIT);
     const inline = sessionStart ? inlineCheckpointPages(this.identity.runtimeId) : 0;
     if (full.length <= (sessionStart ? CHECKPOINT_PAGE_CHARS * inline : HOT_CONTEXT_LIMIT)) return full;
     const pages = paginateCheckpoint(full);
     if (sessionStart && pages.length <= inline) return full;
-    const key = saveCheckpointPages(this.config.runtimeHome, this.identity.runtimeId, workspaceId, pages);
+    const key = saveCheckpointPages(home, this.identity.runtimeId, workspaceId, pages);
     const read = (page: number): string => `${command.replace("%PAGE%", ` ${page}`)} --key ${key}`;
     const shown = inline === 1 ? "page 1" : `pages 1 to ${inline}`;
     const remaining = pages.length - inline === 1 ? `page ${pages.length}` : `pages ${inline + 1} to ${pages.length}, one page number per call`;
@@ -370,6 +419,9 @@ export abstract class HostRuntimeAdapterBase {
     });
     // The daemon supplies verified archive excerpts through a dedicated field.
     // The hosted pack's context text, metadata and diagnostics stay outside the prompt.
+    const hot = input.prompt.trim()
+      ? this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true, input.sessionId)
+      : { text: undefined, refresh: true };
     let contextText = input.prompt.trim() ? renderRuntimeStartupContext({
       runtime: this.identity.runtimeId,
       profileName,
@@ -387,7 +439,9 @@ export abstract class HostRuntimeAdapterBase {
       freshness,
       hotMemorySnapshot: preTurnHotMemory,
       goal: input.prompt,
-      hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
+      hotContextText: hot.text,
+      // The capture contract is long; a session that already received it keeps it until compaction.
+      captureGuidance: hot.refresh,
     }) : "";
     if (input.prompt.trim()) contextText = appendVerifiedArchiveContext(contextText, contextPack);
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";

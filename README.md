@@ -230,7 +230,12 @@ a fresh session after choosing either setting.
   `--allow-stale`.
 - Imported text is labelled as an imported handoff, not as something you saved
   yourself. It is not promoted to warm memory. Until the project records newer
-  work (and for at most seven days) it is included in every prompt there.
+  work (and for at most seven days) it is offered to every session there.
+- Within one Claude Code or Codex session, a checkpoint is sent once, not on
+  every prompt. It is sent again after compaction or when the checkpoint
+  changes. After a session's first prompt, a checkpoint that shares no words
+  with the prompt is shown only as a one-line pointer with the command that
+  reads it.
 - `crosshead remember "<fact>"` saves one explicit fact for the current project; new sessions in
   either host receive it.
 - `crosshead status`, `crosshead doctor` and `crosshead logs` show what the
