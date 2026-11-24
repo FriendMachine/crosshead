@@ -7,7 +7,7 @@ import { nowIso, renderInjectedPrompt, shellQuote } from "./adapter-utils";
 import path from "path";
 import { HOT_CONTEXT_LIMIT, HOT_FULL_RENDER_LIMIT, hotCheckpointDigest, type HotRenderWorkspace, renderHotCheckpointPointer, renderHotCheckpoints, selectHotCheckpoints, type SelectedHotCheckpoint } from "./hot-continuity";
 import { readSessionDelivery, recordSessionDelivery } from "./hook-session-context";
-import { readWorkspaceGitState } from "./workspace-state";
+import { normalizeWorkspaceGitState, readWorkspaceGitState } from "./workspace-state";
 import { CHECKPOINT_PAGE_CHARS, inlineCheckpointPages, paginateCheckpoint, saveCheckpointPages } from "./checkpoint-pages";
 import { ensureRuntimeHomeLayout, resolveRuntimeHome } from "./local-runtime";
 import { hotCheckpointUseKey, recordHotUse } from "./hot-use";
@@ -648,7 +648,10 @@ export abstract class HostRuntimeAdapterBase {
     turnId: string;
     goal: string;
     content: string;
+    /** Git state the capsule was exported from; the imported checkpoint warns when this tree differs. */
+    sourceWorkspace?: unknown;
   }): Promise<{ saved: boolean; notSavedReason?: string }> {
+    const workspace = normalizeWorkspaceGitState(input.sourceWorkspace);
     const response = await this.client.emitEvent({
       eventId: input.eventId,
       runtime: this.identity.runtimeId,
@@ -661,6 +664,7 @@ export abstract class HostRuntimeAdapterBase {
         goal: input.goal,
         content: input.content,
         handoffTurnId: input.turnId,
+        ...(workspace ? { taskEvidence: { version: 1, sources: [], coverage: "unavailable", omitted: 0, workspace } } : {}),
       },
       metadata: {
         hostVersion: input.hostVersion ?? this.identity.wrapperVersionFallback,

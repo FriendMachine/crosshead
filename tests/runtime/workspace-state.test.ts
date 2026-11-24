@@ -7,6 +7,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { renderHotCheckpoints, updateHotCheckpoints, selectHotCheckpoints, type HotContinuityCheckpoint } from "../../src/runtime/hot-continuity";
 import { normalizeTaskEvidence, withWorkspaceState, type TaskEvidence } from "../../src/runtime/task-evidence";
 import { describeWorkspaceDrift, fileExcerptState, normalizeWorkspaceGitState, readWorkspaceGitState, sourceFilePath } from "../../src/runtime/workspace-state";
+import { buildCapturedContinuityContext, normalizeCapturedContextToContinuityIr, validateContinuityIr } from "../../src/runtime/continuity-ir";
+import { RuntimeLifecycleManager } from "../../src/runtime/lifecycle-engine";
+import { buildContinuityGovernorState } from "../../src/runtime/continuity-governor";
+import { buildDefaultContinuityPolicy } from "../../src/runtime/continuity-policy";
+import { HANDOFF_IMPORT_COMMAND } from "../../src/runtime/handoff-import";
+import { validHotSyncDocument, HOT_SYNC_VERSION } from "../../src/protocol/hot-sync";
+import { retainHotSync } from "../../src/runtime/hot-sync-replica";
+import { chmodSync } from "node:fs";
+import { vi } from "vitest";
+import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
+import { readLocalHotMemory } from "../../src/runtime/local-hot-memory";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -167,5 +178,58 @@ describe("checkpoint git state", () => {
     expect(stored!.goal.length + stored!.summary.length + JSON.stringify(stored!.evidence).length).toBeLessThanOrEqual(29000);
     const line = describeWorkspaceDrift(stored!.evidence!.workspace ?? workspace, { head: "c".repeat(40), branch: "x".repeat(100), dirty: false, untracked: [] }, "/nonexistent-root");
     expect(line.length).toBeLessThanOrEqual(320);
+  });
+
+  it("gives up on a slow git within its timeout and records nothing", () => {
+    const root = repo();
+    const bin = mkdtempSync(path.join(tmpdir(), "crosshead-slow-git-"));
+    dirs.push(bin);
+    writeFileSync(path.join(bin, "git"), "#!/bin/sh\nsleep 5\n");
+    chmodSync(path.join(bin, "git"), 0o755);
+    const saved = process.env.PATH;
+    process.env.PATH = `${bin}:${saved}`;
+    const started = Date.now();
+    try { expect(readWorkspaceGitState(root)).toBeNull(); } finally { process.env.PATH = saved; }
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it("round-trips git state through a synced document that older clients also accept", () => {
+    const evidence = { version: 1, coverage: "bounded", omitted: 0, sources: [], workspace: { head: "a".repeat(40), branch: "main", dirty: false, untracked: [{ path: "tool.py", sha256: null }] } };
+    const document = { version: HOT_SYNC_VERSION, namespace: "n", scope: "s", epoch: 0, checkpoints: [{
+      id: "c1", deviceId: "d", runtime: "codex", workspaceId: "repo:/w", occurredAt: "2026-11-23T00:00:00.000Z", goal: "g", summary: "s", evidence,
+    }] };
+    // The wire validator treats evidence as opaque, so a document from this client validates for older ones.
+    expect(validHotSyncDocument(document)).toBe(true);
+    const kept = retainHotSync(document as never);
+    expect(kept.checkpoints[0]!.evidence).toEqual(evidence);
+    expect(normalizeTaskEvidence(kept.checkpoints[0]!.evidence)?.workspace?.head).toBe("a".repeat(40));
+  });
+
+  it("carries the exporting workspace's git state through a handoff capsule into the imported checkpoint", async () => {
+    const root = repo();
+    const captured = buildCapturedContinuityContext({ runtime: "codex", workspaceRoot: root, workspaceId: "repo:w", sessionId: "s", turnId: "t",
+      prompt: "Continue", transcript: [{ role: "user", content: "Continue" }], task: { objective: "Continue", openLoops: [] } });
+    const ir = normalizeCapturedContextToContinuityIr(captured, "claude-code").ir;
+    expect(validateContinuityIr(ir)).toEqual([]);
+    expect(ir.provenance.workspace?.head).toBe(git(root, "rev-parse", "HEAD"));
+
+    const state = mkdtempSync(path.join(tmpdir(), "crosshead-import-state-"));
+    dirs.push(state);
+    vi.stubEnv("CROSSHEAD_HOT_SYNC_ENABLED", "false");
+    const key = generateSecretKey(), npub = nip19.npubEncode(getPublicKey(key)), nsec = nip19.nsecEncode(key);
+    const manager = new RuntimeLifecycleManager({
+      paths: { state }, hotWriteDebounceMs: 0, loadDefaultProfileName: () => "default",
+      loadProfile: () => ({ name: "default", apiBase: "http://127.0.0.1:0", npub, memoryMode: "assist", features: { coldSync: false, autoWarmPromotion: false } }),
+      loadSecret: () => ({ nsec, session: null }), saveSecret: () => {}, loadHealth: () => ({ queueDepth: 0, lastSuccessfulSyncAt: null, lastError: null }), saveHealth: () => {},
+      loadContinuityGovernorState: () => buildContinuityGovernorState(buildDefaultContinuityPolicy(), []), writeLog: () => {},
+    } as never);
+    try {
+      await manager.handleEvent({ eventId: "import-1", runtime: "claude-code", type: "operator.command", workspaceId: "repo:/elsewhere", sessionId: "import",
+        payload: { command: HANDOFF_IMPORT_COMMAND, goal: "Imported handoff", content: "Imported handoff text.", handoffTurnId: "handoff-x",
+          taskEvidence: { version: 1, sources: [], coverage: "unavailable", omitted: 0, workspace: ir.provenance.workspace } } });
+      const stored = JSON.stringify(readLocalHotMemory(state, "all", { name: "default", apiBase: "http://127.0.0.1:0", npub } as never));
+      expect(stored).toContain("handoff-x");
+      expect(stored).toContain(ir.provenance.workspace!.head!);
+    } finally { await manager.stop(); vi.unstubAllEnvs(); }
   });
 });
