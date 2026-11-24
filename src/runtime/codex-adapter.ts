@@ -642,7 +642,7 @@ export const codexContinuityTranslationContract: ContinuityTranslationContract<C
     });
   },
   normalizeToContinuityIr: (captured, targetRuntime = null) =>
-    normalizeCapturedContextToContinuityIr(captured, targetRuntime),
+    normalizeCapturedContextToContinuityIr(captured, targetRuntime, { workspaceState: true }),
   materializeFromContinuityIr: (translation, targetRuntime = "codex") =>
     materializeContinuityIrForRuntime(translation, targetRuntime),
   reportFidelity: (translation) => translation.fidelity,

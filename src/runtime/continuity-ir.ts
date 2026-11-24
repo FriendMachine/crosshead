@@ -10,7 +10,8 @@ const exportWorkspaceState = (root: string): WorkspaceGitState | null => {
   if (!exportedStates.has(root)) {
     let state: WorkspaceGitState | null = null;
     try { state = root ? readWorkspaceGitState(root) : null; } catch { state = null; }
-    exportedStates.set(root, state);
+    // A capsule leaves this machine: commit, branch and dirty state only, no untracked names or content hashes.
+    exportedStates.set(root, state ? { head: state.head, branch: state.branch, dirty: state.dirty, untracked: [] } : null);
     setTimeout(() => exportedStates.delete(root), 1000).unref?.();
   }
   return exportedStates.get(root) ?? null;
@@ -163,7 +164,7 @@ export type ContinuityIr = {
     createdAt: string;
     captureKind: "session" | "turn";
     workspaceRootRedacted: boolean;
-    /** Git state of the exporting workspace (relative names only), so an import elsewhere can warn on drift. */
+    /** Git state of the exporting workspace (commit, branch, dirty; no file names), so an import elsewhere can warn on drift. */
     workspace?: WorkspaceGitState;
   };
 };
@@ -583,8 +584,11 @@ export const buildContinuityFidelityReport = (input: {
 
 export const normalizeCapturedContextToContinuityIr = (
   captured: CapturedContinuityContext,
-  targetRuntime: ContinuityRuntime | null = null
+  targetRuntime: ContinuityRuntime | null = null,
+  options: { workspaceState?: boolean } = {}
 ): ContinuityTranslationResult => {
+  // Only a host's own handoff export opts in. Capsules sent to someone else (deal handoffs) never carry it.
+  const workspaceState = options.workspaceState ? exportWorkspaceState(captured.workspaceRoot) : null;
   const fieldEffects: ContinuityFieldEffect[] = [
     {
       field: "operationalContext.workspaceRoot",
@@ -654,7 +658,7 @@ export const normalizeCapturedContextToContinuityIr = (
       createdAt: new Date().toISOString(),
       captureKind: captured.turnId ? "turn" : "session",
       workspaceRootRedacted: true,
-      ...(exportWorkspaceState(captured.workspaceRoot) ? { workspace: exportWorkspaceState(captured.workspaceRoot)! } : {}),
+      ...(workspaceState ? { workspace: workspaceState } : {}),
     },
   };
 
