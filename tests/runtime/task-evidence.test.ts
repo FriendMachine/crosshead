@@ -177,4 +177,21 @@ describe("source-backed task continuity", () => {
   it("reports missing transcripts without pretending capture was complete", () => {
     expect(readTaskEvidence("/missing/task.jsonl", "s", "/workspace")).toEqual({ version: 1, sources: [], coverage: "unavailable", omitted: 0 });
   });
+
+  it("drops excerpts changed on disk, names them first, and does not ask to reconcile with a dropped version", () => {
+    const src = (source: string, text: string, _id: string) => ({ source, text, sha256: "", truncated: false });
+    const evidence = normalizeTaskEvidence({ version: 1, sources: [src("a.md", "old a", "1"), src("a.md", "new a", "2"), src("b.md", "old b", "3"), src("c.md", "c body", "4")] })!;
+    const onDisk: Record<string, string> = { "a.md": "new a", "b.md": "b now", "c.md": "c body" };
+    const context = { workspaceRoot: "/w", head: null, fileState: (file: string, text: string) => (onDisk[file] === text ? "same" : "changed") as "same" | "changed" };
+    const rendered = renderTaskEvidence(evidence, 2000, "", context);
+    expect(rendered).toContain('Changed on disk since observed (old excerpts omitted; the current files are authoritative): "b.md"');
+    expect(rendered).not.toContain("old a");
+    expect(rendered).not.toContain("old b");
+    expect(rendered).not.toContain("reconcile");
+    expect(rendered).toContain('Source "a.md":\nnew a');
+    expect(rendered.indexOf("Changed on disk")).toBeLessThan(rendered.indexOf('Source "a.md"'));
+    // Nothing left to show: no header-only block.
+    const allChanged = normalizeTaskEvidence({ version: 1, sources: [src("b.md", "old b", "3")] })!;
+    expect(renderTaskEvidence(allChanged, 130, "", context)).toBe("");
+  });
 });
