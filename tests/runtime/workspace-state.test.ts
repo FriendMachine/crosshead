@@ -69,9 +69,28 @@ describe("checkpoint git state", () => {
     git(root, "commit", "-q", "-am", "change");
     const line = describeWorkspaceDrift(then, readWorkspaceGitState(root), root);
     expect(line.split("\n")).toHaveLength(1);
-    expect(line).toContain(`written at ${then.head!.slice(0, 10)} on main; now ${git(root, "rev-parse", "HEAD").slice(0, 10)}`);
+    // A commit on top of the saved one is progress: one neutral clause, no uncommitted-changes warning.
+    expect(line).toContain(`moved forward from ${then.head!.slice(0, 10)} to ${git(root, "rev-parse", "HEAD").slice(0, 10)} on main`);
     expect(line).toContain("untracked tool.py is not present here");
-    expect(line).toContain("uncommitted changes that are not in this tree");
+    expect(line).not.toContain("uncommitted changes that are not in this tree");
+  });
+
+  it("states a plain forward move without a warning, and still warns when the saved commit is not an ancestor", () => {
+    const root = repo();
+    writeFileSync(path.join(root, "rules.md"), "Batches hold 40 items.\n");
+    const then = readWorkspaceGitState(root)!;
+    expect(then.dirty).toBe(true);
+    git(root, "commit", "-q", "-am", "work");
+    const forward = describeWorkspaceDrift(then, readWorkspaceGitState(root), root);
+    expect(forward).toBe(`Workspace moved forward from ${then.head!.slice(0, 10)} to ${git(root, "rev-parse", "HEAD").slice(0, 10)} on main since this was written.`);
+    expect(forward).not.toContain("reread");
+    // History rewritten so the saved commit is not an ancestor of HEAD on the same branch: the full warning returns.
+    git(root, "checkout", "-q", "--orphan", "rewritten");
+    git(root, "commit", "-q", "-m", "unrelated");
+    git(root, "branch", "-q", "-M", "main");
+    const diverged = describeWorkspaceDrift(then, readWorkspaceGitState(root), root);
+    expect(diverged).toContain("Workspace drift (warning only");
+    expect(diverged).toContain("uncommitted changes that are not in this tree");
   });
 
   it("marks command output run at another commit and file excerpts that changed, in rendered checkpoints", () => {
@@ -92,7 +111,7 @@ describe("checkpoint git state", () => {
     writeFileSync(path.join(root, "rules.md"), "Batches hold 43 items.\n");
     git(root, "commit", "-q", "-am", "change");
     const moved = renderHotCheckpoints(stored, 4200, { root, git: readWorkspaceGitState(root) });
-    expect(moved).toContain("Workspace drift");
+    expect(moved).toContain("Workspace moved forward from");
     // The stale excerpt is dropped and the file named once; no reread instruction.
     expect(moved).toContain('Changed on disk since observed (old excerpts omitted; the current files are authoritative): "rules.md"');
     expect(moved).not.toContain("Batches hold 37 items.");

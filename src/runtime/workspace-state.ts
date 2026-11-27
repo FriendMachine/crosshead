@@ -143,6 +143,18 @@ export const sourceFilePath = (source: string): string | null => {
   return tokens.length > 1 && !last.startsWith("-") && /[./]/.test(last) && safeRelative(last) ? last : null;
 };
 
+/** Whether `ancestor` is an ancestor of (or equal to) `descendant` in the repository; false when git cannot tell. */
+const isAncestor = (workspaceRoot: string, ancestor: string, descendant: string): boolean => {
+  if (!SHA.test(ancestor) || !SHA.test(descendant)) return false;
+  try {
+    execFileSync("git", ["-C", workspaceRoot, "merge-base", "--is-ancestor", ancestor, descendant], { stdio: "ignore", timeout: GIT_TIMEOUT_MS });
+    return true;
+  } catch {
+    return false;
+  }
+};
+const forwardOnly = (notes: string[]): boolean => notes.length === 1 && notes[0]!.startsWith("moved forward from ");
+
 export const describeWorkspaceDrift = (then: WorkspaceGitState | undefined, current: WorkspaceGitState | null, workspaceRoot: string | null): string => {
   if (!then) return "";
   const notes: string[] = [];
@@ -150,10 +162,14 @@ export const describeWorkspaceDrift = (then: WorkspaceGitState | undefined, curr
     if (then.head) notes.push(`written at ${where(then)}; no git checkout is readable here`);
   } else {
     const moved = Boolean(then.head && current.head && then.head !== current.head);
-    if (moved) notes.push(`written at ${where(then)}; now ${where(current)}`);
+    // HEAD moved forward on the same branch: usually the work was committed since (often the checkpoint's own
+    // uncommitted changes). That is progress, not drift; say so in one neutral clause, without a reread warning.
+    const forward = moved && workspaceRoot !== null && (!then.branch || then.branch === current.branch) && isAncestor(workspaceRoot, then.head!, current.head!);
+    if (forward) notes.push(`moved forward from ${short(then.head)} to ${where(current)} since this was written`);
+    else if (moved) notes.push(`written at ${where(then)}; now ${where(current)}`);
     else if (then.branch && current.branch && then.branch !== current.branch) notes.push(`written on ${then.branch}; now on ${current.branch}`);
     // Same commit and still uncommitted changes here is the same working tree as far as git can tell.
-    if (then.dirty && (moved || !current.dirty)) notes.push("written with uncommitted changes that are not in this tree, so results observed then may not hold here");
+    if (then.dirty && !forward && (moved || !current.dirty)) notes.push("written with uncommitted changes that are not in this tree, so results observed then may not hold here");
     if (workspaceRoot) {
       const missing: string[] = [], changed: string[] = [];
       for (const file of then.untracked) {
@@ -169,6 +185,7 @@ export const describeWorkspaceDrift = (then: WorkspaceGitState | undefined, curr
     }
   }
   if (!notes.length) return "";
-  const line = `Workspace drift (warning only; reread before relying on saved results): ${notes.join("; ")}.`;
+  // A forward move alone is not a warning.
+  const line = forwardOnly(notes) ? `Workspace ${notes[0]}.` : `Workspace drift (warning only; reread before relying on saved results): ${notes.join("; ")}.`;
   return line.length <= MAX_DRIFT_CHARS ? line : `${line.slice(0, MAX_DRIFT_CHARS - 3)}...`;
 };
