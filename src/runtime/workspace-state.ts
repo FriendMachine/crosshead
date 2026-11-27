@@ -165,7 +165,8 @@ export const describeWorkspaceDrift = (then: WorkspaceGitState | undefined, curr
     // HEAD moved forward on the same branch: usually the work was committed since (often the checkpoint's own
     // uncommitted changes). That is progress, not drift; say so in one neutral clause, without a reread warning.
     const forward = moved && workspaceRoot !== null && (!then.branch || then.branch === current.branch) && isAncestor(workspaceRoot, then.head!, current.head!);
-    if (forward) notes.push(`moved forward from ${short(then.head)} to ${where(current)} since this was written`);
+    // Ancestry does not show the saved uncommitted changes were committed (they may have been discarded), so say that softly.
+    if (forward) notes.push(`moved forward from ${short(then.head)} to ${where(current)} since this was written${then.dirty ? " (it was written with uncommitted changes, which may or may not be in these commits)" : ""}`);
     else if (moved) notes.push(`written at ${where(then)}; now ${where(current)}`);
     else if (then.branch && current.branch && then.branch !== current.branch) notes.push(`written on ${then.branch}; now on ${current.branch}`);
     // Same commit and still uncommitted changes here is the same working tree as far as git can tell.

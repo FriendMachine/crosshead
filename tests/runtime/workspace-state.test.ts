@@ -82,7 +82,7 @@ describe("checkpoint git state", () => {
     expect(then.dirty).toBe(true);
     git(root, "commit", "-q", "-am", "work");
     const forward = describeWorkspaceDrift(then, readWorkspaceGitState(root), root);
-    expect(forward).toBe(`Workspace moved forward from ${then.head!.slice(0, 10)} to ${git(root, "rev-parse", "HEAD").slice(0, 10)} on main since this was written.`);
+    expect(forward).toBe(`Workspace moved forward from ${then.head!.slice(0, 10)} to ${git(root, "rev-parse", "HEAD").slice(0, 10)} on main since this was written (it was written with uncommitted changes, which may or may not be in these commits).`);
     expect(forward).not.toContain("reread");
     // History rewritten so the saved commit is not an ancestor of HEAD on the same branch: the full warning returns.
     git(root, "checkout", "-q", "--orphan", "rewritten");
