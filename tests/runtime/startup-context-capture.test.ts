@@ -14,8 +14,10 @@ describe("native hook capture contract", () => {
     expect(context).toContain("Distinguish observed facts from assumptions");
     expect(context).toContain("No manual hook invocation or repository memory file is needed");
     expect(context).toContain("does not authorize file changes");
-    // A saved "tests passed" is only useful with what was run, where and on which tree.
-    expect(context).toContain("give the command, working directory, commit and whether the tree had uncommitted changes");
+    // A saved "tests passed" is only useful with what was run, where and on which tree. The tree is recorded by
+    // Crosshead (evidence.workspace); asking the agent for it made it run git rev-parse/status in most sessions.
+    expect(context).toContain("give the command and working directory; Crosshead records the commit");
+    expect(context).not.toMatch(/give the command, working directory, commit/);
     expect(context).toContain("check it again live");
   });
 

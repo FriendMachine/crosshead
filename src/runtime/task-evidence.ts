@@ -395,6 +395,9 @@ export const renderTaskEvidence = (evidence: TaskEvidence, maxChars: number, goa
   let remaining = maxChars - lines[0]!.length - 1;
   // Prefer reads of paths explicitly named in the task. This is source selection,
   // not a domain-specific guess about which numerical constraint matters most.
+  // Files whose excerpt no longer matches the disk. Usually the agent edited them itself after reading, so the old
+  // excerpt is stale, not a warning: drop it and name the file once instead of showing it with a reread mark.
+  const changed: string[] = [];
   for (const source of rankTaskSources(evidence.sources, goal)) {
     const conflict = evidence.sources.some(s => s.source === source.source && s.sha256 !== source.sha256);
     let mark = "";
@@ -402,7 +405,11 @@ export const renderTaskEvidence = (evidence: TaskEvidence, maxChars: number, goa
       if (source.head && context.head && source.head !== context.head) mark = ` [ran at ${source.head.slice(0, 10)}${source.dirty ? " with uncommitted changes" : ""}; HEAD here is ${context.head.slice(0, 10)}]`;
     } else if (context && sourceFilePath(source.source)) {
       const state = context.fileState(sourceFilePath(source.source)!, source.text);
-      mark = state === "missing" ? " [not present here]" : state === "changed" ? " [changed on disk since observed; reread]" : "";
+      if (state === "changed") {
+        if (!changed.includes(source.source)) changed.push(source.source);
+        continue;
+      }
+      mark = state === "missing" ? " [not present here]" : "";
     }
     const heading = `Source ${JSON.stringify(source.source)}${conflict ? " [multiple observed versions; reconcile]" : ""}${mark}:\n`;
     const available = remaining - heading.length - 40;
@@ -411,6 +418,15 @@ export const renderTaskEvidence = (evidence: TaskEvidence, maxChars: number, goa
     const ending = source.truncated || content.length < source.text.length ? "\n[excerpt incomplete]" : "";
     lines.push(`${heading}${content}${ending}`);
     remaining -= heading.length + content.length + ending.length + 1;
+  }
+  if (changed.length && remaining > 120) {
+    let line = "Changed on disk since observed (old excerpts omitted; the current files are authoritative):";
+    for (const name of changed) {
+      if (line.length + name.length + 3 > Math.min(remaining, 600)) { line += " ..."; break; }
+      line += ` ${JSON.stringify(name)}`;
+    }
+    lines.push(line);
+    remaining -= line.length + 1;
   }
   if (evidence.omittedSources?.length && remaining > 120) {
     const names = [...new Set(evidence.omittedSources.map(entry => entry.source))];
