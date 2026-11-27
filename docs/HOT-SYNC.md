@@ -34,8 +34,9 @@ captured in (`evidence.workspace`: HEAD, branch, uncommitted changes, and up to
 commit it ran at. The field is optional and travels inside the opaque evidence,
 so older clients ignore it, and it counts toward the same 30,000-character
 budget. When the checkpoint is shown in a tree that differs, the prompt gets one
-warning line and marks on the affected excerpts. Nothing is restored or
-rewritten. Handoff capsules do not carry it yet.
+warning line and marks on the affected excerpts. An excerpt of a file that has
+changed on disk since (usually edited by the agent itself) is dropped, and the file
+is named once instead. Nothing is restored or rewritten. Handoff capsules do not carry it yet.
 
 The daemon is the only writer. Its worker discovers cloud scopes, verifies
 signatures, uses conditional reads and writes, and reconciles conflicts. It

@@ -93,7 +93,10 @@ describe("checkpoint git state", () => {
     git(root, "commit", "-q", "-am", "change");
     const moved = renderHotCheckpoints(stored, 4200, { root, git: readWorkspaceGitState(root) });
     expect(moved).toContain("Workspace drift");
-    expect(moved).toContain('Source "rules.md" [changed on disk since observed; reread]');
+    // The stale excerpt is dropped and the file named once; no reread instruction.
+    expect(moved).toContain('Changed on disk since observed (old excerpts omitted; the current files are authoritative): "rules.md"');
+    expect(moved).not.toContain("Batches hold 37 items.");
+    expect(moved).not.toContain("reread]");
     expect(moved).toContain(`Source "$ npm test" [ran at ${state.head!.slice(0, 10)}`);
   });
 
