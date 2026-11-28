@@ -262,6 +262,7 @@ export type RuntimeLifecycleEventResponse = {
   hostedMail?: boolean;
   mailNotices?: string[];
   mailNoticeToken?: string;
+  mailNoticeSources?: Record<string, string>;
   accepted: boolean;
   event: RuntimeLifecycleEvent;
   mode: RuntimeLifecycleMemoryMode;

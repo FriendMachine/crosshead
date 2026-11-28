@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, unlinkSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, rmSync } from "node:fs";
+import { nip19 } from "nostr-tools";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
@@ -17,13 +18,19 @@ function cacheName(profile: MailViewer): string {
   return createHash("sha256").update(JSON.stringify([profile.name, profile.apiBase, profile.npub])).digest("hex") + ".db";
 }
 
-export function pruneRemovedMailProfiles(state: string, profiles: MailViewer[]): void {
+export function pruneRemovedMailProfiles<T extends MailViewer>(state: string, readProfiles: () => (T | null)[]): (T | null)[] {
   const folder = path.join(state, "mail");
-  if (!existsSync(folder)) return;
-  const active = new Set(profiles.map(cacheName));
-  for (const name of readdirSync(folder)) {
-    if (/^[0-9a-f]{64}\.db$/.test(name) && !active.has(name)) unlinkSync(path.join(folder, name));
+  // Snapshot cache names first so a new profile created during this scan retains its cache.
+  const files = existsSync(folder) ? readdirSync(folder) : [];
+  const profiles = readProfiles();
+  if (profiles.every(p => p !== null)) {
+    const active = new Set(profiles.map(cacheName));
+    for (const file of files) {
+      const match = /^([0-9a-f]{64}\.db)(?:-journal|-wal|-shm)?$/.exec(file);
+      if (match && !active.has(match[1])) rmSync(path.join(folder, file), { force: true });
+    }
   }
+  return profiles;
 }
 
 function open(state: string, profile: MailViewer): DatabaseSync {
@@ -36,12 +43,15 @@ function open(state: string, profile: MailViewer): DatabaseSync {
   const db = new DatabaseSync(file);
   chmodSync(file, 0o600);
   db.exec(`PRAGMA busy_timeout=2000; PRAGMA secure_delete=ON;
+    CREATE TABLE IF NOT EXISTS notice_contacts (sender TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS notice_leases (id TEXT PRIMARY KEY, token TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS progress (scope TEXT PRIMARY KEY, cursor TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS items (
       id TEXT PRIMARY KEY, revision INTEGER NOT NULL, context TEXT, incoming INTEGER NOT NULL,
       kind TEXT NOT NULL, status TEXT NOT NULL, shown INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL
-    );`);
+    );
+    CREATE INDEX IF NOT EXISTS mail_notice_sender ON items(json_extract(data,'$.sender'), revision)
+      WHERE incoming=1 AND shown=0 AND status='unread';`);
   return db;
 }
 function readCursor(db: DatabaseSync, scope: string): string {
@@ -59,7 +69,7 @@ function transaction<T>(state: string, profile: MailViewer, work: (db: DatabaseS
       db.exec("COMMIT");
       return result;
     } catch (error) {
-      if (db.isTransaction) db.exec("ROLLBACK");
+      try { if (db.isTransaction) db.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
     }
   } finally { db.close(); }
@@ -77,7 +87,7 @@ export function applyMailPage(state: string, profile: MailViewer, after: string,
         kind=excluded.kind, status=excluded.status, data=excluded.data, shown=MAX(items.shown,excluded.shown)`);
     let cursor = after;
     for (const item of page.changes) {
-      if (!/^[0-9a-f]{64}$/.test(item.eventId) ||
+      if (!item || typeof item !== "object" || !/^[0-9a-f]{64}$/.test(item.eventId) ||
           !/^\d{1,19}$/.test(item.cursor) || BigInt(item.cursor) > 9223372036854775807n || BigInt(item.cursor) <= BigInt(cursor)) throw new Error("Invalid mail feed item");
       cursor = item.cursor;
       if ("removed" in item && item.removed === true) {
@@ -93,16 +103,33 @@ export function applyMailPage(state: string, profile: MailViewer, after: string,
     return true;
   });
 }
-export function reserveMailNotices(state: string, profile: MailViewer, now = Date.now()) {
+export function mailNoticeContacts(state: string, profile: MailViewer, change?: { action: "accept" | "remove"; npub: string }): string[] {
+  if (change) {
+    let valid = false;
+    try {
+      const key = nip19.decode(change.npub);
+      valid = key.type === "npub" && nip19.npubEncode(key.data) === change.npub;
+    } catch { /* Reject a malformed public key. */ }
+    if (!valid) throw new Error("A canonical public npub is required");
+  }
+  return transaction(state, profile, db => {
+    if (change?.action === "accept") db.prepare("INSERT OR IGNORE INTO notice_contacts VALUES(?)").run(change.npub);
+    if (change?.action === "remove") db.prepare("DELETE FROM notice_contacts WHERE sender=?").run(change.npub);
+    return db.prepare("SELECT sender FROM notice_contacts ORDER BY sender").all().map(row => String(row.sender));
+  });
+}
+
+export function reserveMailNotices(state: string, profile: MailViewer, localSenders: string[], now = Date.now()) {
   return transaction(state, profile, db => {
     db.prepare("DELETE FROM notice_leases WHERE expires <= ?").run(now);
-    const rows = db.prepare(`SELECT id FROM items WHERE incoming=1 AND shown=0 AND status='unread'
-      AND id NOT IN (SELECT id FROM notice_leases) ORDER BY revision LIMIT 5`).all();
+    const rows = db.prepare(`SELECT id, json_extract(data,'$.sender') AS sender FROM items WHERE incoming=1 AND shown=0 AND status='unread'
+      AND json_extract(data,'$.sender') IN (SELECT value FROM json_each(?) UNION SELECT sender FROM notice_contacts)
+      AND id NOT IN (SELECT id FROM notice_leases) ORDER BY revision LIMIT 5`).all(JSON.stringify(localSenders));
     const token = randomUUID();
     const reserve = db.prepare("INSERT INTO notice_leases VALUES(?,?,?)");
     const ids = rows.map(row => String(row.id));
     for (const id of ids) reserve.run(id, token, now + 30_000);
-    return { ids, token };
+    return { ids, token, sources: Object.fromEntries(rows.map(row => [String(row.id), String(row.sender)])) };
   });
 }
 export function confirmMailNotices(state: string, profile: MailViewer, token: string): void {
@@ -111,12 +138,12 @@ export function confirmMailNotices(state: string, profile: MailViewer, token: st
     db.prepare("DELETE FROM notice_leases WHERE token=?").run(token);
   });
 }
-export function readMailItem(state: string, profile: MailViewer, eventId: string): MailItem | null {
-  const db = open(state, profile);
-  try {
+export function readMailItem(state: string, profile: MailViewer, eventId: string, markShown = false): MailItem | null {
+  return transaction(state, profile, db => {
+    if (markShown) db.prepare("UPDATE items SET shown=1 WHERE id=?").run(eventId);
     const row = db.prepare("SELECT data FROM items WHERE id=?").get(eventId);
     return row ? JSON.parse(String(row.data)) as MailItem : null;
-  } finally { db.close(); }
+  });
 }
 export function inspectMailView(state: string, profile: MailViewer, view: MailView, context?: string): MailItem[] {
   if (context !== undefined && !/^ctx_[a-z0-9][a-z0-9_-]{2,127}$/.test(context)) throw new Error("Invalid context ID");

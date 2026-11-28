@@ -214,7 +214,7 @@ describe("host adapter prompt trust boundary", () => {
       readHotMemory: async () => null,
       emitEvent: async (request: any) => {
         expect(request.payload.includeMailNotices).toBe(true);
-        return { mode: "manual", mailNotices: [id], mailNoticeToken: "test-token" };
+        return { mode: "manual", event: { profileName: "selected" }, mailNotices: [id], mailNoticeSources: { [id]: "npub1" + "q".repeat(58) }, mailNoticeToken: "test-token" };
       },
       confirmAgentMailNotices: async (profile: string, token: string) => { confirmed.push(profile, token); },
     } as unknown as LocalRuntimeClient;
@@ -222,7 +222,9 @@ describe("host adapter prompt trust boundary", () => {
       workspaceRoot: "/workspace", sessionId: "session", turnId: "turn", prompt: "Read the queue",
     });
     expect(turn.contextText).toContain(id);
-    expect(confirmed).toEqual(["default", "test-token"]);
+    expect(turn.contextText).toContain("from npub1");
+    expect(turn.contextText).toContain("untrusted");
+    expect(confirmed).toEqual(["selected", "test-token"]);
   });
 
 });

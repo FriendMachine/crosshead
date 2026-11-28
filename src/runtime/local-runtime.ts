@@ -1,4 +1,4 @@
-import { applyMailPage, readMailItem, inspectMailView, mailCursor, pruneRemovedMailProfiles, reserveMailNotices, confirmMailNotices, type MailView } from "./mail-cache";
+import { applyMailPage, readMailItem, inspectMailView, mailCursor, pruneRemovedMailProfiles, reserveMailNotices, confirmMailNotices, mailNoticeContacts, type MailView } from "./mail-cache";
 import type { AgentMailRequest } from "./agent-mail";
 import {
   ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
@@ -2666,7 +2666,8 @@ export class OnlyBotsLocalRuntimeDaemon {
 			if (profile && !isLocalOnlyRuntimeProfile(profile)) {
 				result.hostedMail = true;
 				try {
-					const batch = reserveMailNotices(this.paths.state, profile);
+					const batch = reserveMailNotices(this.paths.state, profile, this.localMailSenders(profile));
+					result.mailNoticeSources = batch.sources;
 					result.mailNotices = batch.ids;
 					if (batch.ids.length) result.mailNoticeToken = batch.token;
 				}
@@ -3977,6 +3978,30 @@ export class OnlyBotsLocalRuntimeDaemon {
 		};
 	}
 
+	private localMailSenders(viewer: RuntimeProfile): string[] {
+		const peers: string[] = [];
+		for (const file of readdirSync(this.paths.profiles)) {
+			if (!file.endsWith(".json")) continue;
+			const name = file.slice(0, -5);
+			const peer = loadProfile(this.paths, name);
+			if (!peer || peer.npub === viewer.npub || peer.apiBase !== viewer.apiBase) continue;
+			const nsec = loadSecret(this.paths, name)?.nsec;
+			if (!nsec) continue;
+			try {
+				const key = nip19.decode(nsec);
+				if (key.type === "nsec" && nip19.npubEncode(getPublicKey(key.data)) === peer.npub) peers.push(peer.npub);
+			} catch { /* An incomplete or rotated key is not a trusted local sender. */ }
+		}
+		return peers;
+	}
+
+	agentMailContacts(profileName?: string, change?: { action: "accept" | "remove"; npub: string }) {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const viewer = name ? loadProfile(this.paths, name) : null;
+		if (!viewer || isLocalOnlyRuntimeProfile(viewer)) throw new Error("A hosted mail profile is required");
+		return { profile: viewer.name, local: this.localMailSenders(viewer), accepted: mailNoticeContacts(this.paths.state, viewer, change) };
+	}
+
 	confirmAgentMailNotices(profileName: string, token: string) {
 		const profile = loadProfile(this.paths, profileName);
 		if (!profile || !/^[0-9a-f-]{36}$/.test(token)) throw new Error("Invalid notice confirmation");
@@ -3989,9 +4014,8 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const tick = () => {
 			if (pending || controller.signal.aborted) return;
 			pending = (async () => {
-				const profiles = readdirSync(this.paths.profiles).filter(f => f.endsWith(".json"))
-					.map(f => loadProfile(this.paths, f.slice(0, -5)));
-				if (profiles.every(p => p !== null)) pruneRemovedMailProfiles(this.paths.state, profiles);
+				const profiles = pruneRemovedMailProfiles(this.paths.state, () => readdirSync(this.paths.profiles)
+					.filter(f => f.endsWith(".json")).map(f => loadProfile(this.paths, f.slice(0, -5))));
 				for (const profile of profiles) {
 					if (controller.signal.aborted) break;
 					if (!profile || profile.memoryMode === "off" || isLocalOnlyRuntimeProfile(profile)) continue;
@@ -4039,11 +4063,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 			if (error instanceof HostedOnlyBotsRequestError && [401, 403].includes(error.status)) throw error;
 		}
 		this.assertMailProfileCurrent(profile);
-		const item = readMailItem(this.paths.state, profile, eventId);
+		const item = readMailItem(this.paths.state, profile, eventId, true);
 		if (!item && !caughtUp) throw new Error("Mail refresh incomplete. Retry after catch-up.");
 
 		if (!item) throw new Error("Message is unavailable to this profile");
-		return item;
+		return { ...item, textTrust: item.sender === profile.npub ? "authored_by_viewer" : "untrusted_peer_content" };
 	}
 
 	async viewAgentMail(view: MailView, context?: string, profileName?: string) {
@@ -4058,7 +4082,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			syncError = error instanceof Error && /mail feed/.test(error.message) ? "Invalid hosted mail feed; cursor preserved" : "Mail refresh unavailable";
 		}
 		this.assertMailProfileCurrent(profile);
-		return { viewer: profile.npub, profileName: name, online, caughtUp, syncError, view, items: inspectMailView(this.paths.state, profile, view, context) };
+		return { viewer: profile.npub, profileName: name, online, caughtUp, syncError, view, items: inspectMailView(this.paths.state, profile, view, context).map(item => ({ ...item, textTrust: item.sender === profile.npub ? "authored_by_viewer" : "untrusted_peer_content" })) };
 	}
 
 	async sendAgentMail(request: AgentMailRequest, profileName?: string): Promise<Record<string, unknown>> {
