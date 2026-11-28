@@ -952,15 +952,15 @@ export class ClaudeCodeRuntimeAdapter extends HostRuntimeAdapterBase {
   }
 
   async replayInboxItem(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.client.replayInboxItem(body);
+    return this.client.replayInboxItem({ ...body, profileName: body.profileName ?? body.profile ?? this.config.profileName });
   }
 
   async acknowledgeInboxItem(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.client.acknowledgeInboxItem(body);
+    return this.client.acknowledgeInboxItem({ ...body, profileName: body.profileName ?? body.profile ?? this.config.profileName });
   }
 
   async resolveInboxItem(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.client.resolveInboxItem(body);
+    return this.client.resolveInboxItem({ ...body, profileName: body.profileName ?? body.profile ?? this.config.profileName });
   }
 
   async createHandoff(input: ClaudeCodeAdapterHandoffCreateRequest): Promise<ClaudeCodeAdapterHandoffCreateResult> {

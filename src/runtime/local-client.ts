@@ -1,3 +1,4 @@
+import type { AgentMailRequest } from "./agent-mail";
 import { existsSync, readFileSync } from "fs";
 import os from "os";
 import path from "path";
@@ -329,6 +330,14 @@ export class LocalRuntimeClient {
     return this.request<Record<string, unknown>>("POST", "/v1/memory/export", {
       body: profileName ? { profileName } : {},
     });
+  }
+
+  async confirmAgentMailNotices(profileName: string, token: string) {
+    return this.request("POST", "/v1/messages/mail/notices/confirm", { body: { profileName, token } });
+  }
+
+  async sendAgentMail(body: AgentMailRequest, profileName?: string): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>("POST", "/v1/messages/mail", { body: { ...body }, query: { profile: profileName } });
   }
 
   async inspectInboxState(

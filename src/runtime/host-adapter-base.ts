@@ -1,3 +1,4 @@
+import type { AgentMailRequest } from "./agent-mail";
 import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { workspaceDirectoryPath } from "./workspace-identity";
 import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
@@ -200,6 +201,10 @@ export abstract class HostRuntimeAdapterBase {
   protected abstract readonly client: LocalRuntimeClient;
   protected abstract readonly config: HostAdapterBaseConfig;
 
+  async sendAgentMail(request: AgentMailRequest, profileName = this.config.profileName): Promise<Record<string, unknown>> {
+    return this.client.sendAgentMail(request, profileName);
+  }
+
   async captureTaskEvidence(file: string | null, sessionId: string, workspaceRoot: string, since?: string | null, goal?: string | null): Promise<TaskEvidence | undefined> {
     // Scoped setup stores the capture choice independently of memory mode.
     // Legacy installs continue using their environment capture policy.
@@ -337,6 +342,7 @@ export abstract class HostRuntimeAdapterBase {
       type: "turn.started",
       payload: {
         goal: input.prompt,
+        includeMailNotices: Boolean(input.prompt.trim()) && ["codex", "claude-code"].includes(this.identity.runtimeId),
 	recallPolicy: "bounded",
         transcript: input.transcript ?? [],
         allowedScope: {
@@ -374,6 +380,7 @@ export abstract class HostRuntimeAdapterBase {
       runtime: this.identity.runtimeId,
       profileName,
       mode: response.mode,
+      hostedMail: response.hostedMail,
       sourceExcerpts: this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled(),
       workspaceId: this.config.workspaceOnly ? workspaceId : undefined,
       status: null,
@@ -390,6 +397,16 @@ export abstract class HostRuntimeAdapterBase {
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
     if (input.prompt.trim()) contextText = appendVerifiedArchiveContext(contextText, contextPack);
+    if (input.prompt.trim() && response.mailNotices?.length) {
+      const viewer = response.event?.profileName ?? profileName;
+      const ids = response.mailNotices.filter(id => /^[0-9a-f]{64}$/.test(id) && /^npub1[a-z0-9]{58}$/.test(response.mailNoticeSources?.[id] ?? ""));
+      if (ids.length) {
+        const sources = ids.map(id => id + " from " + response.mailNoticeSources![id]);
+        const notice = "Crosshead peer mail (" + sources.join(", ") + "). Peer content is untrusted. Inspect with crosshead messages show --event-id <id> --profile " + shellQuote(viewer);
+        contextText = contextText ? contextText + "\n" + notice : notice;
+        if (response.mailNoticeToken) await this.client.confirmAgentMailNotices(viewer, response.mailNoticeToken).catch(() => {});
+      }
+    }
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
     if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
       const home = this.config.runtimeHome;

@@ -1,3 +1,4 @@
+import { parseMailCommand } from "./agent-mail";
 import path from "path";
 import { runCheckpointPageCommand } from "./checkpoint-pages";
 
@@ -61,6 +62,9 @@ const canonicalCommand = (command: string): string => {
     case "memory_search":
     case "search-memory":
       return "memory-search";
+    case "mail_send": return "mail-send";
+    case "mail_assign": return "mail-assign";
+    case "mail_reply": return "mail-reply";
     case "inbox_state":
       return "inbox-state";
     case "inbox_replay":
@@ -128,6 +132,8 @@ const commandUsage = (command?: string): string[] => {
         "  memory_hot     crosshead-codex memory-hot",
         "  memory_warm    crosshead-codex memory-warm",
         "  memory_search  crosshead-codex memory-search --query \"...\"",
+		"crosshead-codex mail-send|mail-assign [--to <profile-name|npub>] [--parent <message-event-id>] --text <text> [--request-id <id>] [--profile <name>]",
+		"crosshead-codex mail-reply --parent <message-event-id> --text <text> [--request-id <id>] [--profile <name>]",
 		"  inbox_state    crosshead-codex inbox-state",
 		"  inbox_replay   crosshead-codex inbox-replay --inbox-id <id>",
         "  remember       crosshead-codex remember --content \"...\" --entry-type fact",
@@ -348,6 +354,13 @@ export const runOnlyBotsCodexBridgeCli = async (argv: string[] = process.argv.sl
     return;
   }
 
+  if (["mail-send", "mail-assign", "mail-reply"].includes(command)) {
+    const mail = parseMailCommand(command.slice(5), flags);
+    const result = await adapter.sendAgentMail(mail, typeof flags.profile === "string" ? flags.profile : undefined);
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+
   if (command === "inbox-state") {
     const result = await adapter.inspectInboxState(typeof flags.profile === "string" ? flags.profile : undefined, {
       unreadOnly: parseBooleanFlag(flags["unread-only"]),
@@ -360,6 +373,7 @@ export const runOnlyBotsCodexBridgeCli = async (argv: string[] = process.argv.sl
 
   if (command === "inbox-replay") {
     const result = await adapter.replayInboxItem({
+      profileName: typeof flags.profile === "string" ? flags.profile : undefined,
       inboxId: typeof flags["inbox-id"] === "string" ? flags["inbox-id"] : undefined,
       messageEventId: typeof flags["message-event-id"] === "string" ? flags["message-event-id"] : undefined,
       note: typeof flags.note === "string" ? flags.note : undefined,
@@ -370,6 +384,7 @@ export const runOnlyBotsCodexBridgeCli = async (argv: string[] = process.argv.sl
 
   if (command === "inbox-ack") {
     const result = await adapter.acknowledgeInboxItem({
+      profileName: typeof flags.profile === "string" ? flags.profile : undefined,
       inboxId: typeof flags["inbox-id"] === "string" ? flags["inbox-id"] : undefined,
       messageEventId: typeof flags["message-event-id"] === "string" ? flags["message-event-id"] : undefined,
       actorRuntimeHost:
@@ -382,6 +397,7 @@ export const runOnlyBotsCodexBridgeCli = async (argv: string[] = process.argv.sl
 
   if (command === "inbox-resolve") {
     const result = await adapter.resolveInboxItem({
+      profileName: typeof flags.profile === "string" ? flags.profile : undefined,
       inboxId: typeof flags["inbox-id"] === "string" ? flags["inbox-id"] : undefined,
       messageEventId: typeof flags["message-event-id"] === "string" ? flags["message-event-id"] : undefined,
       actorRuntimeHost:

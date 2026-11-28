@@ -1,4 +1,10 @@
+import { createMailBrief, renderMailBrief } from "../mail-brief";
+import { parseMailCommand } from "../agent-mail";
 import { OnlyBotsLocalRuntimeDaemon, parseArgs, truncateForPresentation } from "../local-runtime";
+
+// Keep display controls escaped even when data is printed directly in a terminal.
+const mailJson = (value: unknown): string => JSON.stringify(value, null, 2).replace(/[\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+  char => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"));
 
 const formatInboxStateForDisplay = (result: Record<string, unknown>): string => {
 	const summary =
@@ -143,6 +149,35 @@ export const messagesFromCli = async (argv: string[]): Promise<string> => {
 		? flags.messageEventId
 		: undefined;
 
+	if (subcommand === "send" || subcommand === "assign" || subcommand === "reply") {
+		const result = await daemon.sendAgentMail(parseMailCommand(subcommand, flags), profileName);
+		return JSON.stringify(result, null, 2);
+	}
+
+	if (subcommand === "contacts") {
+		const accept = flags.accept, remove = flags.remove;
+		if ((accept !== undefined && typeof accept !== "string") || (remove !== undefined && typeof remove !== "string") || (accept !== undefined && remove !== undefined)) throw new Error("Choose one of --accept <npub> or --remove <npub>");
+		const change = typeof accept === "string" ? { action: "accept" as const, npub: accept } : typeof remove === "string" ? { action: "remove" as const, npub: remove } : undefined;
+		return mailJson(daemon.agentMailContacts(profileName, change));
+	}
+	if (subcommand === "show") {
+		return mailJson(await daemon.readAgentMail(String(flags["event-id"] ?? ""), profileName));
+	}
+	if (subcommand === "brief") {
+		const contextId = typeof flags["context-id"] === "string" ? flags["context-id"] : "";
+		const consent = typeof flags["allow-analysis"] === "string" ? flags["allow-analysis"] : undefined;
+		if (consent !== "claude-code") return JSON.stringify(await createMailBrief(contextId, "", [], consent), null, 2);
+		const thread = await daemon.viewAgentMail("thread", contextId, profileName);
+		if (thread.syncError?.startsWith("Invalid hosted")) throw new Error(thread.syncError);
+		if (thread.online && !thread.caughtUp) throw new Error("Mail is still synchronizing. Run the brief again after catch-up.");
+		const brief = await createMailBrief(contextId, thread.viewer, thread.items, consent);
+		return flags.json ? JSON.stringify({ online: thread.online, ...brief }, null, 2) : renderMailBrief(brief, thread.online, thread.profileName);
+	}
+
+	if (subcommand === "needs-response" || subcommand === "waiting" || subcommand === "changed" || subcommand === "thread") {
+		return mailJson(await daemon.viewAgentMail(subcommand, flags["context-id"] === undefined ? undefined : String(flags["context-id"]), profileName));
+	}
+
 	if (subcommand === "state") {
 		const result = await daemon.inspectInboxState(
 			{
@@ -250,5 +285,5 @@ export const messagesFromCli = async (argv: string[]): Promise<string> => {
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatInboxMutationForDisplay(result);
 	}
 
-	throw new Error("messages subcommand must be one of: state, replay, ack, resolve");
+	throw new Error("messages subcommand must be one of: contacts, send, assign, reply, show, brief, thread, needs-response, waiting, changed, state, replay, ack, resolve");
 };

@@ -12,14 +12,15 @@ import { renderHotCheckpoints, selectHotCheckpoints } from "./hot-continuity";
 
 
 // The shell form reads the default profile unless told otherwise; name a non-default profile.
-const capabilityLine = (profileName: string): string => {
+const capabilityLine = (profileName: string, hostedMail: boolean): string => {
   const profile = profileName && profileName !== "default" ? ` --profile ${/^[\w.+-]+$/.test(profileName) ? profileName : `'${profileName.replace(/'/g, "'\\''")}'`}` : "";
-  return `Capabilities: memory_hot, memory_warm, memory_search, remember, inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: crosshead memory hot${profile} | crosshead memory warm${profile} | crosshead memory search "<query>"${profile} | crosshead remember "<fact>"${profile})`;
+  return `Capabilities: memory_hot, memory_warm, memory_search, remember,${hostedMail ? " mail_send, mail_assign, mail_reply," : ""} inbox_state, inbox_replay, inbox_ack, inbox_resolve (shell: ${hostedMail ? `crosshead messages needs-response${profile} | ` : ""}crosshead memory hot${profile} | crosshead memory warm${profile} | crosshead memory search "<query>"${profile} | crosshead remember "<fact>"${profile})`;
 };
 
 export type RuntimeStartupRuntime = "codex" | "claude-code" | "pi" | "hermes" | "opencode" | "agy";
 
 type RuntimeStartupContextInput = {
+  hostedMail?: boolean;
   runtime: RuntimeStartupRuntime;
   profileName: string;
   mode: RuntimeLifecycleMemoryMode;
@@ -757,7 +758,7 @@ export const renderRuntimeStartupContext = (input: RuntimeStartupContextInput): 
     formatObligationsTopLine(input.obligations),
     input.warnings.length > 0 ? `Warnings: ${input.warnings.join(" | ")}` : null,
     // Name a command that exists on every host: the capability names alone are not runnable.
-    capabilitiesNeeded ? capabilityLine(input.profileName) : null,
+    capabilitiesNeeded ? capabilityLine(input.profileName, input.hostedMail === true) : null,
   ].filter((value): value is string => value !== null && value.length > 0);
 
   return trimmedContext.length > 0 ? `${lines.join("\n")}\n\nInjected context:\n${trimmedContext}` : lines.join("\n");

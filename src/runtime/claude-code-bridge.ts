@@ -1,3 +1,4 @@
+import { parseMailCommand } from "./agent-mail";
 import { ClaudeCodeRuntimeAdapter } from "./claude-code-adapter";
 import { runCheckpointPageCommand } from "./checkpoint-pages";
 import { assertSecureNodeRuntimeVersion } from "./node-runtime-version";
@@ -65,6 +66,9 @@ const canonicalCommand = (command: string): string => {
     case "memory_warm": return "memory-warm";
     case "memory_search":
     case "memory-search": return "search-memory";
+    case "mail_send": return "mail-send";
+    case "mail_assign": return "mail-assign";
+    case "mail_reply": return "mail-reply";
     case "inbox_state": return "inbox-state";
     case "inbox_replay": return "inbox-replay";
     case "inbox_ack": return "inbox-ack";
@@ -99,6 +103,8 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
         "crosshead-claude-code memory-hot [--profile <name>] [--scope all|shared|codex|claude-code]",
         "crosshead-claude-code memory-warm [--profile <name>] [--type <type>] [--status <status>] [--include-system]",
         "crosshead-claude-code memory-search --query <text> [--top-k 10]",
+		"crosshead-claude-code mail-send|mail-assign [--to <profile-name|npub>] [--parent <message-event-id>] --text <text> [--request-id <id>] [--profile <name>]",
+		"crosshead-claude-code mail-reply --parent <message-event-id> --text <text> [--request-id <id>] [--profile <name>]",
 		"crosshead-claude-code inbox-state [--profile <name>] [--unread-only true|false] [--include-terminal true|false] [--limit <n>]",
 		"crosshead-claude-code inbox-replay (--inbox-id <id>|--message-event-id <id>) [--profile <name>] [--note <text>]",
 		"crosshead-claude-code inbox-ack (--inbox-id <id>|--message-event-id <id>) [--profile <name>] [--actor-runtime-host <host>] [--note <text>]",
@@ -310,6 +316,13 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
     return;
   }
 
+  if (["mail-send", "mail-assign", "mail-reply"].includes(command)) {
+    const mail = parseMailCommand(command.slice(5), flags);
+    const result = await adapter.sendAgentMail(mail, typeof flags.profile === "string" ? flags.profile : undefined);
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+
   if (command === "inbox-state") {
     const result = await adapter.inspectInboxState(typeof flags.profile === "string" ? flags.profile : undefined, {
       unreadOnly: parseBooleanFlag(flags["unread-only"]),
@@ -322,6 +335,7 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
 
   if (command === "inbox-replay") {
     const result = await adapter.replayInboxItem({
+      profileName: typeof flags.profile === "string" ? flags.profile : undefined,
       inboxId: typeof flags["inbox-id"] === "string" ? flags["inbox-id"] : undefined,
       messageEventId: typeof flags["message-event-id"] === "string" ? flags["message-event-id"] : undefined,
       note: typeof flags.note === "string" ? flags.note : undefined,
@@ -332,6 +346,7 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
 
   if (command === "inbox-ack") {
     const result = await adapter.acknowledgeInboxItem({
+      profileName: typeof flags.profile === "string" ? flags.profile : undefined,
       inboxId: typeof flags["inbox-id"] === "string" ? flags["inbox-id"] : undefined,
       messageEventId: typeof flags["message-event-id"] === "string" ? flags["message-event-id"] : undefined,
       actorRuntimeHost:
@@ -344,6 +359,7 @@ export const runOnlyBotsClaudeCodeBridgeCli = async (argv: string[] = process.ar
 
   if (command === "inbox-resolve") {
     const result = await adapter.resolveInboxItem({
+      profileName: typeof flags.profile === "string" ? flags.profile : undefined,
       inboxId: typeof flags["inbox-id"] === "string" ? flags["inbox-id"] : undefined,
       messageEventId: typeof flags["message-event-id"] === "string" ? flags["message-event-id"] : undefined,
       actorRuntimeHost:

@@ -1,3 +1,5 @@
+import { applyMailPage, readMailItem, inspectMailView, mailCursor, pruneRemovedMailProfiles, reserveMailNotices, confirmMailNotices, mailNoticeContacts, type MailView } from "./mail-cache";
+import type { AgentMailRequest } from "./agent-mail";
 import {
   ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
   archiveRecallIsIncomplete, getArchiveRecallPreview, listArchiveRecallApprovals, readArchiveRecallSnapshot,
@@ -2343,6 +2345,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 	private stopPromise: Promise<void> | null = null;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private idleUpdateTimer: NodeJS.Timeout | null = null;
+	private stopMailSync: (() => Promise<void>) | null = null;
 	private stopUsageSync: (() => Promise<void>) | null = null;
 	private readonly paths: RuntimePaths;
 	private readonly lifecycleManager: RuntimeLifecycleManager;
@@ -2456,6 +2459,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			}
 			this.lifecycleManager.start();
 			this.stopUsageSync = startTokenUsageSync(this.paths);
+			this.stopMailSync = this.startMailSync();
 			this.heartbeatTimer = setInterval(() => {
 				try {
 					const current = readDaemonOwnershipState(this.paths);
@@ -2536,11 +2540,14 @@ export class OnlyBotsLocalRuntimeDaemon {
 		// Observe close rejection immediately, but quiesce requests before the
 		// final lifecycle flush so an in-flight handler cannot enqueue afterward.
 		const closed = closeServer.catch(error => { failures.push(error); });
+		const mailStopped = this.stopMailSync?.().catch(error => { failures.push(error); });
+		this.stopMailSync = null;
 		const usageStopped = this.stopUsageSync?.().catch(error => { failures.push(error); });
 		this.stopUsageSync = null;
 		try { await this.organizationalWorker?.shutdown?.(); } catch (error) { failures.push(error); }
 		await closed;
 		await usageStopped;
+		await mailStopped;
 		try { await this.lifecycleManager.stop(); } catch (error) { failures.push(error); }
 		try { await stopHotSyncManagers(this.paths.state); } catch (error) { failures.push(error); }
 		try { await this.runtimeCleanup(); } catch (error) { failures.push(error); }
@@ -2653,7 +2660,21 @@ export class OnlyBotsLocalRuntimeDaemon {
 	}
 
 	async submitLifecycleEvent(request: RuntimeLifecycleEventRequest): Promise<RuntimeLifecycleEventResponse> {
-		return this.lifecycleManager.handleEvent(request);
+		const result = await this.lifecycleManager.handleEvent(request);
+		if (request.type === "turn.started" && result.accepted && result.mode !== "off" && request.payload?.includeMailNotices === true) {
+			const profile = loadProfile(this.paths, result.event.profileName);
+			if (profile && !isLocalOnlyRuntimeProfile(profile)) {
+				result.hostedMail = true;
+				try {
+					const batch = reserveMailNotices(this.paths.state, profile, this.localMailSenders(profile));
+					result.mailNoticeSources = batch.sources;
+					result.mailNotices = batch.ids;
+					if (batch.ids.length) result.mailNoticeToken = batch.token;
+				}
+				catch { result.warnings.push("Local mail notices unavailable"); }
+			}
+		}
+		return result;
 	}
 
 	async flushBackgroundWork(force: boolean = true): Promise<void> {
@@ -3955,6 +3976,139 @@ export class OnlyBotsLocalRuntimeDaemon {
 			relay_event: signedEvent,
 			publish_result: publishResult,
 		};
+	}
+
+	private localMailSenders(viewer: RuntimeProfile): string[] {
+		const peers: string[] = [];
+		for (const file of readdirSync(this.paths.profiles)) {
+			if (!file.endsWith(".json")) continue;
+			const name = file.slice(0, -5);
+			const peer = loadProfile(this.paths, name);
+			if (!peer || peer.npub === viewer.npub || peer.apiBase !== viewer.apiBase) continue;
+			const nsec = loadSecret(this.paths, name)?.nsec;
+			if (!nsec) continue;
+			try {
+				const key = nip19.decode(nsec);
+				if (key.type === "nsec" && nip19.npubEncode(getPublicKey(key.data)) === peer.npub) peers.push(peer.npub);
+			} catch { /* An incomplete or rotated key is not a trusted local sender. */ }
+		}
+		return peers;
+	}
+
+	agentMailContacts(profileName?: string, change?: { action: "accept" | "remove"; npub: string }) {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const viewer = name ? loadProfile(this.paths, name) : null;
+		if (!viewer || isLocalOnlyRuntimeProfile(viewer)) throw new Error("A hosted mail profile is required");
+		return { profile: viewer.name, local: this.localMailSenders(viewer), accepted: mailNoticeContacts(this.paths.state, viewer, change) };
+	}
+
+	confirmAgentMailNotices(profileName: string, token: string) {
+		const profile = loadProfile(this.paths, profileName);
+		if (!profile || !/^[0-9a-f-]{36}$/.test(token)) throw new Error("Invalid notice confirmation");
+		confirmMailNotices(this.paths.state, profile, token);
+	}
+
+	private startMailSync(): () => Promise<void> {
+		const controller = new AbortController();
+		let pending: Promise<void> | undefined;
+		const tick = () => {
+			if (pending || controller.signal.aborted) return;
+			pending = (async () => {
+				const profiles = pruneRemovedMailProfiles(this.paths.state, () => readdirSync(this.paths.profiles)
+					.filter(f => f.endsWith(".json")).map(f => loadProfile(this.paths, f.slice(0, -5))));
+				for (const profile of profiles) {
+					if (controller.signal.aborted) break;
+					if (!profile || profile.memoryMode === "off" || isLocalOnlyRuntimeProfile(profile)) continue;
+					try { await this.syncMail(profile.name, controller.signal); } catch { /* Retry next poll. */ }
+				}
+			})().catch(() => {}).finally(() => { pending = undefined; });
+		};
+		const timer = setInterval(tick, 30_000);
+		timer.unref();
+		tick();
+		return async () => { clearInterval(timer); controller.abort(); await pending; };
+	}
+
+	private assertMailProfileCurrent(profile: RuntimeProfile): void {
+		const current = loadProfile(this.paths, profile.name);
+		if (current?.npub !== profile.npub || current.apiBase !== profile.apiBase) throw new Error("Mail profile changed during refresh");
+	}
+
+	private async syncMail(name: string, signal?: AbortSignal): Promise<boolean> {
+		const { profile, secret, client } = this.loadProfileClient(name);
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
+		// Bound a pass so one identity with a large backlog cannot starve the next.
+		let caughtUp = false;
+		for (let pageNo = 0; pageNo < 20; pageNo++) {
+			const cursor = mailCursor(this.paths.state, profile);
+			const page = await client.fetchMailChanges(cursor, signal);
+			this.assertMailProfileCurrent(profile);
+			if (!applyMailPage(this.paths.state, profile, cursor, page)) continue;
+			if (!page.hasMore) { caughtUp = true; break; }
+		}
+		const current = loadProfile(this.paths, name);
+		if (current?.npub === profile.npub && current.apiBase === profile.apiBase && loadSecret(this.paths, name)?.nsec === secret.nsec &&
+			client.session()?.sessionToken !== secret.session?.sessionToken) await this.persistSession(name, secret, client);
+		return caughtUp;
+	}
+
+	async readAgentMail(eventId: string, profileName?: string) {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const profile = name ? loadProfile(this.paths, name) : null;
+		if (!name || !profile || !/^[a-f0-9]{64}$/.test(eventId)) throw new Error("A configured profile and valid event ID are required");
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
+		let caughtUp = false;
+		try { caughtUp = await this.syncMail(name); }
+		catch (error) {
+			if (error instanceof HostedOnlyBotsRequestError && [401, 403].includes(error.status)) throw error;
+		}
+		this.assertMailProfileCurrent(profile);
+		const item = readMailItem(this.paths.state, profile, eventId, true);
+		if (!item && !caughtUp) throw new Error("Mail refresh incomplete. Retry after catch-up.");
+
+		if (!item) throw new Error("Message is unavailable to this profile");
+		return { ...item, textTrust: item.sender === profile.npub ? "authored_by_viewer" : "untrusted_peer_content" };
+	}
+
+	async viewAgentMail(view: MailView, context?: string, profileName?: string) {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const profile = name ? loadProfile(this.paths, name) : null;
+		if (!name || !profile) throw new Error("A configured mail profile is required");
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
+		let online = true, caughtUp = false, syncError: string | undefined;
+		try { caughtUp = await this.syncMail(name); } catch (error) {
+			if (error instanceof HostedOnlyBotsRequestError && [401, 403].includes(error.status)) throw error;
+			online = false;
+			syncError = error instanceof Error && /mail feed/.test(error.message) ? "Invalid hosted mail feed; cursor preserved" : "Mail refresh unavailable";
+		}
+		this.assertMailProfileCurrent(profile);
+		return { viewer: profile.npub, profileName: name, online, caughtUp, syncError, view, items: inspectMailView(this.paths.state, profile, view, context).map(item => ({ ...item, textTrust: item.sender === profile.npub ? "authored_by_viewer" : "untrusted_peer_content" })) };
+	}
+
+	async sendAgentMail(request: AgentMailRequest, profileName?: string): Promise<Record<string, unknown>> {
+		const session = await this.withProfileBody({ profileName });
+		let recipient = request.to;
+		if (recipient && !recipient.startsWith("npub1")) {
+			if (!isRuntimeProfileName(recipient)) throw new Error("Recipient must be a public npub or a local profile name");
+			const contact = loadProfile(this.paths, recipient);
+			if (!contact?.npub) throw new Error("Unknown recipient profile: " + recipient);
+			recipient = contact.npub;
+		}
+		try {
+			const receipt = await session.client.sendAgentMail({
+				mail_action: request.action, plaintext: request.text, request_id: request.requestId,
+				recipient_npub: recipient, parent_event_id: request.parent,
+			});
+			const activeProfile = loadProfile(this.paths, session.profileName);
+			if (activeProfile && loadSecret(this.paths, session.profileName)?.nsec === session.secret.nsec &&
+				hostedSessionMatches(session.client.session(), activeProfile.npub, normalizeApiBase(activeProfile.apiBase).serviceBaseUrl)) {
+				await this.persistSession(session.profileName, session.secret, session.client);
+			}
+			return receipt;
+		} catch (error) {
+			if (error instanceof HostedOnlyBotsRequestError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) throw error;
+			throw new Error(`Mail request ${request.requestId}: ${error instanceof Error ? error.message : String(error)}. Retry with --request-id ${request.requestId}`);
+		}
 	}
 
 	async inspectInboxState(

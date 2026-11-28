@@ -1,3 +1,4 @@
+import type { MailPage } from "./mail-cache";
 import { archivePackId } from "./archive-recall";
 import type { UsageSnapshot } from "../protocol/token-usage";
 import type { HotSyncSnapshot, HotSyncEnvelope } from "../protocol/hot-sync";
@@ -1047,6 +1048,20 @@ export class HostedOnlyBotsClient {
       method: "POST",
       body: { event },
       auth: true,
+    });
+    return response.data;
+  }
+
+  async fetchMailChanges(after: string, signal?: AbortSignal): Promise<MailPage> {
+    await this.ensureSession(signal);
+    const response = await this.request<MailPage>("/messages/mail/changes?after=" + encodeURIComponent(after), { auth: true, signal });
+    return response.data;
+  }
+
+  async sendAgentMail(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    await this.ensureSession();
+    const response = await this.request<Record<string, unknown>>("/messages/mail", {
+      method: "POST", auth: true, body: { ...body, signing_mode: "delegated_ephemeral" },
     });
     return response.data;
   }
