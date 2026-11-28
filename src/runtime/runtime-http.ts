@@ -1,3 +1,4 @@
+import { parseMailCommand } from "./agent-mail";
 // HTTP dispatcher for the local runtime daemon control API. The daemon owns the
 // socket lifecycle; every route delegates to a daemon method, so this module is a
 // routing layer over the daemon's public surface.
@@ -590,6 +591,16 @@ export const handleRuntimeDaemonRequest = async (
 	if (request.method === "POST" && url.pathname === "/v1/public/discovery/publish") {
 	  const body = await readBody(request);
 	  sendJson(response, 200, await daemon.publishPublicDiscoveryEvent(body, url.searchParams.get("profile") ?? undefined));
+	  return;
+	}
+	if (request.method === "POST" && url.pathname === "/v1/messages/mail") {
+	  const body = await readBody(request);
+	  const flags: Record<string, string> = {};
+	  for (const [field, flag] of [["text", "text"], ["to", "to"], ["parent", "parent"], ["requestId", "request-id"]]) {
+	    if (typeof body[field] === "string") flags[flag] = body[field] as string;
+	  }
+	  const mail = parseMailCommand(String(body.action), flags);
+	  sendJson(response, 200, await daemon.sendAgentMail(mail, url.searchParams.get("profile") ?? undefined));
 	  return;
 	}
 	if (request.method === "GET" && url.pathname === "/v1/messages/inbox/state") {

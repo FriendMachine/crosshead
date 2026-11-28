@@ -1,3 +1,5 @@
+import { createMailBrief, renderMailBrief } from "../mail-brief";
+import { parseMailCommand } from "../agent-mail";
 import { OnlyBotsLocalRuntimeDaemon, parseArgs, truncateForPresentation } from "../local-runtime";
 
 const formatInboxStateForDisplay = (result: Record<string, unknown>): string => {
@@ -143,6 +145,28 @@ export const messagesFromCli = async (argv: string[]): Promise<string> => {
 		? flags.messageEventId
 		: undefined;
 
+	if (subcommand === "send" || subcommand === "assign" || subcommand === "reply") {
+		const result = await daemon.sendAgentMail(parseMailCommand(subcommand, flags), profileName);
+		return JSON.stringify(result, null, 2);
+	}
+
+	if (subcommand === "show") {
+		return JSON.stringify(await daemon.readAgentMail(String(flags["event-id"] ?? ""), profileName), null, 2);
+	}
+	if (subcommand === "brief") {
+		const contextId = typeof flags["context-id"] === "string" ? flags["context-id"] : "";
+		const consent = typeof flags["allow-analysis"] === "string" ? flags["allow-analysis"] : undefined;
+		if (consent !== "claude-code") return JSON.stringify(await createMailBrief(contextId, "", [], consent), null, 2);
+		const thread = await daemon.viewAgentMail("thread", contextId, profileName);
+		if (thread.online && !thread.caughtUp) throw new Error("Mail is still synchronizing. Run the brief again after catch-up.");
+		const brief = await createMailBrief(contextId, thread.viewer, thread.items, consent);
+		return flags.json ? JSON.stringify({ online: thread.online, ...brief }, null, 2) : renderMailBrief(brief, thread.online);
+	}
+
+	if (subcommand === "needs-response" || subcommand === "waiting" || subcommand === "changed" || subcommand === "thread") {
+		return JSON.stringify(await daemon.viewAgentMail(subcommand, typeof flags["context-id"] === "string" ? flags["context-id"] : undefined, profileName), null, 2);
+	}
+
 	if (subcommand === "state") {
 		const result = await daemon.inspectInboxState(
 			{
@@ -250,5 +274,5 @@ export const messagesFromCli = async (argv: string[]): Promise<string> => {
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatInboxMutationForDisplay(result);
 	}
 
-	throw new Error("messages subcommand must be one of: state, replay, ack, resolve");
+	throw new Error("messages subcommand must be one of: send, assign, reply, state, replay, ack, resolve");
 };

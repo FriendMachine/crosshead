@@ -1,3 +1,5 @@
+import { applyMailPage, readMailItem, inspectMailView, mailCursor, takeMailNotices, type MailView } from "./mail-cache";
+import type { AgentMailRequest } from "./agent-mail";
 import {
   ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
   archiveRecallIsIncomplete, getArchiveRecallPreview, listArchiveRecallApprovals, readArchiveRecallSnapshot,
@@ -2343,6 +2345,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 	private stopPromise: Promise<void> | null = null;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private idleUpdateTimer: NodeJS.Timeout | null = null;
+	private stopMailSync: (() => Promise<void>) | null = null;
 	private stopUsageSync: (() => Promise<void>) | null = null;
 	private readonly paths: RuntimePaths;
 	private readonly lifecycleManager: RuntimeLifecycleManager;
@@ -2456,6 +2459,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			}
 			this.lifecycleManager.start();
 			this.stopUsageSync = startTokenUsageSync(this.paths);
+			this.stopMailSync = this.startMailSync();
 			this.heartbeatTimer = setInterval(() => {
 				try {
 					const current = readDaemonOwnershipState(this.paths);
@@ -2536,11 +2540,14 @@ export class OnlyBotsLocalRuntimeDaemon {
 		// Observe close rejection immediately, but quiesce requests before the
 		// final lifecycle flush so an in-flight handler cannot enqueue afterward.
 		const closed = closeServer.catch(error => { failures.push(error); });
+		const mailStopped = this.stopMailSync?.().catch(error => { failures.push(error); });
+		this.stopMailSync = null;
 		const usageStopped = this.stopUsageSync?.().catch(error => { failures.push(error); });
 		this.stopUsageSync = null;
 		try { await this.organizationalWorker?.shutdown?.(); } catch (error) { failures.push(error); }
 		await closed;
 		await usageStopped;
+		await mailStopped;
 		try { await this.lifecycleManager.stop(); } catch (error) { failures.push(error); }
 		try { await stopHotSyncManagers(this.paths.state); } catch (error) { failures.push(error); }
 		try { await this.runtimeCleanup(); } catch (error) { failures.push(error); }
@@ -2653,7 +2660,15 @@ export class OnlyBotsLocalRuntimeDaemon {
 	}
 
 	async submitLifecycleEvent(request: RuntimeLifecycleEventRequest): Promise<RuntimeLifecycleEventResponse> {
-		return this.lifecycleManager.handleEvent(request);
+		const result = await this.lifecycleManager.handleEvent(request);
+		if (request.type === "turn.started" && result.accepted && result.mode !== "off" && request.payload?.goal) {
+			const profile = loadProfile(this.paths, result.event.profileName);
+			if (profile && !isLocalOnlyRuntimeProfile(profile)) {
+				try { result.mailNotices = takeMailNotices(this.paths.state, profile); }
+				catch { result.warnings.push("Local mail notices unavailable"); }
+			}
+		}
+		return result;
 	}
 
 	async flushBackgroundWork(force: boolean = true): Promise<void> {
@@ -3955,6 +3970,88 @@ export class OnlyBotsLocalRuntimeDaemon {
 			relay_event: signedEvent,
 			publish_result: publishResult,
 		};
+	}
+
+	private startMailSync(): () => Promise<void> {
+		const controller = new AbortController();
+		let pending: Promise<void> | undefined;
+		const tick = () => {
+			if (pending || controller.signal.aborted) return;
+			pending = (async () => {
+				for (const file of readdirSync(this.paths.profiles)) {
+					if (controller.signal.aborted) break;
+					if (!file.endsWith(".json")) continue;
+					const name = file.slice(0, -5);
+					const profile = loadProfile(this.paths, name);
+					if (!profile || isLocalOnlyRuntimeProfile(profile)) continue;
+					try { await this.syncMail(name, controller.signal); } catch { /* Resume from last committed page next poll. */ }
+				}
+			})().catch(() => {}).finally(() => { pending = undefined; });
+		};
+		const timer = setInterval(tick, 30_000);
+		timer.unref();
+		tick();
+		return async () => { clearInterval(timer); controller.abort(); await pending; };
+	}
+
+	private async syncMail(name: string, signal?: AbortSignal): Promise<boolean> {
+		const { profile, secret, client } = this.loadProfileClient(name);
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
+		// Bound a pass so one identity with a large backlog cannot starve the next.
+		let caughtUp = false;
+		for (let pageNo = 0; pageNo < 20; pageNo++) {
+			const cursor = mailCursor(this.paths.state, profile);
+			const page = await client.fetchMailChanges(cursor, signal);
+			applyMailPage(this.paths.state, profile, cursor, page);
+			if (!page.hasMore) { caughtUp = true; break; }
+		}
+		const current = loadProfile(this.paths, name);
+		if (current?.npub === profile.npub && current.apiBase === profile.apiBase && loadSecret(this.paths, name)?.nsec === secret.nsec &&
+			client.session()?.sessionToken !== secret.session?.sessionToken) await this.persistSession(name, secret, client);
+		return caughtUp;
+	}
+
+	async readAgentMail(eventId: string, profileName?: string) {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const profile = name ? loadProfile(this.paths, name) : null;
+		if (!name || !profile || !/^[a-f0-9]{64}$/.test(eventId)) throw new Error("A configured profile and valid event ID are required");
+		let item = readMailItem(this.paths.state, profile, eventId);
+		if (!item) {
+			await this.syncMail(name);
+			item = readMailItem(this.paths.state, profile, eventId);
+		}
+		if (!item) throw new Error("Message is unavailable to this profile");
+		return item;
+	}
+
+	async viewAgentMail(view: MailView, context?: string, profileName?: string) {
+		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
+		const profile = name ? loadProfile(this.paths, name) : null;
+		if (!name || !profile) throw new Error("A configured mail profile is required");
+		let online = true, caughtUp = false;
+		try { caughtUp = await this.syncMail(name); } catch { online = false; }
+		return { viewer: profile.npub, online, caughtUp, view, items: inspectMailView(this.paths.state, profile, view, context) };
+	}
+
+	async sendAgentMail(request: AgentMailRequest, profileName?: string): Promise<Record<string, unknown>> {
+		const session = await this.withProfileBody({ profileName });
+		let recipient = request.to;
+		if (recipient && !recipient.startsWith("npub1")) {
+			if (!isRuntimeProfileName(recipient)) throw new Error("Recipient must be a public npub or a local profile name");
+			const contact = loadProfile(this.paths, recipient);
+			if (!contact?.npub) throw new Error("Unknown recipient profile: " + recipient);
+			recipient = contact.npub;
+		}
+		try {
+			const receipt = await session.client.sendAgentMail({
+				mail_action: request.action, plaintext: request.text, request_id: request.requestId,
+				recipient_npub: recipient, parent_event_id: request.parent,
+			});
+			await this.persistSession(session.profileName, session.secret, session.client);
+			return receipt;
+		} catch (error) {
+			throw new Error(`Mail request ${request.requestId}: ${error instanceof Error ? error.message : String(error)}. Retry with --request-id ${request.requestId}`);
+		}
 	}
 
 	async inspectInboxState(

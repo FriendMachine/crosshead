@@ -259,6 +259,7 @@ export type RuntimeLifecycleActivity = {
 };
 
 export type RuntimeLifecycleEventResponse = {
+  mailNotices?: string[];
   accepted: boolean;
   event: RuntimeLifecycleEvent;
   mode: RuntimeLifecycleMemoryMode;

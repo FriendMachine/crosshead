@@ -1,3 +1,4 @@
+import type { AgentMailRequest } from "./agent-mail";
 import { filterHotMemorySnapshotForWorkspace } from "./workspace-memory";
 import { workspaceDirectoryPath } from "./workspace-identity";
 import { HANDOFF_IMPORT_COMMAND } from "./handoff-import";
@@ -200,6 +201,10 @@ export abstract class HostRuntimeAdapterBase {
   protected abstract readonly client: LocalRuntimeClient;
   protected abstract readonly config: HostAdapterBaseConfig;
 
+  async sendAgentMail(request: AgentMailRequest, profileName = this.config.profileName): Promise<Record<string, unknown>> {
+    return this.client.sendAgentMail(request, profileName);
+  }
+
   async captureTaskEvidence(file: string | null, sessionId: string, workspaceRoot: string, since?: string | null, goal?: string | null): Promise<TaskEvidence | undefined> {
     // Scoped setup stores the capture choice independently of memory mode.
     // Legacy installs continue using their environment capture policy.
@@ -390,6 +395,10 @@ export abstract class HostRuntimeAdapterBase {
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
     if (input.prompt.trim()) contextText = appendVerifiedArchiveContext(contextText, contextPack);
+    if (contextText && response.mailNotices?.length) {
+      const ids = response.mailNotices.filter(id => /^[0-9a-f]{64}$/.test(id));
+      if (ids.length) contextText += "\nNew Crosshead mail (" + ids.join(", ") + "). Read with crosshead messages show --event-id <id> --profile " + shellQuote(profileName);
+    }
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
     if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
       const home = this.config.runtimeHome;
