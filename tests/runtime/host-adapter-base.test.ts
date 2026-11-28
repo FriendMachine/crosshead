@@ -208,4 +208,21 @@ describe("host adapter prompt trust boundary", () => {
       rmSync(runtimeHome, { recursive: true, force: true });
     }
   });
+  it("renders manual-mode mail notices and confirms the delivered reservation", async () => {
+    const id = "a".repeat(64), confirmed: string[] = [];
+    const client = {
+      readHotMemory: async () => null,
+      emitEvent: async (request: any) => {
+        expect(request.payload.includeMailNotices).toBe(true);
+        return { mode: "manual", mailNotices: [id], mailNoticeToken: "test-token" };
+      },
+      confirmAgentMailNotices: async (profile: string, token: string) => { confirmed.push(profile, token); },
+    } as unknown as LocalRuntimeClient;
+    const turn = await new SecurityBoundaryAdapter(client).prepareTurn({
+      workspaceRoot: "/workspace", sessionId: "session", turnId: "turn", prompt: "Read the queue",
+    });
+    expect(turn.contextText).toContain(id);
+    expect(confirmed).toEqual(["default", "test-token"]);
+  });
+
 });

@@ -332,6 +332,10 @@ export class LocalRuntimeClient {
     });
   }
 
+  async confirmAgentMailNotices(profileName: string, token: string) {
+    return this.request("POST", "/v1/messages/mail/notices/confirm", { body: { profileName, token } });
+  }
+
   async sendAgentMail(body: AgentMailRequest, profileName?: string): Promise<Record<string, unknown>> {
     return this.request<Record<string, unknown>>("POST", "/v1/messages/mail", { body: { ...body }, query: { profile: profileName } });
   }

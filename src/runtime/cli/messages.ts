@@ -158,13 +158,14 @@ export const messagesFromCli = async (argv: string[]): Promise<string> => {
 		const consent = typeof flags["allow-analysis"] === "string" ? flags["allow-analysis"] : undefined;
 		if (consent !== "claude-code") return JSON.stringify(await createMailBrief(contextId, "", [], consent), null, 2);
 		const thread = await daemon.viewAgentMail("thread", contextId, profileName);
+		if (thread.syncError?.startsWith("Invalid hosted")) throw new Error(thread.syncError);
 		if (thread.online && !thread.caughtUp) throw new Error("Mail is still synchronizing. Run the brief again after catch-up.");
 		const brief = await createMailBrief(contextId, thread.viewer, thread.items, consent);
-		return flags.json ? JSON.stringify({ online: thread.online, ...brief }, null, 2) : renderMailBrief(brief, thread.online);
+		return flags.json ? JSON.stringify({ online: thread.online, ...brief }, null, 2) : renderMailBrief(brief, thread.online, thread.profileName);
 	}
 
 	if (subcommand === "needs-response" || subcommand === "waiting" || subcommand === "changed" || subcommand === "thread") {
-		return JSON.stringify(await daemon.viewAgentMail(subcommand, typeof flags["context-id"] === "string" ? flags["context-id"] : undefined, profileName), null, 2);
+		return JSON.stringify(await daemon.viewAgentMail(subcommand, flags["context-id"] === undefined ? undefined : String(flags["context-id"]), profileName), null, 2);
 	}
 
 	if (subcommand === "state") {
@@ -274,5 +275,5 @@ export const messagesFromCli = async (argv: string[]): Promise<string> => {
 		return flags.json || flags.debug ? JSON.stringify(result, null, 2) : formatInboxMutationForDisplay(result);
 	}
 
-	throw new Error("messages subcommand must be one of: send, assign, reply, state, replay, ack, resolve");
+	throw new Error("messages subcommand must be one of: send, assign, reply, show, brief, thread, needs-response, waiting, changed, state, replay, ack, resolve");
 };

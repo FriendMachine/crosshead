@@ -1,4 +1,4 @@
-import { applyMailPage, readMailItem, inspectMailView, mailCursor, takeMailNotices, type MailView } from "./mail-cache";
+import { applyMailPage, readMailItem, inspectMailView, mailCursor, pruneRemovedMailProfiles, reserveMailNotices, confirmMailNotices, type MailView } from "./mail-cache";
 import type { AgentMailRequest } from "./agent-mail";
 import {
   ARCHIVE_RECALL_BUDGET, MAX_ARCHIVE_RECALL_GOAL_CHARS, approveArchiveRecall, archivePackId,
@@ -2661,10 +2661,15 @@ export class OnlyBotsLocalRuntimeDaemon {
 
 	async submitLifecycleEvent(request: RuntimeLifecycleEventRequest): Promise<RuntimeLifecycleEventResponse> {
 		const result = await this.lifecycleManager.handleEvent(request);
-		if (request.type === "turn.started" && result.accepted && result.mode !== "off" && request.payload?.goal) {
+		if (request.type === "turn.started" && result.accepted && result.mode !== "off" && request.payload?.includeMailNotices === true) {
 			const profile = loadProfile(this.paths, result.event.profileName);
 			if (profile && !isLocalOnlyRuntimeProfile(profile)) {
-				try { result.mailNotices = takeMailNotices(this.paths.state, profile); }
+				result.hostedMail = true;
+				try {
+					const batch = reserveMailNotices(this.paths.state, profile);
+					result.mailNotices = batch.ids;
+					if (batch.ids.length) result.mailNoticeToken = batch.token;
+				}
 				catch { result.warnings.push("Local mail notices unavailable"); }
 			}
 		}
@@ -3972,19 +3977,25 @@ export class OnlyBotsLocalRuntimeDaemon {
 		};
 	}
 
+	confirmAgentMailNotices(profileName: string, token: string) {
+		const profile = loadProfile(this.paths, profileName);
+		if (!profile || !/^[0-9a-f-]{36}$/.test(token)) throw new Error("Invalid notice confirmation");
+		confirmMailNotices(this.paths.state, profile, token);
+	}
+
 	private startMailSync(): () => Promise<void> {
 		const controller = new AbortController();
 		let pending: Promise<void> | undefined;
 		const tick = () => {
 			if (pending || controller.signal.aborted) return;
 			pending = (async () => {
-				for (const file of readdirSync(this.paths.profiles)) {
+				const profiles = readdirSync(this.paths.profiles).filter(f => f.endsWith(".json"))
+					.map(f => loadProfile(this.paths, f.slice(0, -5)));
+				if (profiles.every(p => p !== null)) pruneRemovedMailProfiles(this.paths.state, profiles);
+				for (const profile of profiles) {
 					if (controller.signal.aborted) break;
-					if (!file.endsWith(".json")) continue;
-					const name = file.slice(0, -5);
-					const profile = loadProfile(this.paths, name);
-					if (!profile || isLocalOnlyRuntimeProfile(profile)) continue;
-					try { await this.syncMail(name, controller.signal); } catch { /* Resume from last committed page next poll. */ }
+					if (!profile || profile.memoryMode === "off" || isLocalOnlyRuntimeProfile(profile)) continue;
+					try { await this.syncMail(profile.name, controller.signal); } catch { /* Retry next poll. */ }
 				}
 			})().catch(() => {}).finally(() => { pending = undefined; });
 		};
@@ -4002,7 +4013,9 @@ export class OnlyBotsLocalRuntimeDaemon {
 		for (let pageNo = 0; pageNo < 20; pageNo++) {
 			const cursor = mailCursor(this.paths.state, profile);
 			const page = await client.fetchMailChanges(cursor, signal);
-			applyMailPage(this.paths.state, profile, cursor, page);
+			const current = loadProfile(this.paths, name);
+			if (current?.npub !== profile.npub || current.apiBase !== profile.apiBase) throw new Error("Mail profile changed during refresh");
+			if (!applyMailPage(this.paths.state, profile, cursor, page)) continue;
 			if (!page.hasMore) { caughtUp = true; break; }
 		}
 		const current = loadProfile(this.paths, name);
@@ -4015,11 +4028,15 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
 		const profile = name ? loadProfile(this.paths, name) : null;
 		if (!name || !profile || !/^[a-f0-9]{64}$/.test(eventId)) throw new Error("A configured profile and valid event ID are required");
-		let item = readMailItem(this.paths.state, profile, eventId);
-		if (!item) {
-			await this.syncMail(name);
-			item = readMailItem(this.paths.state, profile, eventId);
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
+		let caughtUp = false;
+		try { caughtUp = await this.syncMail(name); }
+		catch (error) {
+			if (error instanceof HostedOnlyBotsRequestError && [401, 403].includes(error.status)) throw error;
 		}
+		const item = readMailItem(this.paths.state, profile, eventId);
+		if (!item && !caughtUp) throw new Error("Mail refresh incomplete. Retry after catch-up.");
+
 		if (!item) throw new Error("Message is unavailable to this profile");
 		return item;
 	}
@@ -4028,9 +4045,14 @@ export class OnlyBotsLocalRuntimeDaemon {
 		const name = profileName ?? loadRuntimeConfig(this.paths).defaultProfile;
 		const profile = name ? loadProfile(this.paths, name) : null;
 		if (!name || !profile) throw new Error("A configured mail profile is required");
-		let online = true, caughtUp = false;
-		try { caughtUp = await this.syncMail(name); } catch { online = false; }
-		return { viewer: profile.npub, online, caughtUp, view, items: inspectMailView(this.paths.state, profile, view, context) };
+		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
+		let online = true, caughtUp = false, syncError: string | undefined;
+		try { caughtUp = await this.syncMail(name); } catch (error) {
+			if (error instanceof HostedOnlyBotsRequestError && [401, 403].includes(error.status)) throw error;
+			online = false;
+			syncError = error instanceof Error && /mail feed/.test(error.message) ? "Invalid hosted mail feed; cursor preserved" : "Mail refresh unavailable";
+		}
+		return { viewer: profile.npub, profileName: name, online, caughtUp, syncError, view, items: inspectMailView(this.paths.state, profile, view, context) };
 	}
 
 	async sendAgentMail(request: AgentMailRequest, profileName?: string): Promise<Record<string, unknown>> {
@@ -4050,6 +4072,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			await this.persistSession(session.profileName, session.secret, session.client);
 			return receipt;
 		} catch (error) {
+			if (error instanceof HostedOnlyBotsRequestError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) throw error;
 			throw new Error(`Mail request ${request.requestId}: ${error instanceof Error ? error.message : String(error)}. Retry with --request-id ${request.requestId}`);
 		}
 	}

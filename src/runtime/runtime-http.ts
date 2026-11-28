@@ -1,3 +1,4 @@
+import { HostedOnlyBotsRequestError } from "./hosted-client";
 import { parseMailCommand } from "./agent-mail";
 // HTTP dispatcher for the local runtime daemon control API. The daemon owns the
 // socket lifecycle; every route delegates to a daemon method, so this module is a
@@ -593,6 +594,13 @@ export const handleRuntimeDaemonRequest = async (
 	  sendJson(response, 200, await daemon.publishPublicDiscoveryEvent(body, url.searchParams.get("profile") ?? undefined));
 	  return;
 	}
+	if (request.method === "POST" && url.pathname === "/v1/messages/mail/notices/confirm") {
+	  const body = await readBody(request);
+	  if (typeof body.profileName !== "string" || typeof body.token !== "string") throw new Error("Invalid mail confirmation");
+	  daemon.confirmAgentMailNotices(body.profileName, body.token);
+	  sendJson(response, 200, { confirmed: true });
+	  return;
+	}
 	if (request.method === "POST" && url.pathname === "/v1/messages/mail") {
 	  const body = await readBody(request);
 	  const flags: Record<string, string> = {};
@@ -710,11 +718,12 @@ export const handleRuntimeDaemonRequest = async (
 				message,
 				path: organizationalWorkerRequest ? "[organizational-worker-route]" : url.pathname,
 			});
-			sendJson(response, 400, {
+			const mailError = url.pathname === "/v1/messages/mail" && error instanceof HostedOnlyBotsRequestError ? error : undefined;
+			sendJson(response, mailError?.status ?? 400, {
 				error: {
 					code: organizationalWorkerRequest
 						? "organizational_worker_request_failed"
-						: "bad_request",
+						: mailError?.code ?? "bad_request",
 					message,
 				},
 			});

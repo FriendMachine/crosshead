@@ -1,27 +1,42 @@
-import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 export type MailViewer = { name: string; apiBase: string; npub: string };
 export type MailItem = {
-  cursor: string; eventId: string; parentEventId: string | null; contextId: string | null; taskRef: string | null;
+  notify?: boolean; cursor: string; eventId: string; parentEventId: string | null; contextId: string | null; taskRef: string | null;
   sender: string; recipient: string; kind: string; status: string; text: string; artifactRefs: string[];
   owner?: string | null; assignee?: string | null;
   createdAt: string; updatedAt: string; acknowledgedAt: string | null; resolvedAt: string | null;
 };
-export type MailPage = { viewer: string; changes: MailItem[]; nextCursor: string; hasMore: boolean };
+export type MailPage = { viewer: string; changes: (MailItem | { removed: true; cursor: string; eventId: string })[]; nextCursor: string; hasMore: boolean };
 export type MailView = "needs-response" | "waiting" | "changed" | "thread";
+
+function cacheName(profile: MailViewer): string {
+  return createHash("sha256").update(JSON.stringify([profile.name, profile.apiBase, profile.npub])).digest("hex") + ".db";
+}
+
+export function pruneRemovedMailProfiles(state: string, profiles: MailViewer[]): void {
+  const folder = path.join(state, "mail");
+  if (!existsSync(folder)) return;
+  const active = new Set(profiles.map(cacheName));
+  for (const name of readdirSync(folder)) {
+    if (/^[0-9a-f]{64}\.db$/.test(name) && !active.has(name)) unlinkSync(path.join(folder, name));
+  }
+}
 
 function open(state: string, profile: MailViewer): DatabaseSync {
   const folder = path.join(state, "mail");
   mkdirSync(folder, { recursive: true, mode: 0o700 });
-  const key = createHash("sha256").update(JSON.stringify([profile.name, profile.apiBase, profile.npub])).digest("hex");
-  const file = path.join(folder, key + ".db");
+  chmodSync(folder, 0o700);
+  const file = path.join(folder, cacheName(profile));
   const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  closeSync(openSync(file, "a", 0o600));
   const db = new DatabaseSync(file);
   chmodSync(file, 0o600);
-  db.exec(`PRAGMA busy_timeout=2000;
+  db.exec(`PRAGMA busy_timeout=2000; PRAGMA secure_delete=ON;
+    CREATE TABLE IF NOT EXISTS notice_leases (id TEXT PRIMARY KEY, token TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS progress (scope TEXT PRIMARY KEY, cursor TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS items (
       id TEXT PRIMARY KEY, revision INTEGER NOT NULL, context TEXT, incoming INTEGER NOT NULL,
@@ -53,29 +68,47 @@ export function mailCursor(state: string, profile: MailViewer): string {
   const db = open(state, profile);
   try { return readCursor(db, "sync"); } finally { db.close(); }
 }
-export function applyMailPage(state: string, profile: MailViewer, after: string, page: MailPage): void {
+export function applyMailPage(state: string, profile: MailViewer, after: string, page: MailPage): boolean {
   if (page.viewer !== profile.npub || !Array.isArray(page.changes)) throw new Error("Unexpected mail feed identity or format");
-  transaction(state, profile, db => {
-    if (readCursor(db, "sync") !== after) return;
-    const upsert = db.prepare(`INSERT INTO items(id,revision,context,incoming,kind,status,data) VALUES(?,?,?,?,?,?,?)
+  return transaction(state, profile, db => {
+    if (readCursor(db, "sync") !== after) return false;
+    const upsert = db.prepare(`INSERT INTO items(id,revision,context,incoming,kind,status,data,shown) VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, context=excluded.context, incoming=excluded.incoming,
-        kind=excluded.kind, status=excluded.status, data=excluded.data`);
+        kind=excluded.kind, status=excluded.status, data=excluded.data, shown=MAX(items.shown,excluded.shown)`);
     let cursor = after;
     for (const item of page.changes) {
-      if ((item.recipient !== profile.npub && item.sender !== profile.npub) || !/^[0-9a-f]{64}$/.test(item.eventId) ||
+      if (!/^[0-9a-f]{64}$/.test(item.eventId) ||
           !/^\d{1,19}$/.test(item.cursor) || BigInt(item.cursor) > 9223372036854775807n || BigInt(item.cursor) <= BigInt(cursor)) throw new Error("Invalid mail feed item");
-      upsert.run(item.eventId, item.cursor, item.contextId, Number(item.recipient === profile.npub), item.kind, item.status, JSON.stringify(item));
       cursor = item.cursor;
+      if ("removed" in item && item.removed === true) {
+        db.prepare("DELETE FROM items WHERE id=?").run(item.eventId);
+        db.prepare("DELETE FROM notice_leases WHERE id=?").run(item.eventId);
+        continue;
+      }
+      if (!("recipient" in item) || (item.recipient !== profile.npub && item.sender !== profile.npub)) throw new Error("Invalid mail feed participant");
+      upsert.run(item.eventId, item.cursor, item.contextId, Number(item.recipient === profile.npub), item.kind, item.status, JSON.stringify(item), Number(item.notify === false));
     }
     if (page.nextCursor !== cursor || (page.hasMore && cursor === after)) throw new Error("Invalid mail feed cursor");
     saveCursor(db, "sync", cursor);
+    return true;
   });
 }
-export function takeMailNotices(state: string, profile: MailViewer): string[] {
+export function reserveMailNotices(state: string, profile: MailViewer, now = Date.now()) {
   return transaction(state, profile, db => {
-    const rows = db.prepare("SELECT id FROM items WHERE incoming=1 AND shown=0 AND status='unread' ORDER BY revision LIMIT 5").all();
-    const shown = db.prepare("UPDATE items SET shown=1 WHERE id=?");
-    return rows.map(row => { shown.run(row.id); return String(row.id); });
+    db.prepare("DELETE FROM notice_leases WHERE expires <= ?").run(now);
+    const rows = db.prepare(`SELECT id FROM items WHERE incoming=1 AND shown=0 AND status='unread'
+      AND id NOT IN (SELECT id FROM notice_leases) ORDER BY revision LIMIT 5`).all();
+    const token = randomUUID();
+    const reserve = db.prepare("INSERT INTO notice_leases VALUES(?,?,?)");
+    const ids = rows.map(row => String(row.id));
+    for (const id of ids) reserve.run(id, token, now + 30_000);
+    return { ids, token };
+  });
+}
+export function confirmMailNotices(state: string, profile: MailViewer, token: string): void {
+  transaction(state, profile, db => {
+    db.prepare("UPDATE items SET shown=1 WHERE id IN (SELECT id FROM notice_leases WHERE token=?)").run(token);
+    db.prepare("DELETE FROM notice_leases WHERE token=?").run(token);
   });
 }
 export function readMailItem(state: string, profile: MailViewer, eventId: string): MailItem | null {
@@ -86,6 +119,7 @@ export function readMailItem(state: string, profile: MailViewer, eventId: string
   } finally { db.close(); }
 }
 export function inspectMailView(state: string, profile: MailViewer, view: MailView, context?: string): MailItem[] {
+  if (context !== undefined && !/^ctx_[a-z0-9][a-z0-9_-]{2,127}$/.test(context)) throw new Error("Invalid context ID");
   if (view === "thread" && !context) throw new Error("thread requires a context ID");
   return transaction(state, profile, db => {
     const scope = "seen:" + (context ?? "*");
@@ -99,6 +133,8 @@ export function inspectMailView(state: string, profile: MailViewer, view: MailVi
     } else if (view !== "thread") throw new Error("Unknown mail view");
     const results = db.prepare("SELECT data FROM items WHERE " + where.join(" AND ") + " ORDER BY revision").all(...values);
     if (view === "changed") saveCursor(db, scope, readCursor(db, "sync"));
-    return results.map(row => JSON.parse(String(row.data)) as MailItem);
+    const items = results.map(row => JSON.parse(String(row.data)) as MailItem);
+    if (view === "thread") items.sort((a,b) => a.createdAt.localeCompare(b.createdAt) || a.eventId.localeCompare(b.eventId));
+    return items;
   });
 }

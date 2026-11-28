@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isRuntimeProfileName } from "./runtime-env";
 import type { MailItem } from "./mail-cache";
 
 type Finding = { kind: string; suggestion: string; eventId: string; quote: string };
@@ -34,7 +35,11 @@ export async function createMailBrief(
   if (consent !== "claude-code") return { contextId, processor, analysis: "disabled", enableWith: "--allow-analysis claude-code" };
   const thread = items.filter(item => item.contextId === contextId && (item.sender === viewer || item.recipient === viewer));
   if (!thread.length) throw new Error("No visible messages in this thread");
-  const sources = thread.slice(-32).map(({ eventId, text, kind, status }) => ({ eventId, text: text.slice(0, 2400), kind, status }));
+  thread.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.eventId.localeCompare(b.eventId));
+  const sources = thread.slice(-32).map(item => ({
+    eventId: item.eventId, text: item.text.slice(0, 2400), kind: item.kind, status: item.status,
+    speaker: item.sender === viewer ? "you" : "peer", createdAt: item.createdAt, parentEventId: item.parentEventId,
+  }));
   const prompt = [
     "What changed and what still needs a decision? Return {findings:[{kind,suggestion,eventId,quote}]}.",
     "Use at most 8 findings. kind must be one of " + kinds.join(", ") + ".",
@@ -54,18 +59,25 @@ export async function createMailBrief(
   return { contextId, processor, analysis: "suggestions", messagesConsidered: sources.length, totalMessages: thread.length, findings: result };
 }
 
-export function renderMailBrief(brief: Awaited<ReturnType<typeof createMailBrief>>, online: boolean): string {
+function markdownText(value: string): string {
+  // Escape formatting and remove terminal controls and bidirectional overrides from untrusted prose.
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/[\\`*_{}\[\]()#+.!|~]/g, "\\$&");
+}
+
+export function renderMailBrief(brief: Awaited<ReturnType<typeof createMailBrief>>, online: boolean, profileName?: string): string {
   const lines = ["Thread " + brief.contextId, "Analysis by " + brief.processor + (online ? "" : " using the offline cache"), ""];
   const findings = brief.findings ?? [];
   if (!findings.length) return lines.concat("No supported findings.").join("\n");
   const sources = new Map<string, string>();
   for (const f of findings) {
-    lines.push("- " + f.kind.replaceAll("_", " ") + ": " + f.suggestion + " [Source](" + f.source.href + ")");
+    lines.push("- " + f.kind.replaceAll("_", " ") + ": " + markdownText(f.suggestion) + " [Source](" + f.source.href + ")");
     sources.set(f.source.eventId, [sources.get(f.source.eventId), f.source.quote].filter(Boolean).join("\n"));
   }
   for (const [id, quote] of sources) {
-    lines.push("", '<a id="mail-' + id + '"></a>', "Source " + id, "", ...quote.split("\n").map(line => "> " + line),
-      "", "Read the full message with `crosshead messages show --event-id " + id + "`.");
+    lines.push("", '<a id="mail-' + id + '"></a>', "Source " + id, "", ...quote.split("\n").map(line => "> " + markdownText(line)),
+      "", "Read the full message with `crosshead messages show --event-id " + id + (isRuntimeProfileName(profileName) ? " --profile " + profileName : "") + "`.");
   }
   return lines.join("\n");
 }

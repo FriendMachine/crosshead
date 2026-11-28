@@ -15,6 +15,10 @@ it("requires explicit consent, cites the visible thread and rejects a fabricated
   expect(analyze.mock.calls[0][0]).not.toMatch(/other-thread-secret|third-party-message/);
   expect(renderMailBrief(brief, true)).toContain("[Source](#mail-" + eventId + ")");
   expect(renderMailBrief(brief, true)).toContain('id="mail-' + eventId + '"');
+  expect(JSON.parse(analyze.mock.calls[0][0].split("\n").at(-1)!)[0].speaker).toBe("peer");
+  const formatted = renderMailBrief({ ...brief, findings: brief.findings!.map(f => ({ ...f, suggestion: "Click [link](url)\n<img src=x>\x1b[2J" })) }, true, "reviewer+beta");
+  expect(formatted).not.toMatch(/<img|\x1b|\[link\]\(url\)/);
+  expect(formatted).toContain("--profile reviewer+beta");
   result.findings[0].quote = "CI verified.";
   await expect(createMailBrief(context, "reader", [mail], "claude-code", analyze)).rejects.toThrow("unsupported citation");
 });

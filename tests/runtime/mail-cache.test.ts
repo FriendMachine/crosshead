@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { applyMailPage, inspectMailView, mailCursor, takeMailNotices, type MailItem } from "../../src/runtime/mail-cache";
+import { applyMailPage, inspectMailView, mailCursor, pruneRemovedMailProfiles, reserveMailNotices, confirmMailNotices, type MailItem } from "../../src/runtime/mail-cache";
 
 const roots: string[] = [];
 const profile = { name: "reviewer", apiBase: "http://localhost", npub: "recipient" };
@@ -16,9 +16,14 @@ it("recovers from overlapping pages, preserves independent read markers and sepa
   const root = mkdtempSync(join(tmpdir(), "mail-test-")); roots.push(root);
   const first = { viewer: profile.npub, changes: [item], nextCursor: "1", hasMore: false };
   applyMailPage(root, profile, "0", first);
-  expect(takeMailNotices(root, profile)).toEqual([item.eventId]);
-  applyMailPage(root, profile, "0", first);
-  expect(takeMailNotices(root, profile)).toEqual([]);
+  const missingResponse = reserveMailNotices(root, profile, 1000);
+  expect(missingResponse.ids).toEqual([item.eventId]);
+  expect(reserveMailNotices(root, profile, 1001).ids).toEqual([]);
+  const retry = reserveMailNotices(root, profile, 31001);
+  expect(retry.ids).toEqual([item.eventId]);
+  confirmMailNotices(root, profile, retry.token);
+  expect(applyMailPage(root, profile, "0", first)).toBe(false);
+  expect(reserveMailNotices(root, profile).ids).toEqual([]);
   expect(inspectMailView(root, profile, "needs-response")).toEqual([item]);
   expect(inspectMailView(root, profile, "changed", "ctx_other")).toEqual([]);
   expect(inspectMailView(root, profile, "changed", "ctx_review")).toEqual([item]);
@@ -28,7 +33,7 @@ it("recovers from overlapping pages, preserves independent read markers and sepa
   const completed = { ...item, cursor: "3", status: "completed", resolvedAt: "2026-11-28T01:00:00Z" };
   applyMailPage(root, profile, "1", { viewer: profile.npub, changes: [note, completed], nextCursor: "3", hasMore: false });
   expect(inspectMailView(root, profile, "needs-response")).toEqual([]);
-  expect(takeMailNotices(root, profile)).toEqual([note.eventId]);
+  expect(reserveMailNotices(root, profile).ids).toEqual([note.eventId]);
   const retagged = { ...note, cursor: "4", contextId: "ctx_other", kind: "assignment" };
   applyMailPage(root, profile, "3", { viewer: profile.npub, changes: [retagged], nextCursor: "4", hasMore: false });
   expect(inspectMailView(root, profile, "needs-response", "ctx_other")).toEqual([retagged]);
@@ -39,6 +44,13 @@ it("recovers from overlapping pages, preserves independent read markers and sepa
   expect(() => applyMailPage(root, profile, "4", { viewer: profile.npub, changes: [{ ...item, cursor: "5" }], nextCursor: "6", hasMore: false })).toThrow();
   expect(mailCursor(root, profile)).toBe("4");
   expect(inspectMailView(root, profile, "thread", "ctx_review")).toEqual([completed]);
+  expect(() => inspectMailView(root, profile, "changed", "*")).toThrow();
+  applyMailPage(root, profile, "4", { viewer: profile.npub, changes: [{ cursor: "5", eventId: retagged.eventId, removed: true }], nextCursor: "5", hasMore: false });
+  expect(inspectMailView(root, profile, "needs-response")).toEqual([]);
+  applyMailPage(root, profile, "5", { viewer: profile.npub, changes: [{ ...item, cursor: "6", notify: false }], nextCursor: "6", hasMore: false });
+  expect(reserveMailNotices(root, profile).ids).toEqual([]);
+  pruneRemovedMailProfiles(root, [stranger]);
+  expect(mailCursor(root, profile)).toBe("0");
 });
 
 it("rejects out-of-range revisions and atomically rolls back a malformed second item", () => {

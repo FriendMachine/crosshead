@@ -259,7 +259,9 @@ export type RuntimeLifecycleActivity = {
 };
 
 export type RuntimeLifecycleEventResponse = {
+  hostedMail?: boolean;
   mailNotices?: string[];
+  mailNoticeToken?: string;
   accepted: boolean;
   event: RuntimeLifecycleEvent;
   mode: RuntimeLifecycleMemoryMode;

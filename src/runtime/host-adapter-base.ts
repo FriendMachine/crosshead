@@ -342,6 +342,7 @@ export abstract class HostRuntimeAdapterBase {
       type: "turn.started",
       payload: {
         goal: input.prompt,
+        includeMailNotices: Boolean(input.prompt.trim()) && ["codex", "claude-code"].includes(this.identity.runtimeId),
 	recallPolicy: "bounded",
         transcript: input.transcript ?? [],
         allowedScope: {
@@ -379,6 +380,7 @@ export abstract class HostRuntimeAdapterBase {
       runtime: this.identity.runtimeId,
       profileName,
       mode: response.mode,
+      hostedMail: response.hostedMail,
       sourceExcerpts: this.config.sourceExcerpts ?? taskEvidenceCaptureEnabled(),
       workspaceId: this.config.workspaceOnly ? workspaceId : undefined,
       status: null,
@@ -395,9 +397,13 @@ export abstract class HostRuntimeAdapterBase {
       hotContextText: this.renderHotContext(preTurnHotMemory, input.prompt, workspaceId, input.sessionStart === true),
     }) : "";
     if (input.prompt.trim()) contextText = appendVerifiedArchiveContext(contextText, contextPack);
-    if (contextText && response.mailNotices?.length) {
+    if (input.prompt.trim() && response.mailNotices?.length) {
       const ids = response.mailNotices.filter(id => /^[0-9a-f]{64}$/.test(id));
-      if (ids.length) contextText += "\nNew Crosshead mail (" + ids.join(", ") + "). Read with crosshead messages show --event-id <id> --profile " + shellQuote(profileName);
+      if (ids.length) {
+        const notice = "New Crosshead mail (" + ids.join(", ") + "). Read with crosshead messages show --event-id <id> --profile " + shellQuote(profileName);
+        contextText = contextText ? contextText + "\n" + notice : notice;
+        if (response.mailNoticeToken) await this.client.confirmAgentMailNotices(profileName, response.mailNoticeToken).catch(() => {});
+      }
     }
     const supportsSubagents = this.identity.runtimeId === "codex" || this.identity.runtimeId === "claude-code";
     if (contextText && input.sessionStart && supportsSubagents && (response.mode === "assist" || response.mode === "auto")) {
