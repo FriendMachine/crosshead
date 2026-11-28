@@ -4005,6 +4005,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 		return async () => { clearInterval(timer); controller.abort(); await pending; };
 	}
 
+	private assertMailProfileCurrent(profile: RuntimeProfile): void {
+		const current = loadProfile(this.paths, profile.name);
+		if (current?.npub !== profile.npub || current.apiBase !== profile.apiBase) throw new Error("Mail profile changed during refresh");
+	}
+
 	private async syncMail(name: string, signal?: AbortSignal): Promise<boolean> {
 		const { profile, secret, client } = this.loadProfileClient(name);
 		if (isLocalOnlyRuntimeProfile(profile)) throw new Error("Agent mail requires a hosted identity");
@@ -4013,8 +4018,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		for (let pageNo = 0; pageNo < 20; pageNo++) {
 			const cursor = mailCursor(this.paths.state, profile);
 			const page = await client.fetchMailChanges(cursor, signal);
-			const current = loadProfile(this.paths, name);
-			if (current?.npub !== profile.npub || current.apiBase !== profile.apiBase) throw new Error("Mail profile changed during refresh");
+			this.assertMailProfileCurrent(profile);
 			if (!applyMailPage(this.paths.state, profile, cursor, page)) continue;
 			if (!page.hasMore) { caughtUp = true; break; }
 		}
@@ -4034,6 +4038,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 		catch (error) {
 			if (error instanceof HostedOnlyBotsRequestError && [401, 403].includes(error.status)) throw error;
 		}
+		this.assertMailProfileCurrent(profile);
 		const item = readMailItem(this.paths.state, profile, eventId);
 		if (!item && !caughtUp) throw new Error("Mail refresh incomplete. Retry after catch-up.");
 
@@ -4052,6 +4057,7 @@ export class OnlyBotsLocalRuntimeDaemon {
 			online = false;
 			syncError = error instanceof Error && /mail feed/.test(error.message) ? "Invalid hosted mail feed; cursor preserved" : "Mail refresh unavailable";
 		}
+		this.assertMailProfileCurrent(profile);
 		return { viewer: profile.npub, profileName: name, online, caughtUp, syncError, view, items: inspectMailView(this.paths.state, profile, view, context) };
 	}
 
@@ -4069,7 +4075,11 @@ export class OnlyBotsLocalRuntimeDaemon {
 				mail_action: request.action, plaintext: request.text, request_id: request.requestId,
 				recipient_npub: recipient, parent_event_id: request.parent,
 			});
-			await this.persistSession(session.profileName, session.secret, session.client);
+			const activeProfile = loadProfile(this.paths, session.profileName);
+			if (activeProfile && loadSecret(this.paths, session.profileName)?.nsec === session.secret.nsec &&
+				hostedSessionMatches(session.client.session(), activeProfile.npub, normalizeApiBase(activeProfile.apiBase).serviceBaseUrl)) {
+				await this.persistSession(session.profileName, session.secret, session.client);
+			}
 			return receipt;
 		} catch (error) {
 			if (error instanceof HostedOnlyBotsRequestError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) throw error;
