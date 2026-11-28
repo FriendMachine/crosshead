@@ -58,7 +58,8 @@ export function applyMailPage(state: string, profile: MailViewer, after: string,
   transaction(state, profile, db => {
     if (readCursor(db, "sync") !== after) return;
     const upsert = db.prepare(`INSERT INTO items(id,revision,context,incoming,kind,status,data) VALUES(?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, status=excluded.status, data=excluded.data`);
+      ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, context=excluded.context, incoming=excluded.incoming,
+        kind=excluded.kind, status=excluded.status, data=excluded.data`);
     let cursor = after;
     for (const item of page.changes) {
       if ((item.recipient !== profile.npub && item.sender !== profile.npub) || !/^[0-9a-f]{64}$/.test(item.eventId) ||

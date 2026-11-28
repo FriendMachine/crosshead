@@ -29,13 +29,16 @@ it("recovers from overlapping pages, preserves independent read markers and sepa
   applyMailPage(root, profile, "1", { viewer: profile.npub, changes: [note, completed], nextCursor: "3", hasMore: false });
   expect(inspectMailView(root, profile, "needs-response")).toEqual([]);
   expect(takeMailNotices(root, profile)).toEqual([note.eventId]);
+  const retagged = { ...note, cursor: "4", contextId: "ctx_other", kind: "assignment" };
+  applyMailPage(root, profile, "3", { viewer: profile.npub, changes: [retagged], nextCursor: "4", hasMore: false });
+  expect(inspectMailView(root, profile, "needs-response", "ctx_other")).toEqual([retagged]);
   const stranger = { ...profile, npub: "different-public-key" };
   expect(mailCursor(root, stranger)).toBe("0");
   expect(() => applyMailPage(root, stranger, "0", first)).toThrow();
   expect(inspectMailView(root, stranger, "thread", "ctx_review")).toEqual([]);
-  expect(() => applyMailPage(root, profile, "3", { viewer: profile.npub, changes: [{ ...item, cursor: "4" }], nextCursor: "5", hasMore: false })).toThrow();
-  expect(mailCursor(root, profile)).toBe("3");
-  expect(inspectMailView(root, profile, "thread", "ctx_review")).toEqual([note, completed]);
+  expect(() => applyMailPage(root, profile, "4", { viewer: profile.npub, changes: [{ ...item, cursor: "5" }], nextCursor: "6", hasMore: false })).toThrow();
+  expect(mailCursor(root, profile)).toBe("4");
+  expect(inspectMailView(root, profile, "thread", "ctx_review")).toEqual([completed]);
 });
 
 it("rejects out-of-range revisions and atomically rolls back a malformed second item", () => {
